@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -47,6 +48,11 @@ type pull struct {
 	URL   string `json:"html_url"`
 }
 
+// reply is the pull request as GitHub returns it, where head is an object.
+func (p pull) reply() map[string]any {
+	return map[string]any{"html_url": p.URL, "head": map[string]string{"ref": p.Head}}
+}
+
 // fakeGitHub is the part of the GitHub REST API a runner uses, for testRepo.
 type fakeGitHub struct {
 	t *testing.T
@@ -54,6 +60,7 @@ type fakeGitHub struct {
 	onPR func()
 
 	mu       sync.Mutex
+	title    string // of every issue
 	pulls    []pull
 	comments map[string][]string // by issue number
 }
@@ -70,12 +77,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && path == "":
 		reply = map[string]string{"default_branch": "main"}
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/issues/"):
-		reply = map[string]string{"title": "Fix the Thing!", "body": "The thing is broken."}
+		reply = map[string]string{"title": f.title, "body": "The thing is broken."}
 	case r.Method == http.MethodGet && path == "/pulls":
-		found := []pull{}
+		head := r.URL.Query().Get("head")
+		found := []map[string]any{}
 		for _, p := range f.pulls {
-			if "o:"+p.Head == r.URL.Query().Get("head") {
-				found = append(found, p)
+			if head == "" || head == "o:"+p.Head {
+				found = append(found, p.reply())
 			}
 		}
 		reply = found
@@ -86,7 +94,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		p.URL = fmt.Sprintf("https://github.test/o/r/pull/%d", len(f.pulls)+1)
 		f.pulls = append(f.pulls, p)
-		reply = p
+		reply = p.reply()
 		if f.onPR != nil {
 			f.onPR()
 		}
@@ -164,7 +172,7 @@ func newWorld(t *testing.T) *world {
 	w := &world{
 		queue:    queue,
 		natsURL:  "nats://" + addr,
-		gh:       &fakeGitHub{t: t, comments: map[string][]string{}},
+		gh:       &fakeGitHub{t: t, title: "Fix the Thing!", comments: map[string][]string{}},
 		gitRoot:  t.TempDir(),
 		statuses: make(chan statusMsg, 64),
 	}
@@ -225,6 +233,7 @@ func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner,
 		GitEmail:     "schmeide[bot]@example.test",
 		Harnesses:    []harness.Harness{h},
 		AckWait:      time.Second,
+		RetryDelay:   10 * time.Millisecond,
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
@@ -407,11 +416,14 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 		name string
 		// afterPR kills the first runner right after it opened the PR, before
 		// it could acknowledge the job. Otherwise it dies mid-session.
-		afterPR      bool
+		afterPR bool
+		// retitle renames the issue once the first runner is dead.
+		retitle      bool
 		wantSessions int32
 	}{
 		{name: "dies mid-session", wantSessions: 1},
 		{name: "dies after opening the PR", afterPR: true, wantSessions: 0},
+		{name: "dies after opening the PR and the issue is retitled", afterPR: true, retitle: true, wantSessions: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -420,6 +432,9 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			// A dead runner is one the control node no longer hears from.
 			die := sync.OnceFunc(func() {
 				first.nc.Close()
+				if tt.retitle {
+					w.gh.title = "Mend the Thing" // onPR runs under the fake's lock
+				}
 				close(died)
 			})
 			h1, _ := writes(map[string]string{"fix.txt": "x"})
@@ -458,6 +473,60 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 				t.Errorf("pushed fix.txt = %q, want %q", got, "x")
 			}
 		})
+	}
+}
+
+func TestFailedJobIsRetried(t *testing.T) {
+	w := newWorld(t)
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	succeed := h.RunFunc
+	h.RunFunc = func(ctx context.Context, req harness.Request) error {
+		if sessions.Load() == 0 {
+			sessions.Add(1)
+			return errors.New("the model was overloaded")
+		}
+		return succeed(ctx, req)
+	}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working retrying claimed working pr_opened]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want exactly one", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "opened a pull request") {
+		t.Errorf("issue comments = %q, want only the one that links the PR", comments["7"])
+	}
+}
+
+func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
+	w := newWorld(t)
+	var sessions atomic.Int32
+	h := &harness.Fake{RunFunc: func(context.Context, harness.Request) error {
+		sessions.Add(1)
+		return errors.New("the model was overloaded")
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	want := "[claimed working retrying claimed working retrying claimed working failed]"
+	if got := fmt.Sprint(w.await(t, "alice", 7)); got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	// Give a wrongly redelivered job time to show up.
+	time.Sleep(3 * pollWait)
+	if got := sessions.Load(); got != defaultMaxAttempts {
+		t.Errorf("sessions = %d, want %d: the retries are bounded", got, defaultMaxAttempts)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "the model was overloaded") {
+		t.Errorf("issue comments = %q, want one reporting the final failure", comments["7"])
 	}
 }
 

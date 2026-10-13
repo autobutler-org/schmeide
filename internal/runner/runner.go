@@ -36,10 +36,11 @@ const (
 	// relative to the checkout. It is never committed.
 	prTextPath = ".schmeide/pr.md"
 
-	defaultAckWait = 30 * time.Second
-	pollWait       = time.Second
-	retryDelay     = 30 * time.Second
-	gateTailBytes  = 4000
+	defaultAckWait     = 30 * time.Second
+	defaultMaxAttempts = 3
+	defaultRetryDelay  = 30 * time.Second
+	pollWait           = time.Second
+	gateTailBytes      = 4000
 )
 
 // The messages a runner publishes are defined by the control node, which
@@ -54,6 +55,7 @@ type (
 const (
 	StateClaimed    = control.StateClaimed
 	StateWorking    = control.StateWorking
+	StateRetrying   = control.StateRetrying
 	StateGateFailed = control.StateGateFailed
 	StatePROpened   = control.StatePROpened
 	StateFailed     = control.StateFailed
@@ -83,6 +85,12 @@ type Options struct {
 	// AckWait is how long the control node waits without a heartbeat before
 	// it redelivers a job. Zero means 30 seconds.
 	AckWait time.Duration
+	// MaxAttempts is how many times a job is delivered before a failure is
+	// final. Zero means 3.
+	MaxAttempts int
+	// RetryDelay is how long a failed job waits before it is delivered
+	// again. Zero means 30 seconds.
+	RetryDelay time.Duration
 }
 
 // Runner pulls and works one steward's jobs.
@@ -125,6 +133,12 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	}
 	if o.AckWait == 0 {
 		o.AckWait = defaultAckWait
+	}
+	if o.MaxAttempts <= 0 {
+		o.MaxAttempts = defaultMaxAttempts
+	}
+	if o.RetryDelay == 0 {
+		o.RetryDelay = defaultRetryDelay
 	}
 	var err error
 	if o.WorkDir, err = filepath.Abs(o.WorkDir); err != nil {
@@ -245,7 +259,8 @@ func (r *Runner) token(ctx context.Context, subject string) (string, error) {
 
 // handle works one delivered job. It acknowledges the job only once the job
 // has reached a final state, so a runner that dies before then leaves the job
-// to be redelivered.
+// to be redelivered. A failed job is handed back to be tried again until it
+// has been delivered Options.MaxAttempts times.
 func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	var job control.Job
 	if err := json.Unmarshal(msg.Data(), &job); err != nil || job.Subject() != msg.Subject() {
@@ -276,7 +291,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		// Without a token the outcome cannot be put on the issue, so the job
 		// is handed back instead of being failed where nobody would see it.
 		r.log.Error("handing the job back", "repo", job.Repo, "issue", job.Issue, "err", err)
-		_ = msg.NakWithDelay(retryDelay)
+		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
 	}
 	gh := github{api: r.opts.GitHubAPIURL, repo: job.Repo, token: token}
@@ -284,6 +299,19 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	if ctx.Err() != nil {
 		_ = msg.Nak() // shutting down: let another runner have it now
 		return
+	}
+	// A failure may be passing (a harness outage, a GitHub error), so the job
+	// is redelivered a bounded number of times before the failure is final.
+	// A gate failure is the session's own result and is not retried.
+	//
+	// ponytail: every delivery counts as an attempt, including ones handed
+	// back for want of a token or by a runner shutting down; count failures
+	// in the status history if those eat too many attempts.
+	if meta, err := msg.Metadata(); out.state == StateFailed && err == nil && meta.NumDelivered < uint64(r.opts.MaxAttempts) {
+		r.report(job, StateRetrying, fmt.Sprintf("attempt %d of %d failed: %s", meta.NumDelivered, r.opts.MaxAttempts, out.detail))
+		if err := msg.NakWithDelay(r.opts.RetryDelay); err == nil {
+			return
+		}
 	}
 	if out.comment != "" {
 		if err := gh.comment(ctx, job.Issue, out.comment); err != nil {
@@ -325,12 +353,9 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	branch := BranchName(job.Issue, issue.Title)
 	// A redelivered job whose first runner died after opening the PR must not
 	// open a second one. The first attempt's PR already links the issue, so
-	// nothing more is said there.
-	//
-	// ponytail: keyed on the branch name, so an issue retitled between two
-	// attempts gets a second PR; key on a PR label or the status history if
-	// that shows up.
-	if url, err := gh.findPR(ctx, branch); err != nil {
+	// nothing more is said there. The guard goes by the issue number, not the
+	// whole branch name, which changes when the issue is retitled.
+	if url, err := gh.findPR(ctx, job.Issue); err != nil {
 		return failed(err)
 	} else if url != "" {
 		return outcome{state: StatePROpened, detail: url}
