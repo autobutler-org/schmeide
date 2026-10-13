@@ -26,12 +26,10 @@ import (
 )
 
 const (
-	// RegisterSubjectPrefix plus a steward is the subject a runner announces
-	// itself on when it starts. The message is a Registration.
-	RegisterSubjectPrefix = "schmeide.runners."
-	// StatusSubjectPrefix replaces "schmeide.jobs." in a job's subject to give
-	// the subject its Status messages are published on.
-	StatusSubjectPrefix = "schmeide.status."
+	// RegisterSubjectPrefix and StatusSubjectPrefix are the subjects a runner
+	// reports to the control node on.
+	RegisterSubjectPrefix = control.RegisterSubjectPrefix
+	StatusSubjectPrefix   = control.StatusSubjectPrefix
 
 	jobSubjectPrefix = "schmeide.jobs."
 	// PRTextPath is where the harness leaves the pull request title and body,
@@ -44,32 +42,22 @@ const (
 	gateTailBytes  = 4000
 )
 
-// State is where a job stands. Gate failed, PR opened, and failed are final.
-type State string
+// The messages a runner publishes are defined by the control node, which
+// subscribes to them.
+type (
+	State        = control.State
+	Status       = control.Status
+	Registration = control.Registration
+)
 
 // The states a runner reports for a job.
 const (
-	StateClaimed    State = "claimed"
-	StateWorking    State = "working"
-	StateGateFailed State = "gate_failed"
-	StatePROpened   State = "pr_opened"
-	StateFailed     State = "failed"
+	StateClaimed    = control.StateClaimed
+	StateWorking    = control.StateWorking
+	StateGateFailed = control.StateGateFailed
+	StatePROpened   = control.StatePROpened
+	StateFailed     = control.StateFailed
 )
-
-// Status is the message a runner publishes when a job changes state.
-type Status struct {
-	State State `json:"state"`
-	// Detail is the PR URL for StatePROpened and the reason for the failure
-	// states.
-	Detail string `json:"detail,omitempty"`
-}
-
-// Registration is the message a runner publishes when it starts.
-type Registration struct {
-	Steward   string   `json:"steward"`
-	Harnesses []string `json:"harnesses"`
-	Host      string   `json:"host"`
-}
 
 // Options configures a runner.
 type Options struct {
