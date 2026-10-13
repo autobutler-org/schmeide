@@ -1,0 +1,183 @@
+package control
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+)
+
+// setting is one control node setting. Each can come from its flag, its
+// environment variable, or the config file, in that order of precedence.
+type setting struct {
+	name     string
+	def      string
+	usage    string
+	required bool
+}
+
+func (s setting) env() string {
+	return "SCHMEIDE_" + strings.ToUpper(strings.ReplaceAll(s.name, "-", "_"))
+}
+
+var controlSettings = []setting{
+	{name: "config", usage: "Path of a config file with one 'name = value' line per setting, named as the flags are."},
+	{name: "http-addr", def: ":8080", usage: "Address the webhook endpoint listens on. GitHub must be able to reach /webhook here."},
+	{name: "nats-addr", def: "127.0.0.1:4222", usage: "Address the embedded NATS server listens on. Runners connect here."},
+	{name: "nats-token", usage: "Token runners must present to NATS. Required when --nats-addr is not a loopback address."},
+	{name: "data-dir", def: "schmeide-data", usage: "Directory where the job queue is stored."},
+	{name: "webhook-secret", required: true, usage: "Webhook secret of the schmeide GitHub App. Prefer the environment variable or config file, so the secret stays out of the process list."},
+	{name: "ready-label", def: DefaultReadyLabel, usage: "Label that, together with an assignee, turns an issue into a job."},
+	{name: "github-app-id", required: true, usage: "App ID of the schmeide GitHub App."},
+	{name: "github-app-private-key-file", required: true, usage: "Path of the GitHub App's private key (.pem)."},
+	{name: "github-api-url", def: DefaultGitHubAPIURL, usage: "Base URL of the GitHub REST API."},
+}
+
+// Usage is the help text of `schmeide control`.
+func Usage() string {
+	var b strings.Builder
+	b.WriteString(`schmeide control runs the control node: an embedded NATS server with JetStream
+that holds the job queue, and an HTTP endpoint (/webhook) for the schmeide
+GitHub App. An open issue that is assigned and carries the ready label becomes
+one job, with the assignee as its steward.
+
+Usage:
+  schmeide control [flags]
+
+Every setting can be given as a flag, an environment variable, or a line in the
+--config file. A flag wins over the environment, which wins over the file.
+
+Flags:
+`)
+	for _, s := range controlSettings {
+		fmt.Fprintf(&b, "  --%s\n        %s\n        Env: %s", s.name, s.usage, s.env())
+		switch {
+		case s.required:
+			b.WriteString(" (required)")
+		case s.def != "":
+			fmt.Fprintf(&b, " (default %q)", s.def)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("  -h, --help\n        Show this help.\n")
+	return b.String()
+}
+
+// readConfigFile reads 'name = value' lines. Blank lines and lines starting
+// with '#' are skipped.
+func readConfigFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w; check the path given with --config or SCHMEIDE_CONFIG", err)
+	}
+	values := map[string]string{}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: expected 'name = value', got %q", path, i+1, line)
+		}
+		values[strings.TrimSpace(name)] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return values, nil
+}
+
+// parseControl resolves the control node's settings from flags, environment,
+// and config file. It returns flag.ErrHelp when help was asked for.
+func parseControl(args []string) (Config, error) {
+	fs := flag.NewFlagSet("schmeide control", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	for _, s := range controlSettings {
+		fs.String(s.name, s.def, s.usage)
+	}
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+	if fs.NArg() > 0 {
+		return Config{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	values := map[string]string{}
+	fromFlag := map[string]bool{}
+	fs.VisitAll(func(f *flag.Flag) { values[f.Name] = f.Value.String() })
+	fs.Visit(func(f *flag.Flag) { fromFlag[f.Name] = true })
+	fromEnv := func(s setting) bool {
+		v := os.Getenv(s.env())
+		if !fromFlag[s.name] && v != "" {
+			values[s.name] = v
+		}
+		return fromFlag[s.name] || v != ""
+	}
+
+	file := map[string]string{}
+	if fromEnv(controlSettings[0]); values["config"] != "" {
+		var err error
+		if file, err = readConfigFile(values["config"]); err != nil {
+			return Config{}, err
+		}
+	}
+	var missing []string
+	for _, s := range controlSettings[1:] {
+		if v, ok := file[s.name]; !fromEnv(s) && ok {
+			values[s.name] = v
+		}
+		delete(file, s.name)
+		if s.required && values[s.name] == "" {
+			missing = append(missing, fmt.Sprintf("  %s: pass --%s, set %s, or add '%s = ...' to the --config file",
+				s.name, s.name, s.env(), s.name))
+		}
+	}
+	for name := range file {
+		return Config{}, fmt.Errorf("config file %s: unknown setting %q; 'schmeide control --help' lists the settings", values["config"], name)
+	}
+	if len(missing) > 0 {
+		return Config{}, errors.New("missing required settings:\n" + strings.Join(missing, "\n"))
+	}
+	// The NATS server hands out GitHub tokens, so it is not exposed unauthenticated.
+	if host, _, _ := net.SplitHostPort(values["nats-addr"]); values["nats-token"] == "" && host != "localhost" && !net.ParseIP(host).IsLoopback() {
+		return Config{}, fmt.Errorf("--nats-addr %s is reachable from other machines, so runners must authenticate: "+
+			"pass --nats-token or set SCHMEIDE_NATS_TOKEN, or listen on 127.0.0.1", values["nats-addr"])
+	}
+	return Config{
+		HTTPAddr:                values["http-addr"],
+		NATSAddr:                values["nats-addr"],
+		NATSToken:               values["nats-token"],
+		DataDir:                 values["data-dir"],
+		WebhookSecret:           values["webhook-secret"],
+		ReadyLabel:              values["ready-label"],
+		GitHubAppID:             values["github-app-id"],
+		GitHubAppPrivateKeyFile: values["github-app-private-key-file"],
+		GitHubAPIURL:            values["github-api-url"],
+	}, nil
+}
+
+// Main runs `schmeide control` with the given arguments and returns its exit
+// code.
+func Main(args []string, stdout, stderr io.Writer) int {
+	cfg, err := parseControl(args)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, Usage())
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "schmeide control: %v\nRun 'schmeide control --help' for usage.\n", err)
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := Run(ctx, cfg, slog.New(slog.NewTextHandler(stderr, nil))); err != nil {
+		fmt.Fprintf(stderr, "schmeide control: %v\n", err)
+		return 1
+	}
+	return 0
+}
