@@ -2,6 +2,8 @@
 
 The autobutler-org software factory. The design is in progress, so the binary only prints usage for now.
 
+See [docs/design.md](docs/design.md) for the agreed design and the first slice of work.
+
 ## Development
 
 Requires Go and `make`; the Go toolchain version pinned in `go.mod` is downloaded automatically.
