@@ -19,13 +19,15 @@ const (
 	StatusSubjectPrefix = "schmeide.status."
 )
 
-// State is where a job stands. Gate failed, PR opened, and failed are final.
+// State is where a job stands. Gate failed, PR opened, and failed are final;
+// retrying means an attempt failed and the job will be delivered again.
 type State string
 
 // The states a runner reports for a job.
 const (
 	StateClaimed    State = "claimed"
 	StateWorking    State = "working"
+	StateRetrying   State = "retrying"
 	StateGateFailed State = "gate_failed"
 	StatePROpened   State = "pr_opened"
 	StateFailed     State = "failed"

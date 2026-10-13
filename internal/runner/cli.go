@@ -71,6 +71,7 @@ func runnerFlags() (*flag.FlagSet, *Options, *string) {
 	fs.StringVar(&o.GitHubURL, "github-url", "https://github.com", "Base URL repositories are cloned from and pushed to.")
 	fs.StringVar(&o.GitName, "git-name", "schmeide[bot]", "Author name for the commits a job makes: the GitHub App's bot user.")
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
+	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job is tried before its failure is final and reported on the issue. A gate failure is never retried.")
 	claudeArgs := fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
 	return fs, o, claudeArgs
 }
@@ -86,7 +87,8 @@ branch named <issue number>_<short-description>, runs a fresh harness session
 with a brief built from the issue, runs the gate command from the repo's
 .schmeide/config.toml, and then pushes the branch and opens a PR as the schmeide
 GitHub App. The outcome is reported to the control node and commented on the
-issue. A job the runner does not finish is handed to another runner.
+issue. A job the runner does not finish is handed to another runner, and a job
+that fails is tried again up to --max-attempts times.
 
 Usage:
   schmeide runner --steward <github login> [flags]

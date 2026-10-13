@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -74,18 +73,28 @@ func (g github) defaultBranch(ctx context.Context) (string, error) {
 
 type ghPull struct {
 	HTMLURL string `json:"html_url"`
+	Head    struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
 }
 
-// findPR returns the URL of a pull request, open or not, whose head is the
-// branch, or "" when there is none.
-func (g github) findPR(ctx context.Context, branch string) (string, error) {
-	owner, _, _ := strings.Cut(g.repo, "/")
-	query := url.Values{"head": {owner + ":" + branch}, "state": {"all"}}
+// findPR returns the URL of a pull request, open or not, on a branch of the
+// issue ("<issue number>_..."), or "" when there is none.
+//
+// ponytail: looks at the 100 newest pull requests only, which covers a
+// redelivery minutes after the first attempt; page through them if a job can
+// come back after 100 other pull requests were opened.
+func (g github) findPR(ctx context.Context, issue int) (string, error) {
 	var pulls []ghPull
-	if err := g.do(ctx, http.MethodGet, "/pulls?"+query.Encode(), nil, &pulls); err != nil || len(pulls) == 0 {
+	if err := g.do(ctx, http.MethodGet, "/pulls?state=all&per_page=100", nil, &pulls); err != nil {
 		return "", err
 	}
-	return pulls[0].HTMLURL, nil
+	for _, p := range pulls {
+		if strings.HasPrefix(p.Head.Ref, fmt.Sprintf("%d_", issue)) {
+			return p.HTMLURL, nil
+		}
+	}
+	return "", nil
 }
 
 func (g github) openPR(ctx context.Context, title, body, head, base string) (string, error) {
