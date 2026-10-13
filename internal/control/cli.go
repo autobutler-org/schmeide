@@ -35,6 +35,8 @@ var controlSettings = []setting{
 	{name: "data-dir", def: "schmeide-data", usage: "Directory where the job queue is stored."},
 	{name: "webhook-secret", required: true, usage: "Webhook secret of the schmeide GitHub App. Prefer the environment variable or config file, so the secret stays out of the process list."},
 	{name: "ready-label", def: DefaultReadyLabel, usage: "Label that, together with an assignee, turns an issue into a job."},
+	{name: "allowed-orgs", usage: "Comma-separated organization or user logins whose repositories may create jobs. Webhooks for anyone else are rejected with 403."},
+	{name: "allowed-installations", usage: "Comma-separated GitHub App installation IDs that may create jobs. A webhook is accepted when it matches this list or --allowed-orgs; with both empty, every installation of the App may create jobs."},
 	{name: "github-app-id", required: true, usage: "App ID of the schmeide GitHub App."},
 	{name: "github-app-private-key-file", required: true, usage: "Path of the GitHub App's private key (.pem)."},
 	{name: "github-api-url", def: DefaultGitHubAPIURL, usage: "Base URL of the GitHub REST API."},
@@ -148,6 +150,9 @@ func parseControl(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("--nats-addr %s is reachable from other machines, so runners must authenticate: "+
 			"pass --nats-token or set SCHMEIDE_NATS_TOKEN, or listen on 127.0.0.1", values["nats-addr"])
 	}
+	if _, err := ParseAllowlist(values["allowed-orgs"], values["allowed-installations"]); err != nil {
+		return Config{}, fmt.Errorf("%w; fix --allowed-installations or SCHMEIDE_ALLOWED_INSTALLATIONS", err)
+	}
 	return Config{
 		HTTPAddr:                values["http-addr"],
 		NATSAddr:                values["nats-addr"],
@@ -155,6 +160,8 @@ func parseControl(args []string) (Config, error) {
 		DataDir:                 values["data-dir"],
 		WebhookSecret:           values["webhook-secret"],
 		ReadyLabel:              values["ready-label"],
+		AllowedOrgs:             values["allowed-orgs"],
+		AllowedInstallations:    values["allowed-installations"],
 		GitHubAppID:             values["github-app-id"],
 		GitHubAppPrivateKeyFile: values["github-app-private-key-file"],
 		GitHubAPIURL:            values["github-api-url"],

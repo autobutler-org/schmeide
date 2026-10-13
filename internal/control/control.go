@@ -29,6 +29,12 @@ type Config struct {
 	WebhookSecret string
 	// ReadyLabel is the label that marks an issue ready.
 	ReadyLabel string
+	// AllowedOrgs is a comma-separated list of repository owners that may
+	// create jobs.
+	AllowedOrgs string
+	// AllowedInstallations is a comma-separated list of GitHub App installation
+	// IDs that may create jobs.
+	AllowedInstallations string
 	// GitHubAppID is the GitHub App's ID.
 	GitHubAppID string
 	// GitHubAppPrivateKeyFile is the path of the GitHub App's PEM private key.
@@ -57,6 +63,9 @@ func Handler(in Intake, log *slog.Logger) http.Handler {
 		case errors.Is(err, ErrBadSignature):
 			log.Warn("webhook rejected", "delivery", delivery, "err", err)
 			http.Error(w, err.Error(), http.StatusUnauthorized)
+		case errors.Is(err, ErrNotAllowed):
+			log.Warn("webhook rejected", "delivery", delivery, "err", err)
+			http.Error(w, err.Error(), http.StatusForbidden)
 		case err != nil:
 			log.Error("webhook failed", "delivery", delivery, "err", err)
 			http.Error(w, "could not process the delivery", http.StatusInternalServerError)
@@ -73,6 +82,10 @@ func Handler(in Intake, log *slog.Logger) http.Handler {
 // Run starts the embedded NATS server and the webhook listener and blocks
 // until ctx is canceled or either one fails.
 func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
+	allow, err := ParseAllowlist(cfg.AllowedOrgs, cfg.AllowedInstallations)
+	if err != nil {
+		return err
+	}
 	pemBytes, err := os.ReadFile(cfg.GitHubAppPrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("read the GitHub App private key: %w", err)
@@ -99,6 +112,7 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	mux.Handle("/webhook", Handler(Intake{
 		Secret:     []byte(cfg.WebhookSecret),
 		ReadyLabel: cfg.ReadyLabel,
+		Allow:      allow,
 		Publish:    queue.Publish,
 	}, log))
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.HTTPAddr)
