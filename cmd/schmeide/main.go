@@ -7,6 +7,8 @@ import (
 	"os"
 
 	"github.com/autobutler-org/schmeide/internal/control"
+	"github.com/autobutler-org/schmeide/internal/doctor"
+	"github.com/autobutler-org/schmeide/internal/runner"
 )
 
 const usage = `schmeide is the autobutler-org software factory.
@@ -17,6 +19,8 @@ Usage:
 
 Commands:
   control   Run the control node: embedded NATS job queue and GitHub webhook intake.
+  runner    Run a runner: take your jobs from the control node and open a PR for each.
+  doctor    Check that this machine is ready to run a runner.
 
 Run 'schmeide <command> --help' for a command's flags.
 `
@@ -26,8 +30,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] == "control" {
+	switch args[0] {
+	case "control":
 		return control.Main(args[1:], stdout, stderr)
+	case "runner":
+		return runner.Main(args[1:], stdout, stderr)
+	case "doctor":
+		return doctor.Main(args[1:], stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "schmeide: unknown argument %q\nRun 'schmeide --help' for usage.\n", args[0])
 	return 2
