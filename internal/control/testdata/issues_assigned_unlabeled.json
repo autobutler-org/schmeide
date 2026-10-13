@@ -1,0 +1,68 @@
+{
+  "action": "assigned",
+  "issue": {
+    "url": "https://api.github.com/repos/autobutler-org/quark/issues/42",
+    "html_url": "https://github.com/autobutler-org/quark/issues/42",
+    "id": 2733910042,
+    "number": 42,
+    "title": "add a retry to the uploader",
+    "user": {
+      "login": "jamesaorson",
+      "id": 1024025,
+      "type": "User"
+    },
+    "labels": [
+      {
+        "id": 7001,
+        "name": "enhancement",
+        "color": "0e8a16",
+        "default": false
+      }
+    ],
+    "state": "open",
+    "locked": false,
+    "assignee": {
+      "login": "octocat",
+      "id": 583231,
+      "type": "User"
+    },
+    "assignees": [
+      {
+        "login": "octocat",
+        "id": 583231,
+        "type": "User"
+      }
+    ],
+    "comments": 0,
+    "created_at": "2026-10-12T16:02:11Z",
+    "updated_at": "2026-10-12T16:05:40Z",
+    "closed_at": null,
+    "body": "The uploader gives up on the first 503."
+  },
+  "repository": {
+    "id": 901234567,
+    "name": "quark",
+    "full_name": "autobutler-org/quark",
+    "private": true,
+    "owner": {
+      "login": "autobutler-org",
+      "id": 198765432,
+      "type": "Organization"
+    },
+    "html_url": "https://github.com/autobutler-org/quark",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "autobutler-org",
+    "id": 198765432
+  },
+  "sender": {
+    "login": "jamesaorson",
+    "id": 1024025,
+    "type": "User"
+  },
+  "installation": {
+    "id": 61234567,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNjEyMzQ1Njc="
+  }
+}
