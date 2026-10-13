@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +22,10 @@ const DefaultReadyLabel = "schmeide:ready"
 // ErrBadSignature is returned when a webhook's X-Hub-Signature-256 header is
 // missing or does not match the payload.
 var ErrBadSignature = errors.New("webhook signature is missing or invalid")
+
+// ErrNotAllowed is returned when a webhook would create a job for an org or
+// installation that is not on the allowlist.
+var ErrNotAllowed = errors.New("webhook is from an org or installation that is not on the allowlist")
 
 // Job is the message the control node publishes and a runner consumes: one
 // GitHub issue to be taken to a pull request.
@@ -115,6 +121,49 @@ func JobFromIssuesEvent(body []byte, readyLabel string) (*Job, error) {
 	}, nil
 }
 
+// Allowlist names the repository owners and GitHub App installations that may
+// create jobs. A job is allowed when it matches either list. An empty
+// Allowlist allows every job.
+type Allowlist struct {
+	// Orgs are the logins of allowed repository owners, organizations or users.
+	Orgs []string
+	// Installations are the IDs of allowed GitHub App installations.
+	Installations []int64
+}
+
+// ParseAllowlist reads the comma-separated --allowed-orgs and
+// --allowed-installations values.
+func ParseAllowlist(orgs, installations string) (Allowlist, error) {
+	var a Allowlist
+	for org := range strings.SplitSeq(orgs, ",") {
+		if org = strings.TrimSpace(org); org != "" {
+			a.Orgs = append(a.Orgs, org)
+		}
+	}
+	for field := range strings.SplitSeq(installations, ",") {
+		if field = strings.TrimSpace(field); field == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(field, 10, 64)
+		if err != nil {
+			return Allowlist{}, fmt.Errorf("allowed installation %q is not a numeric installation ID; "+
+				"find the ID at the end of the installation's settings URL (.../settings/installations/<id>)", field)
+		}
+		a.Installations = append(a.Installations, id)
+	}
+	return a, nil
+}
+
+func (a Allowlist) allows(job Job) bool {
+	if len(a.Orgs) == 0 && len(a.Installations) == 0 {
+		return true
+	}
+	owner, _, _ := strings.Cut(job.Repo, "/")
+	// GitHub logins are case-insensitive.
+	return slices.Contains(a.Installations, job.InstallationID) ||
+		slices.ContainsFunc(a.Orgs, func(org string) bool { return strings.EqualFold(org, owner) })
+}
+
 // Outcome is what Intake did with a webhook delivery.
 type Outcome string
 
@@ -131,6 +180,8 @@ type Intake struct {
 	Secret []byte
 	// ReadyLabel is the label that marks an issue ready.
 	ReadyLabel string
+	// Allow restricts who may create jobs. The zero value allows everyone.
+	Allow Allowlist
 	// Publish stores a job and reports whether it is new. It must be idempotent
 	// per issue.
 	Publish func(ctx context.Context, job Job) (created bool, err error)
@@ -152,6 +203,9 @@ func (in Intake) Handle(ctx context.Context, event, signature string, body []byt
 	}
 	if job == nil {
 		return OutcomeIgnored, nil
+	}
+	if !in.Allow.allows(*job) {
+		return "", fmt.Errorf("%w: %s (installation %d)", ErrNotAllowed, job.Repo, job.InstallationID)
 	}
 	created, err := in.Publish(ctx, *job)
 	if err != nil {

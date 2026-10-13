@@ -188,6 +188,40 @@ func TestWebhookIntake(t *testing.T) {
 	}
 }
 
+func TestWebhookAllowlist(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json") // autobutler-org/quark, installation 61234567
+	unlabeled := payload(t, "issues_assigned_unlabeled.json")
+	for name, tt := range map[string]struct {
+		orgs, installations string
+		body                []byte
+		wantCode, wantJobs  int
+	}{
+		"empty allowlist allows everyone":    {body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
+		"allowed org":                        {orgs: "exokomodo, Autobutler-Org", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
+		"allowed installation":               {installations: "1, 61234567", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
+		"either list is enough":              {orgs: "exokomodo", installations: "61234567", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
+		"other org is rejected":              {orgs: "exokomodo", body: ready, wantCode: http.StatusForbidden},
+		"other installation is rejected":     {installations: "1", body: ready, wantCode: http.StatusForbidden},
+		"org prefix is not a match":          {orgs: "autobutler", body: ready, wantCode: http.StatusForbidden},
+		"no job from another org is ignored": {orgs: "exokomodo", body: unlabeled, wantCode: http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			allow, err := ParseAllowlist(tt.orgs, tt.installations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := startQueue(t)
+			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+			if got := deliver(t, h, delivery{body: tt.body, signature: sign(tt.body)}); got != tt.wantCode {
+				t.Errorf("status = %d, want %d", got, tt.wantCode)
+			}
+			if got := jobs(t, q); len(got) != tt.wantJobs {
+				t.Errorf("jobs = %+v, want %d", got, tt.wantJobs)
+			}
+		})
+	}
+}
+
 func TestReadyLabelIsConfigurable(t *testing.T) {
 	body := payload(t, "issues_assigned_labeled.json")
 	job, err := JobFromIssuesEvent(body, "enhancement")
