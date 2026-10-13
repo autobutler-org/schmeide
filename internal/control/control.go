@@ -91,6 +91,9 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if err := queue.ServeTokens(minter.Mint, log); err != nil {
 		return fmt.Errorf("serve job tokens: %w", err)
 	}
+	if _, err := queue.Track(log); err != nil {
+		return fmt.Errorf("track runners and job states: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", Handler(Intake{
