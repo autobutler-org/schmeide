@@ -1,0 +1,38 @@
+name: Continuous Integration
+
+on:
+  workflow_dispatch:
+  merge_group:
+  pull_request:
+    branches:
+      - main
+
+# cancel previous runs if new commits are pushed into the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Download dependencies
+        run: make deps
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
