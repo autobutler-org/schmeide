@@ -4,6 +4,17 @@ The autobutler-org software factory. The design is in progress, so the binary on
 
 See [docs/design.md](docs/design.md) for the agreed design and the first slice of work.
 
+## Repo config
+
+A target repo carries its config at `.schmeide/config.toml`. Unknown keys are an error.
+
+```toml
+# Required. Command a job must pass before a PR is opened.
+gate = "make check test"
+```
+
+See `internal/repoconfig` for the loader.
+
 ## Development
 
 Requires Go and `make`; the Go toolchain version pinned in `go.mod` is downloaded automatically.
