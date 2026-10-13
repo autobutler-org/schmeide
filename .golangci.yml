@@ -1,0 +1,88 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: none 
+  enable:
+    # Linters with autofix capabilities only
+    - canonicalheader
+    - copyloopvar
+    - dupword
+    - errorlint
+    - exptostd
+    - fatcontext
+    - ginkgolinter
+    - gocritic
+    - godot
+    - goheader
+    - govet
+    - iface
+    - importas
+    - intrange
+    - mirror
+    - misspell
+    - nakedret
+    - nolintlint
+    - perfsprint
+    - protogetter
+    - revive
+    - sloglint
+    - staticcheck
+    - tagalign
+    - testifylint
+    - usestdlibvars
+    - usetesting
+    - whitespace
+  settings:
+    gocritic:
+      settings:
+        captLocal:
+          paramsOnly: false
+        underef:
+          skipRecvDeref: false
+    nakedret:
+      max-func-lines: 10
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      confidence: 0.5
+      rules:
+        - name: error-naming
+          severity: error
+          disabled: false
+        - name: error-return
+          severity: warning
+          disabled: false
+        - name: error-strings
+          severity: warning
+          disabled: false
+        - name: errorf
+          severity: warning
+          disabled: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - staticcheck
+        text: should not use underscores in package names
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
