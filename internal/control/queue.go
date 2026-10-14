@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,15 +20,30 @@ import (
 const (
 	// JobStream is the JetStream stream that holds jobs.
 	JobStream = "SCHMEIDE_JOBS"
-	// TokenSubject is the request subject a runner sends a job's subject to in
-	// order to get that job's GitHub token. The reply is a TokenReply.
-	TokenSubject = "schmeide.token"
+	// TokenSubjectPrefix plus a steward is the request subject a runner sends
+	// a job's subject to in order to get that job's GitHub token. The reply is
+	// a TokenReply. A steward can only publish on its own token subject, and
+	// only gets tokens for its own jobs.
+	TokenSubjectPrefix = "schmeide.token."
 
 	jobSubjectPrefix = "schmeide.jobs."
-	startTimeout     = 10 * time.Second
+	// controlUser is not a GitHub login, so no steward can share its name.
+	controlUser  = "_schmeide_control"
+	startTimeout = 10 * time.Second
 )
 
-// TokenReply answers a request on TokenSubject. Error is set instead of Token
+// ConsumerName is the durable JetStream consumer a steward's runners share.
+func ConsumerName(steward string) string { return "runner-" + steward }
+
+// JobFilter is the subject filter that selects a steward's jobs.
+func JobFilter(steward string) string { return jobSubjectPrefix + steward + ".>" }
+
+// InboxPrefix is the reply subject prefix a steward's runners must use. Each
+// steward can only subscribe below its own prefix, so no steward can read the
+// replies, and with them the tokens, meant for another.
+func InboxPrefix(steward string) string { return "_INBOX_" + steward }
+
+// TokenReply answers a token request. Error is set instead of Token
 // when no token could be minted.
 type TokenReply struct {
 	Token
@@ -40,8 +56,10 @@ type QueueOptions struct {
 	// Addr is the host:port runners connect to. Empty means no network
 	// listener, which is only useful in tests.
 	Addr string
-	// AuthToken, when set, is the token NATS clients must present.
-	AuthToken string
+	// RunnerTokens maps each steward to the token its runners present to NATS.
+	// A runner connects as its steward and may only touch that steward's
+	// jobs, statuses, and tokens.
+	RunnerTokens map[string]string
 	// DataDir is where JetStream keeps its files.
 	DataDir string
 }
@@ -57,14 +75,19 @@ type Queue struct {
 // StartQueue starts the embedded NATS server and makes sure the job stream
 // exists.
 func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
+	controlPassword := rand.Text()
+	users := []*server.User{{Username: controlUser, Password: controlPassword}}
+	for steward, token := range o.RunnerTokens {
+		users = append(users, &server.User{Username: steward, Password: token, Permissions: runnerPermissions(steward)})
+	}
 	opts := &server.Options{
-		ServerName:    "schmeide-control",
-		DontListen:    o.Addr == "",
-		JetStream:     true,
-		StoreDir:      o.DataDir,
-		Authorization: o.AuthToken,
-		NoSigs:        true,
-		NoLog:         true,
+		ServerName: "schmeide-control",
+		DontListen: o.Addr == "",
+		JetStream:  true,
+		StoreDir:   o.DataDir,
+		Users:      users,
+		NoSigs:     true,
+		NoLog:      true,
 	}
 	if o.Addr != "" {
 		host, portText, err := net.SplitHostPort(o.Addr)
@@ -88,7 +111,7 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 	}
 
 	q := &Queue{srv: srv}
-	if q.nc, err = nats.Connect("", nats.InProcessServer(srv), nats.Token(o.AuthToken)); err != nil {
+	if q.nc, err = nats.Connect("", nats.InProcessServer(srv), nats.UserInfo(controlUser, controlPassword)); err != nil {
 		q.Close()
 		return nil, fmt.Errorf("connect to embedded nats: %w", err)
 	}
@@ -108,6 +131,28 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 	}
 	return q, nil
 }
+
+// runnerPermissions lets a steward's runners pull and acknowledge that
+// steward's jobs, report on them, and ask for their tokens, and nothing else.
+func runnerPermissions(steward string) *server.Permissions {
+	consumer := JobStream + "." + ConsumerName(steward)
+	return &server.Permissions{
+		Publish: &server.SubjectPermission{Allow: []string{
+			"$JS.API.CONSUMER.CREATE." + consumer + "." + JobFilter(steward),
+			"$JS.API.CONSUMER.INFO." + consumer,
+			"$JS.API.CONSUMER.MSG.NEXT." + consumer,
+			"$JS.ACK." + consumer + ".>",
+			RegisterSubjectPrefix + steward,
+			StatusSubjectPrefix + steward + ".>",
+			TokenSubjectPrefix + steward,
+		}},
+		Subscribe: &server.SubjectPermission{Allow: []string{InboxPrefix(steward) + ".>"}},
+	}
+}
+
+// Conn is the control node's own connection to the embedded NATS server,
+// which may publish and subscribe anywhere.
+func (q *Queue) Conn() *nats.Conn { return q.nc }
 
 // Close stops the embedded NATS server.
 func (q *Queue) Close() {
@@ -134,16 +179,18 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	return err == nil, err
 }
 
-// ServeTokens answers requests on TokenSubject. The request body is the
-// subject of a job in the stream, so tokens are only minted for real jobs.
+// ServeTokens answers requests on a steward's token subject. The request body
+// is the subject of one of that steward's jobs in the stream, so tokens are
+// only minted for real jobs, and only for the steward who owns the job.
 func (q *Queue) ServeTokens(mint func(context.Context, Job) (Token, error), log *slog.Logger) error {
-	_, err := q.nc.Subscribe(TokenSubject, func(m *nats.Msg) {
+	_, err := q.nc.Subscribe(TokenSubjectPrefix+"*", func(m *nats.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 		defer cancel()
 		reply := TokenReply{}
-		token, err := q.tokenFor(ctx, string(m.Data), mint)
+		steward := strings.TrimPrefix(m.Subject, TokenSubjectPrefix)
+		token, err := q.tokenFor(ctx, steward, string(m.Data), mint)
 		if err != nil {
-			log.Error("token request failed", "job", string(m.Data), "err", err)
+			log.Error("token request failed", "steward", steward, "job", string(m.Data), "err", err)
 			reply.Error = err.Error()
 		}
 		reply.Token = token
@@ -155,9 +202,9 @@ func (q *Queue) ServeTokens(mint func(context.Context, Job) (Token, error), log 
 	return err
 }
 
-func (q *Queue) tokenFor(ctx context.Context, subject string, mint func(context.Context, Job) (Token, error)) (Token, error) {
-	if !strings.HasPrefix(subject, jobSubjectPrefix) || strings.ContainsAny(subject, "*> ") {
-		return Token{}, fmt.Errorf("%q is not a job subject", subject)
+func (q *Queue) tokenFor(ctx context.Context, steward, subject string, mint func(context.Context, Job) (Token, error)) (Token, error) {
+	if !strings.HasPrefix(subject, jobSubjectPrefix+steward+".") || strings.ContainsAny(subject, "*> ") {
+		return Token{}, fmt.Errorf("%q is not a job of steward %q", subject, steward)
 	}
 	msg, err := q.stream.GetLastMsgForSubject(ctx, subject)
 	if err != nil {
@@ -166,6 +213,9 @@ func (q *Queue) tokenFor(ctx context.Context, subject string, mint func(context.
 	var job Job
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
 		return Token{}, fmt.Errorf("decode job %q: %w", subject, err)
+	}
+	if job.Steward != steward {
+		return Token{}, fmt.Errorf("job %q belongs to %q, not %q", subject, job.Steward, steward)
 	}
 	return mint(ctx, job)
 }

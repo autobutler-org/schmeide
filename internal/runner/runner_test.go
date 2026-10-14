@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,8 @@ import (
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/nats-io/nats.go"
 )
+
+var testRunnerTokens = map[string]string{"alice": "alice-nats", "bob": "bob-nats"}
 
 const (
 	testToken  = "job-token"
@@ -60,7 +63,6 @@ type fakeGitHub struct {
 	onPR func()
 
 	mu       sync.Mutex
-	title    string // of every issue
 	pulls    []pull
 	comments map[string][]string // by issue number
 }
@@ -76,8 +78,6 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && path == "":
 		reply = map[string]string{"default_branch": "main"}
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/issues/"):
-		reply = map[string]string{"title": f.title, "body": "The thing is broken."}
 	case r.Method == http.MethodGet && path == "/pulls":
 		head := r.URL.Query().Get("head")
 		found := []map[string]any{}
@@ -157,7 +157,7 @@ func newWorld(t *testing.T) *world {
 	}
 	addr := l.Addr().String()
 	l.Close()
-	queue, err := control.StartQueue(t.Context(), control.QueueOptions{Addr: addr, DataDir: t.TempDir()})
+	queue, err := control.StartQueue(t.Context(), control.QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func newWorld(t *testing.T) *world {
 	w := &world{
 		queue:    queue,
 		natsURL:  "nats://" + addr,
-		gh:       &fakeGitHub{t: t, title: "Fix the Thing!", comments: map[string][]string{}},
+		gh:       &fakeGitHub{t: t, comments: map[string][]string{}},
 		gitRoot:  t.TempDir(),
 		statuses: make(chan statusMsg, 64),
 	}
@@ -194,10 +194,7 @@ func newWorld(t *testing.T) *world {
 	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "seed")
 	git(t, src, "push", "-q", w.bare, "main")
 
-	if w.client, err = nats.Connect(w.natsURL); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(w.client.Close)
+	w.client = queue.Conn()
 	if _, err := w.client.Subscribe(StatusSubjectPrefix+">", func(m *nats.Msg) {
 		s := statusMsg{subject: m.Subject}
 		if err := json.Unmarshal(m.Data, &s.Status); err != nil {
@@ -212,7 +209,10 @@ func newWorld(t *testing.T) *world {
 
 func (w *world) publish(t *testing.T, steward string, issue int) {
 	t.Helper()
-	job := control.Job{Repo: testRepo, RepoID: testRepoID, Issue: issue, Steward: steward, InstallationID: 1}
+	job := control.Job{
+		Repo: testRepo, RepoID: testRepoID, Issue: issue, Steward: steward, InstallationID: 1,
+		Title: "Fix the Thing!", Body: "The thing is broken.",
+	}
 	if created, err := w.queue.Publish(t.Context(), job); err != nil || !created {
 		t.Fatalf("publish job: created=%v err=%v", created, err)
 	}
@@ -225,6 +225,7 @@ func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner,
 	workDir := t.TempDir()
 	r, err := New(t.Context(), Options{
 		NATSURL:      w.natsURL,
+		NATSToken:    testRunnerTokens[steward],
 		Steward:      steward,
 		WorkDir:      workDir,
 		GitHubAPIURL: w.apiURL,
@@ -307,9 +308,11 @@ func TestJobOpensPR(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var prompt atomic.Value
+	t.Setenv("SCHMEIDE_NATS_TOKEN", "runner-secret")
+	var prompt, env atomic.Value
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
 		prompt.Store(req.Prompt)
+		env.Store(req.Env)
 		if err := os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600); err != nil {
 			return err
 		}
@@ -331,6 +334,9 @@ func TestJobOpensPR(t *testing.T) {
 	}
 	if p, _ := prompt.Load().(string); !strings.Contains(p, "Fix the Thing!") || !strings.Contains(p, "The thing is broken.") || !strings.Contains(p, "#7") {
 		t.Errorf("brief does not carry the issue: %q", p)
+	}
+	if e, _ := env.Load().([]string); e == nil || slices.ContainsFunc(e, func(v string) bool { return strings.HasPrefix(v, "SCHMEIDE_") }) {
+		t.Errorf("session environment = %q, want one without the runner's settings", e)
 	}
 
 	const branch = "7_fix-the-thing"
@@ -376,6 +382,9 @@ func TestGateFailureOpensNoPR(t *testing.T) {
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "gate command `test ! -e broken` failed") {
 		t.Errorf("issue comments = %q, want one reporting the gate failure", comments["7"])
 	}
+	if strings.Contains(comments["7"][0], "```") {
+		t.Errorf("issue comment %q carries the gate's output", comments["7"][0])
+	}
 	if branches := git(t, w.bare, "branch", "--list", "7_*"); branches != "" {
 		t.Errorf("branch pushed despite the gate failure: %s", branches)
 	}
@@ -416,14 +425,11 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 		name string
 		// afterPR kills the first runner right after it opened the PR, before
 		// it could acknowledge the job. Otherwise it dies mid-session.
-		afterPR bool
-		// retitle renames the issue once the first runner is dead.
-		retitle      bool
+		afterPR      bool
 		wantSessions int32
 	}{
 		{name: "dies mid-session", wantSessions: 1},
 		{name: "dies after opening the PR", afterPR: true, wantSessions: 0},
-		{name: "dies after opening the PR and the issue is retitled", afterPR: true, retitle: true, wantSessions: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -432,9 +438,6 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			// A dead runner is one the control node no longer hears from.
 			die := sync.OnceFunc(func() {
 				first.nc.Close()
-				if tt.retitle {
-					w.gh.title = "Mend the Thing" // onPR runs under the fake's lock
-				}
 				close(died)
 			})
 			h1, _ := writes(map[string]string{"fix.txt": "x"})
@@ -530,6 +533,46 @@ func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestJobWithoutIssueTextIsNotWorked(t *testing.T) {
+	w := newWorld(t)
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	job := control.Job{Repo: testRepo, RepoID: testRepoID, Issue: 7, Steward: "alice", InstallationID: 1}
+	if created, err := w.queue.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("publish job: created=%v err=%v", created, err)
+	}
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StateFailed {
+		t.Errorf("states = %v, want the job failed", states)
+	}
+	if got := sessions.Load(); got != 0 {
+		t.Errorf("sessions = %d, want none for a job without the issue's text", got)
+	}
+}
+
+func TestNewWithWrongTokenSaysWhatToCheck(t *testing.T) {
+	w := newWorld(t)
+	h, _ := writes(nil)
+	_, err := New(t.Context(), Options{NATSURL: w.natsURL, Steward: "alice", NATSToken: testRunnerTokens["bob"], Harnesses: []harness.Harness{h}},
+		slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "--runner-tokens lists for alice") {
+		t.Errorf("err = %v, want one that points at the steward's runner token", err)
+	}
+}
+
+func TestEnvKeepsOnlyWhatJobsNeed(t *testing.T) {
+	environ := []string{
+		"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "SCHMEIDE_NATS_TOKEN=secret", "GITHUB_TOKEN=ghp",
+		"ANTHROPIC_API_KEY=sk", "CLAUDE_CONFIG_DIR=/c", "GOPATH=/go", "AWS_SECRET_ACCESS_KEY=aws",
+	}
+	if got, want := jobEnv(environ, []string{"GOPATH"}), []string{"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "GOPATH=/go"}; !slices.Equal(got, want) {
+		t.Errorf("jobEnv = %q, want %q", got, want)
+	}
+	want := []string{"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "ANTHROPIC_API_KEY=sk", "CLAUDE_CONFIG_DIR=/c"}
+	if got := harnessEnv(environ, nil); !slices.Equal(got, want) {
+		t.Errorf("harnessEnv = %q, want %q", got, want)
+	}
+}
+
 func TestNewWithoutControlNodeSaysWhatToCheck(t *testing.T) {
 	h, _ := writes(nil)
 	_, err := New(t.Context(), Options{NATSURL: "nats://127.0.0.1:1", Steward: "alice", Harnesses: []harness.Harness{h}},
@@ -542,7 +585,7 @@ func TestNewWithoutControlNodeSaysWhatToCheck(t *testing.T) {
 func TestNewWithoutUsableHarnessSaysHowToFix(t *testing.T) {
 	w := newWorld(t)
 	h := &harness.Fake{CheckErr: fmt.Errorf("%w: run `fake login`", harness.ErrNotLoggedIn)}
-	_, err := New(t.Context(), Options{NATSURL: w.natsURL, Steward: "alice", Harnesses: []harness.Harness{h}},
+	_, err := New(t.Context(), Options{NATSURL: w.natsURL, Steward: "alice", NATSToken: testRunnerTokens["alice"], Harnesses: []harness.Harness{h}},
 		slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), "run `fake login`") || !strings.Contains(err.Error(), "schmeide doctor") {
 		t.Errorf("err = %v, want the harness's fix and a pointer to doctor", err)

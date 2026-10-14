@@ -13,8 +13,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +24,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const testSecret = "it's a secret to everybody"
@@ -41,9 +46,11 @@ func payload(t *testing.T, name string) []byte {
 	return body
 }
 
+var testRunnerTokens = map[string]string{"octocat": "octocat-token", "hubot": "hubot-token"}
+
 func startQueue(t *testing.T) *Queue {
 	t.Helper()
-	q, err := StartQueue(t.Context(), QueueOptions{DataDir: t.TempDir()})
+	q, err := StartQueue(t.Context(), QueueOptions{DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,9 +107,16 @@ func deliver(t *testing.T, h http.Handler, d delivery) int {
 
 func TestWebhookIntake(t *testing.T) {
 	ready := payload(t, "issues_assigned_labeled.json")
-	want := Job{Repo: "autobutler-org/quark", RepoID: 901234567, Issue: 42, Steward: "octocat", InstallationID: 61234567}
+	want := Job{
+		Repo: "autobutler-org/quark", RepoID: 901234567, Issue: 42, Steward: "octocat", InstallationID: 61234567,
+		Title: "add a retry to the uploader", Body: "The uploader gives up on the first 503.",
+	}
 	// The same issue after it was reassigned: still the same job.
 	reassigned := bytes.ReplaceAll(ready, []byte(`"octocat"`), []byte(`"hubot"`))
+	// A ready issue its author edited: the job keeps the text it was labeled with.
+	edited := bytes.Replace(bytes.Replace(ready, []byte(`"action": "labeled"`), []byte(`"action": "edited"`), 1),
+		[]byte("The uploader gives up on the first 503."), []byte("Something else entirely."), 1)
+	reopened := bytes.Replace(ready, []byte(`"action": "labeled"`), []byte(`"action": "reopened"`), 1)
 	unassigned := payload(t, "issues_labeled_unassigned.json")
 	unlabeled := payload(t, "issues_assigned_unlabeled.json")
 	closed := bytes.Replace(ready, []byte(`"state": "open"`), []byte(`"state": "closed"`), 1)
@@ -130,6 +144,22 @@ func TestWebhookIntake(t *testing.T) {
 			deliveries: []delivery{{body: ready, signature: sign(ready)}, {body: reassigned, signature: sign(reassigned)}},
 			wantCodes:  []int{http.StatusAccepted, http.StatusOK},
 			wantJobs:   []Job{want},
+		},
+		{
+			name:       "edit after the job exists does not change it",
+			deliveries: []delivery{{body: ready, signature: sign(ready)}, {body: edited, signature: sign(edited)}},
+			wantCodes:  []int{http.StatusAccepted, http.StatusOK},
+			wantJobs:   []Job{want},
+		},
+		{
+			name:       "edit of a ready issue creates no job",
+			deliveries: []delivery{{body: edited, signature: sign(edited)}},
+			wantCodes:  []int{http.StatusOK},
+		},
+		{
+			name:       "reopening a ready issue creates no job",
+			deliveries: []delivery{{body: reopened, signature: sign(reopened)}},
+			wantCodes:  []int{http.StatusOK},
 		},
 		{
 			name:       "labeled but unassigned creates no job",
@@ -169,7 +199,8 @@ func TestWebhookIntake(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			q := startQueue(t)
-			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+			allow := Allowlist{Orgs: []string{"autobutler-org"}}
+			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler))
 			for i, d := range tt.deliveries {
 				if got := deliver(t, h, d); got != tt.wantCodes[i] {
 					t.Errorf("delivery %d: status = %d, want %d", i, got, tt.wantCodes[i])
@@ -196,7 +227,6 @@ func TestWebhookAllowlist(t *testing.T) {
 		body                []byte
 		wantCode, wantJobs  int
 	}{
-		"empty allowlist allows everyone":    {body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
 		"allowed org":                        {orgs: "exokomodo, Autobutler-Org", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
 		"allowed installation":               {installations: "1, 61234567", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
 		"either list is enough":              {orgs: "exokomodo", installations: "61234567", body: ready, wantCode: http.StatusAccepted, wantJobs: 1},
@@ -219,6 +249,35 @@ func TestWebhookAllowlist(t *testing.T) {
 				t.Errorf("jobs = %+v, want %d", got, tt.wantJobs)
 			}
 		})
+	}
+}
+
+func TestEmptyAllowlistAllowsNoOne(t *testing.T) {
+	if _, err := ParseAllowlist(" ", ""); err == nil || !strings.Contains(err.Error(), "--allowed-orgs") {
+		t.Errorf("err = %v, want an empty allowlist refused with a pointer to the flags", err)
+	}
+	ready := payload(t, "issues_assigned_labeled.json")
+	q := startQueue(t)
+	h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+	if got := deliver(t, h, delivery{body: ready, signature: sign(ready)}); got != http.StatusForbidden {
+		t.Errorf("status = %d, want %d from an Intake with no allowlist", got, http.StatusForbidden)
+	}
+	if got := jobs(t, q); len(got) != 0 {
+		t.Errorf("jobs = %+v, want none", got)
+	}
+}
+
+func TestParseRunnerTokens(t *testing.T) {
+	got, err := ParseRunnerTokens(" octocat:a:b , hubot:c,")
+	if err != nil || len(got) != 2 || got["octocat"] != "a:b" || got["hubot"] != "c" {
+		t.Errorf("ParseRunnerTokens = %v, %v, want octocat=a:b and hubot=c", got, err)
+	}
+	for _, bad := range []string{"", " , ", "octocat", "octocat:", ":t", "octo.cat:t", "octocat:a,octocat:b"} {
+		if _, err := ParseRunnerTokens(bad); err == nil {
+			t.Errorf("ParseRunnerTokens(%q) succeeded, want an error", bad)
+		} else if strings.Contains(err.Error(), "a,") || strings.Contains(err.Error(), ":b") {
+			t.Errorf("ParseRunnerTokens(%q) error %q shows a token", bad, err)
+		}
 	}
 }
 
@@ -290,6 +349,10 @@ func TestTokenPerJob(t *testing.T) {
 
 	q := startQueue(t)
 	job := Job{Repo: "autobutler-org/quark", RepoID: 901234567, Issue: 42, Steward: "octocat", InstallationID: 61234567}
+	hubots := Job{Repo: "autobutler-org/quark", RepoID: 901234567, Issue: 43, Steward: "hubot", InstallationID: 61234567}
+	if created, err := q.Publish(t.Context(), hubots); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
 	if created, err := q.Publish(t.Context(), job); err != nil || !created {
 		t.Fatalf("Publish = %v, %v", created, err)
 	}
@@ -297,9 +360,9 @@ func TestTokenPerJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := func(subject string) TokenReply {
+	request := func(steward, subject string) TokenReply {
 		t.Helper()
-		msg, err := q.nc.Request(TokenSubject, []byte(subject), 5*time.Second)
+		msg, err := q.nc.Request(TokenSubjectPrefix+steward, []byte(subject), 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -309,12 +372,18 @@ func TestTokenPerJob(t *testing.T) {
 		}
 		return reply
 	}
-	if got := request(job.Subject()); got.Error != "" || got.Token.Token != "ghs_fake" || !got.ExpiresAt.Equal(expires) {
+	if got := request("octocat", job.Subject()); got.Error != "" || got.Token.Token != "ghs_fake" || !got.ExpiresAt.Equal(expires) {
 		t.Errorf("token reply = %+v, want ghs_fake expiring at %s", got, expires)
 	}
-	for _, subject := range []string{"schmeide.jobs.octocat.901234567.43", "schmeide.jobs.>", "elsewhere"} {
-		if got := request(subject); got.Error == "" || got.Token.Token != "" {
-			t.Errorf("token reply for %q = %+v, want an error and no token", subject, got)
+	for _, tt := range []struct{ steward, subject string }{
+		{"octocat", "schmeide.jobs.octocat.901234567.43"},
+		{"octocat", "schmeide.jobs.>"},
+		{"octocat", "elsewhere"},
+		{"octocat", hubots.Subject()},
+		{"hubot", job.Subject()},
+	} {
+		if got := request(tt.steward, tt.subject); got.Error == "" || got.Token.Token != "" {
+			t.Errorf("token reply to %s for %q = %+v, want an error and no token", tt.steward, tt.subject, got)
 		}
 	}
 }
@@ -331,5 +400,108 @@ func TestMintReportsGitHubRefusal(t *testing.T) {
 	_, err = TokenMinter{AppID: "1", Key: key, APIURL: gh.URL}.Mint(context.Background(), Job{InstallationID: 7})
 	if err == nil || !strings.Contains(err.Error(), "Integration not found") {
 		t.Errorf("err = %v, want GitHub's message", err)
+	}
+}
+
+// connectAs connects to the queue's NATS as a steward, the way a runner does,
+// and returns the connection with the permission errors NATS reports on it.
+func connectAs(t *testing.T, q *Queue, steward, token string) (*nats.Conn, <-chan error) {
+	t.Helper()
+	errs := make(chan error, 16)
+	nc, err := nats.Connect("", nats.InProcessServer(q.srv), nats.UserInfo(steward, token),
+		nats.CustomInboxPrefix(InboxPrefix(steward)),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { errs <- err }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	return nc, errs
+}
+
+func TestRunnerCredentialsAreScopedToTheirSteward(t *testing.T) {
+	// Over TCP, so a refused login fails at once instead of waiting out the
+	// in-process connection.
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	q, err := StartQueue(t.Context(), QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(q.Close)
+	if err := q.ServeTokens(func(context.Context, Job) (Token, error) { return Token{Token: "ghs_fake"}, nil }, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	octocats := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if _, err := q.Publish(t.Context(), octocats); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := nats.Connect("nats://" + addr); err == nil {
+		t.Error("connected without credentials")
+	}
+	if _, err := nats.Connect("nats://"+addr, nats.UserInfo("octocat", "hubot-token")); err == nil {
+		t.Error("connected as octocat with hubot's token")
+	}
+
+	octocat, _ := connectAs(t, q, "octocat", "octocat-token")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	js, err := jetstream.New(octocat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateOrUpdateConsumer(ctx, JobStream, jetstream.ConsumerConfig{
+		Durable: ConsumerName("octocat"), FilterSubject: JobFilter("octocat"), AckPolicy: jetstream.AckExplicitPolicy,
+	}); err != nil {
+		t.Fatalf("octocat cannot pull its own jobs: %v", err)
+	}
+	msg, err := octocat.RequestWithContext(ctx, TokenSubjectPrefix+"octocat", []byte(octocats.Subject()))
+	if err != nil || !strings.Contains(string(msg.Data), "ghs_fake") {
+		t.Fatalf("octocat's token request = %v, %v; want its job's token", msg, err)
+	}
+
+	hubot, errs := connectAs(t, q, "hubot", "hubot-token")
+	short := func() context.Context {
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	if msg, err := hubot.RequestWithContext(short(), TokenSubjectPrefix+"octocat", []byte(octocats.Subject())); err == nil {
+		t.Errorf("hubot got a reply on octocat's token subject: %s", msg.Data)
+	}
+	if msg, err := hubot.RequestWithContext(short(), TokenSubjectPrefix+"hubot", []byte(octocats.Subject())); err != nil || strings.Contains(string(msg.Data), "ghs_fake") {
+		t.Errorf("hubot's request for octocat's job = %v, %v; want a refusal", msg, err)
+	}
+	hubotJS, err := jetstream.New(hubot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hubotJS.CreateOrUpdateConsumer(short(), JobStream, jetstream.ConsumerConfig{
+		Durable: ConsumerName("hubot"), FilterSubject: JobFilter("octocat"), AckPolicy: jetstream.AckExplicitPolicy,
+	}); err == nil {
+		t.Error("hubot created a consumer over octocat's jobs")
+	}
+	if _, err := hubotJS.Stream(short(), JobStream); err == nil {
+		t.Error("hubot read the job stream's info")
+	}
+	for len(errs) > 0 {
+		<-errs // the refusals of the publishes above
+	}
+	for _, subject := range []string{"_INBOX.>", InboxPrefix("octocat") + ".>", jobSubjectPrefix + ">"} {
+		if _, err := hubot.SubscribeSync(subject); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-errs:
+			if !errors.Is(err, nats.ErrPermissionViolation) || !strings.Contains(err.Error(), `"`+subject+`"`) {
+				t.Errorf("subscribe to %s: %v, want a permission violation for it", subject, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("hubot subscribed to %s", subject)
+		}
 	}
 }

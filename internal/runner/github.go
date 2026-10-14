@@ -17,11 +17,6 @@ type github struct {
 	api, repo, token string
 }
 
-type ghIssue struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-}
-
 // do calls one endpoint under /repos/<repo>.
 func (g github) do(ctx context.Context, method, path string, in, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -57,11 +52,6 @@ func (g github) do(ctx context.Context, method, path string, in, out any) error 
 		return nil
 	}
 	return json.Unmarshal(data, out)
-}
-
-func (g github) issue(ctx context.Context, number int) (ghIssue, error) {
-	var issue ghIssue
-	return issue, g.do(ctx, http.MethodGet, fmt.Sprintf("/issues/%d", number), nil, &issue)
 }
 
 func (g github) defaultBranch(ctx context.Context) (string, error) {

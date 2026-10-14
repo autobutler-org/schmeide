@@ -2,7 +2,9 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -14,7 +16,7 @@ import (
 func TestReportSaysHowToFixEachFailure(t *testing.T) {
 	loggedOut := &harness.Fake{CheckErr: fmt.Errorf("%w: run `fake login`", harness.ErrNotLoggedIn)}
 	var out bytes.Buffer
-	if Report(t.Context(), &out, Checks("nats://127.0.0.1:1", "", []harness.Harness{loggedOut})) {
+	if Report(t.Context(), &out, Checks("nats://127.0.0.1:1", "alice", "", []harness.Harness{loggedOut})) {
 		t.Error("Report = true, want false with a logged-out harness and no control node")
 	}
 	for _, want := range []string{
@@ -32,7 +34,7 @@ func TestReportSaysHowToFixEachFailure(t *testing.T) {
 func TestReportMissingGit(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	var out bytes.Buffer
-	if Report(t.Context(), &out, Checks("", "", nil)[:1]) || !strings.Contains(out.String(), "FAIL  git: git was not found on PATH; install it") {
+	if Report(t.Context(), &out, Checks("", "", "", nil)[:1]) || !strings.Contains(out.String(), "FAIL  git: git was not found on PATH; install it") {
 		t.Errorf("output = %q, want a failed git check that says to install it", out.String())
 	}
 }
@@ -44,14 +46,17 @@ func TestReportAllGood(t *testing.T) {
 	}
 	addr := l.Addr().String()
 	l.Close()
-	queue, err := control.StartQueue(t.Context(), control.QueueOptions{Addr: addr, DataDir: t.TempDir()})
+	queue, err := control.StartQueue(t.Context(), control.QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: map[string]string{"alice": "alice-nats"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(queue.Close)
+	if err := queue.ServeTokens(func(context.Context, control.Job) (control.Token, error) { return control.Token{}, nil }, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
-	if !Report(t.Context(), &out, Checks("nats://"+addr, "", []harness.Harness{&harness.Fake{}})) {
+	if !Report(t.Context(), &out, Checks("nats://"+addr, "alice", "alice-nats", []harness.Harness{&harness.Fake{}})) {
 		t.Errorf("Report = false, want true; output:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "ok    control node: reachable at nats://"+addr) {

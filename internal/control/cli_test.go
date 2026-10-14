@@ -20,7 +20,7 @@ func TestParseControl(t *testing.T) {
 		t.Setenv(s.env(), "")
 	}
 	file := filepath.Join(t.TempDir(), "conf")
-	conf := "# control node\nwebhook-secret = from-file\ngithub-app-id = \"111\"\nready-label = file:ready\nallowed-orgs = autobutler-org, exokomodo\ndata-dir = /file\n"
+	conf := "# control node\nwebhook-secret = from-file\ngithub-app-id = \"111\"\nready-label = file:ready\nallowed-orgs = autobutler-org, exokomodo\nrunner-tokens = octocat:t1\ndata-dir = /file\n"
 	if err := os.WriteFile(file, []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +39,7 @@ func TestParseControl(t *testing.T) {
 		ReadyLabel:              "env:ready", // env beats file
 		WebhookSecret:           "from-file", // file beats default
 		AllowedOrgs:             "autobutler-org, exokomodo",
+		RunnerTokens:            "octocat:t1",
 		GitHubAppID:             "111", // quotes are optional
 		GitHubAppPrivateKeyFile: "/env/key.pem",
 		GitHubAPIURL:            DefaultGitHubAPIURL,
@@ -51,17 +52,18 @@ func TestParseControl(t *testing.T) {
 		args []string
 		want string
 	}{
-		"exposed nats needs a token": {args: []string{"--config", file, "--nats-addr", "0.0.0.0:4222"}, want: "SCHMEIDE_NATS_TOKEN"},
-		"bad installation id":        {args: []string{"--config", file, "--allowed-installations", "61234567,acme"}, want: `allowed installation "acme"`},
-		"missing config file":        {args: []string{"--config", file + ".nope"}, want: "--config"},
-		"positional argument":        {args: []string{"--config", file, "extra"}, want: `unexpected argument "extra"`},
+		"empty allowlist":     {args: []string{"--config", file, "--allowed-orgs", " "}, want: "no allowed orgs or installations"},
+		"bad runner token":    {args: []string{"--config", file, "--runner-tokens", "octocat"}, want: "SCHMEIDE_RUNNER_TOKENS"},
+		"bad installation id": {args: []string{"--config", file, "--allowed-installations", "61234567,acme"}, want: `allowed installation "acme"`},
+		"missing config file": {args: []string{"--config", file + ".nope"}, want: "--config"},
+		"positional argument": {args: []string{"--config", file, "extra"}, want: `unexpected argument "extra"`},
 	} {
 		if _, err := parseControl(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, tt.want)
 		}
 	}
-	if _, err := parseControl([]string{"--config", file, "--nats-addr", "0.0.0.0:4222", "--nats-token", "t"}); err != nil {
-		t.Errorf("exposed nats with a token: %v", err)
+	if _, err := parseControl([]string{"--config", file, "--allowed-orgs", " ", "--allowed-installations", "61234567"}); err != nil {
+		t.Errorf("installations alone are an allowlist: %v", err)
 	}
 
 	if err := os.WriteFile(file, []byte("webhook-secrte = typo\n"), 0o600); err != nil {

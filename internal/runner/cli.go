@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -60,35 +61,46 @@ func FlagUsage(fs *flag.FlagSet) string {
 	return b.String()
 }
 
-func runnerFlags() (*flag.FlagSet, *Options, *string) {
-	o := &Options{}
-	fs := flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
+func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
+	o = &Options{}
+	fs = flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
 	fs.StringVar(&o.Steward, "steward", "", "Your GitHub login. The runner only takes jobs for issues assigned to this login. Required.")
 	fs.StringVar(&o.NATSURL, "nats-url", DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr.")
-	fs.StringVar(&o.NATSToken, "nats-token", "", "Token the control node's NATS expects, which is its --nats-token. Prefer the environment variable, so the token stays out of the process list.")
+	fs.StringVar(&o.NATSToken, "nats-token", "", "This steward's NATS token: the one the control node's --runner-tokens lists for --steward. Prefer the environment variable, so the token stays out of the process list.")
 	fs.StringVar(&o.WorkDir, "work-dir", "schmeide-work", "Directory for repository clones and per-job git worktrees.")
 	fs.StringVar(&o.GitHubAPIURL, "github-api-url", control.DefaultGitHubAPIURL, "Base URL of the GitHub REST API.")
 	fs.StringVar(&o.GitHubURL, "github-url", "https://github.com", "Base URL repositories are cloned from and pushed to.")
 	fs.StringVar(&o.GitName, "git-name", "schmeide[bot]", "Author name for the commits a job makes: the GitHub App's bot user.")
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job is tried before its failure is final and reported on the issue. A gate failure is never retried.")
-	claudeArgs := fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
-	return fs, o, claudeArgs
+	passEnv = fs.String("pass-env", "", "Comma-separated names of environment variables that harness sessions and gate commands may see, on top of PATH, HOME, locale, and proxy settings. Every other variable, this runner's own settings included, is withheld from them. Never list a secret.")
+	claudeArgs = fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
+	return fs, o, passEnv, claudeArgs
+}
+
+// splitList splits a comma-separated flag value, dropping empty entries.
+func splitList(value string) []string {
+	return slices.DeleteFunc(strings.Split(value, ","), func(name string) bool { return name == "" })
 }
 
 // Usage is the help text of `schmeide runner`.
 func Usage() string {
-	fs, _, _ := runnerFlags()
+	fs, _, _, _ := runnerFlags()
 	return `schmeide runner takes jobs from the control node and turns each one into a pull
 request. It connects out to the control node's NATS, registers under its
 steward with the harnesses that are installed and logged in on this machine,
 and pulls only that steward's jobs. For each job it creates a git worktree on a
 branch named <issue number>_<short-description>, runs a fresh harness session
-with a brief built from the issue, runs the gate command from the repo's
-.schmeide/config.toml, and then pushes the branch and opens a PR as the schmeide
+with a brief built from the issue as it stood when it became a job, runs the
+gate command from the repo's .schmeide/config.toml, and then pushes the branch and opens a PR as the schmeide
 GitHub App. The outcome is reported to the control node and commented on the
 issue. A job the runner does not finish is handed to another runner, and a job
 that fails is tried again up to --max-attempts times.
+
+Harness sessions and gate commands see only a basic environment (see
+--pass-env), never the runner's own settings such as its NATS token. They still
+run as this machine's user, so run the runner as a user that holds nothing else
+worth taking.
 
 Usage:
   schmeide runner --steward <github login> [flags]
@@ -104,7 +116,7 @@ the environment.
 // Main runs `schmeide runner` with the given arguments and returns its exit
 // code.
 func Main(args []string, stdout, stderr io.Writer) int {
-	fs, o, claudeArgs := runnerFlags()
+	fs, o, passEnv, claudeArgs := runnerFlags()
 	err := ParseFlags(fs, args)
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, Usage())
@@ -117,6 +129,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "schmeide runner: %v\nRun 'schmeide runner --help' for usage.\n", err)
 		return 2
 	}
+	o.PassEnv = splitList(strings.ReplaceAll(*passEnv, " ", ""))
 	o.Harnesses = []harness.Harness{&harness.ClaudeCode{Args: strings.Fields(*claudeArgs)}}
 	o.Output = stderr
 

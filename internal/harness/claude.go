@@ -71,6 +71,7 @@ func (c *ClaudeCode) Run(ctx context.Context, req Request) error {
 	// The prompt goes in on stdin so it is never parsed as a flag.
 	cmd := exec.CommandContext(ctx, bin, append([]string{"--print"}, args...)...)
 	cmd.Dir = req.Dir
+	cmd.Env = req.Env
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Stdout = req.Output
 	cmd.Stderr = req.Output
