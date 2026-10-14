@@ -53,6 +53,9 @@ type Request struct {
 	Dir string
 	// Prompt is the full brief for the session.
 	Prompt string
+	// Env is the session's whole environment, as "name=value" entries. Nil
+	// means the runner's own environment.
+	Env []string
 	// Output receives the session's output. Nil discards it.
 	Output io.Writer
 }

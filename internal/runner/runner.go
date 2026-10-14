@@ -65,7 +65,8 @@ const (
 type Options struct {
 	// NATSURL is the control node's NATS URL.
 	NATSURL string
-	// NATSToken is the token the control node's NATS expects, if any.
+	// NATSToken is this steward's token, as listed for it in the control
+	// node's runner tokens.
 	NATSToken string
 	// Steward is the GitHub login whose jobs this runner takes.
 	Steward string
@@ -77,6 +78,10 @@ type Options struct {
 	GitHubURL string
 	// GitName and GitEmail are the identity commits are made under.
 	GitName, GitEmail string
+	// PassEnv names environment variables, beyond the basic ones, that
+	// harness sessions and gate commands may see. Nothing else from the
+	// runner's environment reaches them.
+	PassEnv []string
 	// Harnesses are the harnesses to offer. The first one that passes its
 	// check runs the jobs.
 	Harnesses []harness.Harness
@@ -102,24 +107,29 @@ type Runner struct {
 	harness harness.Harness
 }
 
-// Connect opens a connection to the control node's NATS and checks that the
-// job stream is there. The error says what to check.
-func Connect(ctx context.Context, url, token string) (*nats.Conn, jetstream.JetStream, error) {
-	nc, err := nats.Connect(url, nats.Token(token), nats.Name("schmeide runner"), nats.MaxReconnects(-1))
+// Connect opens a connection to the control node's NATS as the steward and
+// checks that a control node answers the steward's token requests. The error
+// says what to check.
+func Connect(ctx context.Context, url, steward, token string) (*nats.Conn, jetstream.JetStream, error) {
+	nc, err := nats.Connect(url, nats.UserInfo(steward, token), nats.CustomInboxPrefix(control.InboxPrefix(steward)),
+		nats.Name("schmeide runner"), nats.MaxReconnects(-1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot reach the control node's NATS at %s: %w\n"+
+		return nil, nil, fmt.Errorf("cannot reach the control node's NATS at %s as %s: %w\n"+
 			"Check that `schmeide control` is running, that --nats-url points at its --nats-addr, "+
-			"and that --nats-token matches its --nats-token", url, err)
+			"and that --nats-token is the token its --runner-tokens lists for %s", url, steward, err, steward)
 	}
+	// An empty token request is refused, but only a control node answers it.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	js, err := jetstream.New(nc)
 	if err == nil {
-		_, err = js.Stream(ctx, control.JobStream)
+		_, err = nc.RequestWithContext(ctx, control.TokenSubjectPrefix+steward, nil)
 	}
 	if err != nil {
 		nc.Close()
-		return nil, nil, fmt.Errorf("connected to NATS at %s but could not find the job stream %s: %w\n"+
+		return nil, nil, fmt.Errorf("connected to NATS at %s but no control node answered for %s: %w\n"+
 			"Check that --nats-url points at a `schmeide control` node and not at some other NATS server",
-			url, control.JobStream, err)
+			url, steward, err)
 	}
 	return nc, js, nil
 }
@@ -145,7 +155,7 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 		return nil, fmt.Errorf("work directory: %w", err)
 	}
 
-	nc, js, err := Connect(ctx, o.NATSURL, o.NATSToken)
+	nc, js, err := Connect(ctx, o.NATSURL, o.Steward, o.NATSToken)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +193,8 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	// runners, so each job goes to exactly one of them and no other steward's
 	// job is ever delivered here.
 	r.cons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
-		Durable:       "runner-" + r.opts.Steward,
-		FilterSubject: jobSubjectPrefix + r.opts.Steward + ".>",
+		Durable:       control.ConsumerName(r.opts.Steward),
+		FilterSubject: control.JobFilter(r.opts.Steward),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       r.opts.AckWait,
 	})
@@ -243,7 +253,7 @@ func (r *Runner) report(job control.Job, state State, detail string) {
 
 // token asks the control node for the job's GitHub token.
 func (r *Runner) token(ctx context.Context, subject string) (string, error) {
-	msg, err := r.nc.RequestWithContext(ctx, control.TokenSubject, []byte(subject))
+	msg, err := r.nc.RequestWithContext(ctx, control.TokenSubjectPrefix+r.opts.Steward, []byte(subject))
 	if err != nil {
 		return "", fmt.Errorf("ask the control node for the job's token: %w", err)
 	}
@@ -342,15 +352,14 @@ func failed(err error) outcome {
 
 // work takes the job as far as it goes on this attempt.
 func (r *Runner) work(ctx context.Context, gh github, job control.Job, token string) outcome {
-	issue, err := gh.issue(ctx, job.Issue)
-	if err != nil {
-		return failed(err)
+	if job.Title == "" {
+		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
 	base, err := gh.defaultBranch(ctx)
 	if err != nil {
 		return failed(err)
 	}
-	branch := BranchName(job.Issue, issue.Title)
+	branch := BranchName(job.Issue, job.Title)
 	// A redelivered job whose first runner died after opening the PR must not
 	// open a second one. The first attempt's PR already links the issue, so
 	// nothing more is said there. The guard goes by the issue number, not the
@@ -380,22 +389,27 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 			r.log.Warn("could not clean up the job's worktree", "repo", job.Repo, "issue", job.Issue, "err", err)
 		}
 	}()
-	return r.execute(ctx, ws, gh, job, issue, branch, base)
+	return r.execute(ctx, ws, gh, job, branch, base)
 }
 
 // execute is the job itself, written against Workspace only.
-func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job control.Job, issue ghIssue, branch, base string) outcome {
+func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job control.Job, branch, base string) outcome {
 	// The gate is read before the session runs, so the session cannot weaken it.
 	cfg, err := repoconfig.Load(ws.Dir())
 	if err != nil {
 		return failed(err)
 	}
 	r.report(job, StateWorking, r.harness.Name())
-	req := harness.Request{Dir: ws.Dir(), Prompt: brief(job, issue, cfg.Gate), Output: r.opts.Output}
+	req := harness.Request{
+		Dir:    ws.Dir(),
+		Prompt: brief(job, cfg.Gate),
+		Env:    harnessEnv(os.Environ(), r.opts.PassEnv),
+		Output: r.opts.Output,
+	}
 	if err := r.harness.Run(ctx, req); err != nil {
 		return failed(fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err))
 	}
-	title, body := prText(ws.Dir(), job.Issue, issue.Title)
+	title, body := prText(ws.Dir(), job.Issue, job.Title)
 	changed, err := ws.Commit(ctx, title)
 	if err != nil {
 		return failed(err)
@@ -404,14 +418,17 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		return failed(fmt.Errorf("the %s session made no changes", r.harness.Name()))
 	}
 	if output, err := ws.Run(ctx, cfg.Gate); err != nil {
+		// The output stays on the runner: the session wrote the code that
+		// produced it, so it is not trusted to be safe to publish.
 		if len(output) > gateTailBytes {
 			output = "...\n" + output[len(output)-gateTailBytes:]
 		}
 		detail := fmt.Sprintf("the gate command `%s` failed: %v", cfg.Gate, err)
+		r.log.Warn("gate failed", "repo", job.Repo, "issue", job.Issue, "err", err, "output", output)
 		return outcome{
 			state:   StateGateFailed,
 			detail:  detail,
-			comment: fmt.Sprintf("schmeide did not open a pull request: %s\n\n```\n%s\n```", detail, output),
+			comment: "schmeide did not open a pull request: " + detail + ". The gate's output is in the runner's log.",
 		}
 	}
 	if err := ws.Push(ctx); err != nil {
@@ -439,7 +456,7 @@ func BranchName(issue int, title string) string {
 }
 
 // brief is the prompt for the job's harness session.
-func brief(job control.Job, issue ghIssue, gate string) string {
+func brief(job control.Job, gate string) string {
 	return fmt.Sprintf(`You are working on GitHub issue #%[1]d of %[2]s, in a fresh checkout of the repository on its own branch.
 
 Issue title: %[3]s
@@ -450,7 +467,7 @@ Issue body:
 Make the change the issue asks for, with tests where the repository expects them. Follow the repository's own conventions (README, CONTRIBUTING, agent instruction files). Stay inside this directory. Do not push and do not open a pull request: that is done for you once the repository's gate command passes. The gate command is: %[5]s
 
 When you are done, write the pull request text to %[6]s: the title on the first line, following the repository's commit and pull request title conventions, then a blank line, then the body, following the repository's pull request template if it has one. The body must contain the line "Closes #%[1]d".
-`, job.Issue, job.Repo, issue.Title, issue.Body, gate, prTextPath)
+`, job.Issue, job.Repo, job.Title, job.Body, gate, prTextPath)
 }
 
 // prText returns the PR title and body the session left in prTextPath, and

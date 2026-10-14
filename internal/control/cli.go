@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -31,12 +30,12 @@ var controlSettings = []setting{
 	{name: "config", usage: "Path of a config file with one 'name = value' line per setting, named as the flags are."},
 	{name: "http-addr", def: ":8080", usage: "Address the webhook endpoint listens on. GitHub must be able to reach /webhook here."},
 	{name: "nats-addr", def: "127.0.0.1:4222", usage: "Address the embedded NATS server listens on. Runners connect here."},
-	{name: "nats-token", usage: "Token runners must present to NATS. Required when --nats-addr is not a loopback address."},
+	{name: "runner-tokens", required: true, usage: "Comma-separated '<steward login>:<token>' entries, one per steward. A runner connects to NATS as its steward with that steward's token, and can only reach that steward's jobs and job tokens. Prefer the environment variable or config file, so the tokens stay out of the process list."},
 	{name: "data-dir", def: "schmeide-data", usage: "Directory where the job queue is stored."},
 	{name: "webhook-secret", required: true, usage: "Webhook secret of the schmeide GitHub App. Prefer the environment variable or config file, so the secret stays out of the process list."},
 	{name: "ready-label", def: DefaultReadyLabel, usage: "Label that, together with an assignee, turns an issue into a job."},
-	{name: "allowed-orgs", usage: "Comma-separated organization or user logins whose repositories may create jobs. Webhooks for anyone else are rejected with 403."},
-	{name: "allowed-installations", usage: "Comma-separated GitHub App installation IDs that may create jobs. A webhook is accepted when it matches this list or --allowed-orgs; with both empty, every installation of the App may create jobs."},
+	{name: "allowed-orgs", usage: "Comma-separated organization or user logins whose repositories may create jobs. Webhooks for anyone else are rejected with 403. This or --allowed-installations is required."},
+	{name: "allowed-installations", usage: "Comma-separated GitHub App installation IDs that may create jobs. A webhook is accepted when it matches this list or --allowed-orgs. This or --allowed-orgs is required."},
 	{name: "github-app-id", required: true, usage: "App ID of the schmeide GitHub App."},
 	{name: "github-app-private-key-file", required: true, usage: "Path of the GitHub App's private key (.pem)."},
 	{name: "github-api-url", def: DefaultGitHubAPIURL, usage: "Base URL of the GitHub REST API."},
@@ -145,18 +144,16 @@ func parseControl(args []string) (Config, error) {
 	if len(missing) > 0 {
 		return Config{}, errors.New("missing required settings:\n" + strings.Join(missing, "\n"))
 	}
-	// The NATS server hands out GitHub tokens, so it is not exposed unauthenticated.
-	if host, _, _ := net.SplitHostPort(values["nats-addr"]); values["nats-token"] == "" && host != "localhost" && !net.ParseIP(host).IsLoopback() {
-		return Config{}, fmt.Errorf("--nats-addr %s is reachable from other machines, so runners must authenticate: "+
-			"pass --nats-token or set SCHMEIDE_NATS_TOKEN, or listen on 127.0.0.1", values["nats-addr"])
+	if _, err := ParseRunnerTokens(values["runner-tokens"]); err != nil {
+		return Config{}, fmt.Errorf("%w; fix --runner-tokens or SCHMEIDE_RUNNER_TOKENS", err)
 	}
 	if _, err := ParseAllowlist(values["allowed-orgs"], values["allowed-installations"]); err != nil {
-		return Config{}, fmt.Errorf("%w; fix --allowed-installations or SCHMEIDE_ALLOWED_INSTALLATIONS", err)
+		return Config{}, fmt.Errorf("%w; fix --allowed-orgs or --allowed-installations", err)
 	}
 	return Config{
 		HTTPAddr:                values["http-addr"],
 		NATSAddr:                values["nats-addr"],
-		NATSToken:               values["nats-token"],
+		RunnerTokens:            values["runner-tokens"],
 		DataDir:                 values["data-dir"],
 		WebhookSecret:           values["webhook-secret"],
 		ReadyLabel:              values["ready-label"],

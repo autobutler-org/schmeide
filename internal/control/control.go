@@ -21,8 +21,9 @@ type Config struct {
 	HTTPAddr string
 	// NATSAddr is the host:port runners connect to.
 	NATSAddr string
-	// NATSToken, when set, is the token runners must present to NATS.
-	NATSToken string
+	// RunnerTokens is a comma-separated list of "<steward>:<token>" entries:
+	// the token each steward's runners present to NATS.
+	RunnerTokens string
 	// DataDir is where JetStream keeps the job queue.
 	DataDir string
 	// WebhookSecret is the GitHub App's webhook secret.
@@ -86,6 +87,10 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	runnerTokens, err := ParseRunnerTokens(cfg.RunnerTokens)
+	if err != nil {
+		return err
+	}
 	pemBytes, err := os.ReadFile(cfg.GitHubAppPrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("read the GitHub App private key: %w", err)
@@ -96,7 +101,7 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	minter := TokenMinter{AppID: cfg.GitHubAppID, Key: key, APIURL: cfg.GitHubAPIURL}
 
-	queue, err := StartQueue(ctx, QueueOptions{Addr: cfg.NATSAddr, AuthToken: cfg.NATSToken, DataDir: cfg.DataDir})
+	queue, err := StartQueue(ctx, QueueOptions{Addr: cfg.NATSAddr, RunnerTokens: runnerTokens, DataDir: cfg.DataDir})
 	if err != nil {
 		return err
 	}

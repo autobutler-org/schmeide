@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +37,9 @@ type worktreeSpec struct {
 	gitName, gitEmail                 string
 	// id names the worktree directory and repoID the clone it hangs off.
 	id, repoID string
+	// env is the environment for git and the gate, without the runner's own
+	// settings and secrets.
+	env []string
 }
 
 // worktree is the [Workspace] backed by a git worktree on the host.
@@ -59,7 +63,7 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		baseRef: "refs/remotes/origin/" + s.base,
 		// The token goes in through the environment so that it is never
 		// written to git config or shown in the process list.
-		env: append(os.Environ(),
+		env: append(slices.Clone(s.env),
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=http.extraHeader",
@@ -125,6 +129,7 @@ func (w *worktree) Commit(ctx context.Context, message string) (bool, error) {
 func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = w.dir
+	cmd.Env = w.spec.env
 	// Its own process group, so a canceled gate takes its children with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

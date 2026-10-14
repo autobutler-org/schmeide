@@ -11,7 +11,9 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// fakeRunner publishes what a runner would, over its own connection.
+// fakeRunner publishes what a runner would. It uses the control node's own
+// connection, so it can publish for any steward and the payload checks are
+// what is under test.
 type fakeRunner struct {
 	t  *testing.T
 	nc *nats.Conn
@@ -19,12 +21,7 @@ type fakeRunner struct {
 
 func startFakeRunner(t *testing.T, q *Queue) fakeRunner {
 	t.Helper()
-	nc, err := nats.Connect("", nats.InProcessServer(q.srv))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(nc.Close)
-	return fakeRunner{t: t, nc: nc}
+	return fakeRunner{t: t, nc: q.Conn()}
 }
 
 func (f fakeRunner) publish(subject string, v any) {

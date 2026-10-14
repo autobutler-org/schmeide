@@ -40,6 +40,11 @@ type Job struct {
 	Steward string `json:"steward"`
 	// InstallationID is the GitHub App installation the webhook came from.
 	InstallationID int64 `json:"installation_id"`
+	// Title and Body are the issue as it stood when it became a job. The
+	// runner works from them, not from the live issue, so an edit made after
+	// a maintainer marked the issue ready does not reach the job.
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
 // Subject is the JetStream subject the job is published on. A runner pulls its
@@ -63,15 +68,24 @@ func VerifySignature(secret, body []byte, header string) error {
 	return nil
 }
 
+// jobActions are the issues event actions that can create a job. Each is
+// something only a person with triage access to the repository can do, so an
+// issue author cannot make a job by editing or reopening their own issue.
+var jobActions = []string{"labeled", "assigned"}
+
 // JobFromIssuesEvent returns the job for a GitHub `issues` webhook payload, or
-// nil when the issue is not an open, assigned, ready-labeled issue.
+// nil when the event is not a label or assignment that leaves the issue open,
+// assigned, and ready-labeled.
 func JobFromIssuesEvent(body []byte, readyLabel string) (*Job, error) {
 	type user struct {
 		Login string `json:"login"`
 	}
 	var ev struct {
-		Issue struct {
+		Action string `json:"action"`
+		Issue  struct {
 			Number    int    `json:"number"`
+			Title     string `json:"title"`
+			Body      string `json:"body"`
 			State     string `json:"state"`
 			Assignee  *user  `json:"assignee"`
 			Assignees []user `json:"assignees"`
@@ -102,7 +116,7 @@ func JobFromIssuesEvent(body []byte, readyLabel string) (*Job, error) {
 	for _, l := range ev.Issue.Labels {
 		ready = ready || l.Name == readyLabel
 	}
-	if steward == "" || !ready || ev.Issue.State != "open" {
+	if steward == "" || !ready || ev.Issue.State != "open" || !slices.Contains(jobActions, ev.Action) {
 		return nil, nil //nolint:nilnil // no job is a normal outcome, not an error
 	}
 	// The steward becomes a NATS subject token, so it must not carry subject syntax.
@@ -118,12 +132,14 @@ func JobFromIssuesEvent(body []byte, readyLabel string) (*Job, error) {
 		Issue:          ev.Issue.Number,
 		Steward:        steward,
 		InstallationID: ev.Installation.ID,
+		Title:          ev.Issue.Title,
+		Body:           ev.Issue.Body,
 	}, nil
 }
 
 // Allowlist names the repository owners and GitHub App installations that may
 // create jobs. A job is allowed when it matches either list. An empty
-// Allowlist allows every job.
+// Allowlist allows no job.
 type Allowlist struct {
 	// Orgs are the logins of allowed repository owners, organizations or users.
 	Orgs []string
@@ -132,7 +148,8 @@ type Allowlist struct {
 }
 
 // ParseAllowlist reads the comma-separated --allowed-orgs and
-// --allowed-installations values.
+// --allowed-installations values. At least one of them must name something,
+// so a control node never accepts every installation of the App by default.
 func ParseAllowlist(orgs, installations string) (Allowlist, error) {
 	var a Allowlist
 	for org := range strings.SplitSeq(orgs, ",") {
@@ -151,13 +168,39 @@ func ParseAllowlist(orgs, installations string) (Allowlist, error) {
 		}
 		a.Installations = append(a.Installations, id)
 	}
+	if len(a.Orgs) == 0 && len(a.Installations) == 0 {
+		return Allowlist{}, errors.New("no allowed orgs or installations; name the orgs or GitHub App installations " +
+			"that may create jobs with --allowed-orgs or --allowed-installations")
+	}
 	return a, nil
 }
 
-func (a Allowlist) allows(job Job) bool {
-	if len(a.Orgs) == 0 && len(a.Installations) == 0 {
-		return true
+// ParseRunnerTokens reads the comma-separated --runner-tokens value, one
+// "<steward login>:<token>" entry per steward.
+func ParseRunnerTokens(value string) (map[string]string, error) {
+	tokens := map[string]string{}
+	for entry := range strings.SplitSeq(value, ",") {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		steward, token, ok := strings.Cut(entry, ":")
+		switch {
+		case !ok || steward == "" || token == "":
+			return nil, errors.New("a runner token entry is not '<steward login>:<token>'")
+		case strings.ContainsAny(steward, ".*>/\\ \t\r\n"):
+			return nil, fmt.Errorf("runner token steward %q is not a GitHub login", steward)
+		case tokens[steward] != "":
+			return nil, fmt.Errorf("steward %q has more than one runner token", steward)
+		}
+		tokens[steward] = token
 	}
+	if len(tokens) == 0 {
+		return nil, errors.New("no runner tokens; give each steward's runners their own token with --runner-tokens <login>:<token>")
+	}
+	return tokens, nil
+}
+
+func (a Allowlist) allows(job Job) bool {
 	owner, _, _ := strings.Cut(job.Repo, "/")
 	// GitHub logins are case-insensitive.
 	return slices.Contains(a.Installations, job.InstallationID) ||
@@ -180,7 +223,7 @@ type Intake struct {
 	Secret []byte
 	// ReadyLabel is the label that marks an issue ready.
 	ReadyLabel string
-	// Allow restricts who may create jobs. The zero value allows everyone.
+	// Allow restricts who may create jobs. The zero value allows no one.
 	Allow Allowlist
 	// Publish stores a job and reports whether it is new. It must be idempotent
 	// per issue.
