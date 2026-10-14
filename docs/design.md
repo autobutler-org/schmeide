@@ -169,8 +169,8 @@ webhooks.
 
 ## First slice
 
-Epic #7: one control node and one runner on the same machine take an assigned,
-ready-labeled issue to an opened pull request, using Claude Code.
+Epic #7, done: one control node and one runner on the same machine take an
+assigned, ready-labeled issue to an opened pull request, using Claude Code.
 
 | Issue | Piece | Depends on |
 |---|---|---|
@@ -179,11 +179,13 @@ ready-labeled issue to an opened pull request, using Claude Code.
 | #5 | Tracked per-repo config with the gate command | |
 | #6 | Runner that takes a job from issue to opened PR | #3, #4, #5 |
 
-#3, #4, and #5 are independent of each other and can be built in parallel.
+Follow-up work in the slice: #14 (the control node subscribes to runner
+registration and job status), #15 (retries for failed jobs and a duplicate PR
+guard), and #16 (the webhook allowlist).
 
 The schmeide GitHub App is a prerequisite for running the slice end to end.
-Everything before that point can be tested with fake webhook payloads and a
-fake harness.
+Everything before that point is tested with fake webhook payloads and a fake
+harness.
 
 Not in the first slice:
 
@@ -194,18 +196,23 @@ Not in the first slice:
 - Harnesses other than Claude Code
 - Polling GitHub for issues
 
+## Settled decisions
+
+| Decision | Outcome | Where |
+|---|---|---|
+| Name of the ready label | `schmeide:ready`, changeable with `--ready-label` | `internal/control/intake.go` |
+| Path and format of the per-repo config file | `.schmeide/config.toml` | `internal/repoconfig` |
+| Whether the control node restricts which orgs or App installations it accepts webhooks from | Yes, with `--allowed-orgs` and `--allowed-installations`. Webhooks from anything else are rejected. With both empty, every installation is accepted. | #16, `internal/control/intake.go` |
+| Shape of the job message that the control node publishes and the runner consumes | JSON on `schmeide.jobs.<steward>.<repo_id>.<issue>` with `repo`, `repo_id`, `issue`, `steward`, and `installation_id` | `internal/control/intake.go` |
+| How #6 is verified end to end | Against a test repo with the real App | #6 |
+
 ## Open decisions
 
 None of these are settled. Where a value is given, it is a proposal.
 
 | Decision | Proposal | Affects |
 |---|---|---|
-| Name of the ready label | `schmeide:ready` | #3 |
-| Path and format of the per-repo config file | `.schmeide/config.toml` | #5 |
-| Whether the control node restricts which orgs or App installations it accepts webhooks from | Take an allowlist and drop webhooks from anything else, so the control node does not depend on the App staying private | #3 |
-| Shape of the job message that the control node publishes and the runner consumes | None yet. #3 is built first and will define it; #6 depends on it. | #3, #6 |
 | How a runner opts in to pool work, and what limits apply | None yet. Needed before pool fallback is turned on. | Later |
-| How #6 is verified end to end | Either against a test repo with the real App, or against a fake GitHub API with the real run as a manual check | #6 |
 
 ## Later
 
