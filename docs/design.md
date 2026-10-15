@@ -31,7 +31,7 @@ In scope:
 - **Issue to PR.** Agents take an issue and produce a pull request. This is
   what the first slice does.
 - **Review and merge.** An AI review stage, and merging once the gates pass.
-  Neither is built yet.
+  The review stage is built. Merging is not.
 
 Out of scope for now: planning and intake (turning ideas into issues,
 prioritizing, assigning) and keeping repo settings consistent across the org.
@@ -97,12 +97,12 @@ flowchart LR
 | 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job. | Done |
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
-| 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes. | Later |
+| 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes or the round limit is reached. | Done |
 | 9 | With the review passed and CI green, the PR is merged by the factory or by a person, depending on the repo's config. | Later |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
-under [First slice](#first-slice)). Steps 4, 8, and 9 have not been built. The
-AI review stage in step 8 is not shipped.
+under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
+Steps 4 and 9 have not been built.
 
 ## Decisions
 
@@ -136,9 +136,15 @@ signed with the machine owner's key.
 
 ### Review
 
-A separate AI review stage gates every PR on top of CI. The reviewer runs as a
-fresh harness session on the same runner, in the job's existing worktree, so
-the checkout and toolchain are already in place. This stage is not built.
+After the gate passes and the pull request is open, a fresh reviewer session
+runs in the job's existing worktree, so the checkout and toolchain are already
+in place. The reviewer writes its verdict to `.schmeide/review.md`. The runner
+reads that file and removes it before any later commit. The runner allows up
+to `--max-review-rounds` reviewer sessions (default 3). When the reviewer
+requests changes and a round remains, a fresh worker session applies the
+findings, the gate runs again, and the same branch is pushed. A pass finishes
+the job and does not merge. Exhausting the rounds, or a gate failure on a
+fix, comments on the issue and leaves the pull request open.
 
 ### Merge
 
@@ -271,10 +277,12 @@ Follow-ups that landed with the slice:
 The schmeide GitHub App is a prerequisite for a live delivery. Tests use saved
 webhook payloads, a fake GitHub API, and a fake harness.
 
+The AI review stage shipped after this slice. See [Review](#review).
+
 Not in the first slice, and not shipped:
 
 - Falling back to a pool of other people's runners
-- The AI review stage and merging
+- Merging
 - Stacked PRs for declared issue dependencies
 - Container isolation for jobs
 - Harnesses other than Claude Code
@@ -304,9 +312,8 @@ None of these are settled. Where a value is given, it is a proposal.
 
 Roughly in the order they are expected to matter:
 
-1. The AI review stage
-2. Merging, with the per-repo choice between factory merge and human merge
-3. Pool fallback, with opt-in and limits
-4. Stacked PRs for issues that declare a dependency
-5. Container isolation for jobs
-6. A second harness
+1. Merging, with the per-repo choice between factory merge and human merge
+2. Pool fallback, with opt-in and limits
+3. Stacked PRs for issues that declare a dependency
+4. Container isolation for jobs
+5. A second harness
