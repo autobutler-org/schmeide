@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +65,71 @@ func (g github) defaultBranch(ctx context.Context) (string, error) {
 	return repo.DefaultBranch, g.do(ctx, http.MethodGet, "", nil, &repo)
 }
 
+// ghIssue is the part of an issue read from the issue-dependencies API.
+type ghIssue struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+}
+
+// blockedBy lists the issues that block issue. The list is GitHub's
+// blocked-by relationship. No blockers is an empty list. Pages are followed
+// until a short page comes back.
+func (g github) blockedBy(ctx context.Context, issue int) ([]ghIssue, error) {
+	var all []ghIssue
+	for page := 1; ; page++ {
+		if page > 20 {
+			return nil, fmt.Errorf("too many blocked-by pages for issue %d", issue)
+		}
+		var batch []ghIssue
+		endpoint := fmt.Sprintf("/issues/%d/dependencies/blocked_by?per_page=%d&page=%d", issue, pullPageSize, page)
+		if err := g.do(ctx, http.MethodGet, endpoint, nil, &batch); err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < pullPageSize {
+			return all, nil
+		}
+	}
+}
+
+// baseBranch is the branch a new pull request for issue is opened against,
+// and the branch its worktree is created from. It is the repository default
+// branch when no open blocker has an open schmeide pull request: there is no
+// blocker, every blocker is already merged, or a blocker has no open pull
+// request whose branch starts with that issue's "<number>_". Exactly one
+// such pull request selects its branch. More than one is refused.
+func (g github) baseBranch(ctx context.Context, issue int) (string, error) {
+	base, err := g.defaultBranch(ctx)
+	if err != nil {
+		return "", err
+	}
+	blockers, err := g.blockedBy(ctx, issue)
+	if err != nil {
+		return "", err
+	}
+	stacked := ""
+	for _, blocker := range blockers {
+		if blocker.State != "open" {
+			continue
+		}
+		branch, err := g.openIssueBranch(ctx, blocker.Number)
+		if err != nil {
+			return "", err
+		}
+		if branch == "" {
+			continue
+		}
+		if stacked != "" {
+			return "", errors.New("only one open dependency is supported")
+		}
+		stacked = branch
+	}
+	if stacked != "" {
+		return stacked, nil
+	}
+	return base, nil
+}
+
 type ghPull struct {
 	HTMLURL string `json:"html_url"`
 	Head    struct {
@@ -80,20 +146,47 @@ const pullPageSize = 100
 // issue-number prefix, so a retitle of the issue still finds the pull request.
 // Pages are followed until that branch is found or a page comes back short.
 func (g github) findPR(ctx context.Context, issue int) (string, error) {
+	pr, ok, err := g.issuePull(ctx, issue, "all")
+	if err != nil || !ok {
+		return "", err
+	}
+	return pr.HTMLURL, nil
+}
+
+// openIssueBranch returns the head branch of an open pull request whose
+// branch starts with "<issue>_", or "" when there is none.
+func (g github) openIssueBranch(ctx context.Context, issue int) (string, error) {
+	pr, ok, err := g.issuePull(ctx, issue, "open")
+	if err != nil || !ok {
+		return "", err
+	}
+	return pr.Head.Ref, nil
+}
+
+// listPulls returns one page of pull requests in state ("open", "closed", or "all").
+func (g github) listPulls(ctx context.Context, state string, page int) ([]ghPull, error) {
+	var pulls []ghPull
+	endpoint := fmt.Sprintf("/pulls?state=%s&per_page=%d&page=%d", state, pullPageSize, page)
+	err := g.do(ctx, http.MethodGet, endpoint, nil, &pulls)
+	return pulls, err
+}
+
+// issuePull returns the first pull request in state whose head ref starts
+// with "<issue>_". ok is false when there is none.
+func (g github) issuePull(ctx context.Context, issue int, state string) (ghPull, bool, error) {
 	prefix := fmt.Sprintf("%d_", issue)
 	for page := 1; ; page++ {
-		var pulls []ghPull
-		path := fmt.Sprintf("/pulls?state=all&per_page=%d&page=%d", pullPageSize, page)
-		if err := g.do(ctx, http.MethodGet, path, nil, &pulls); err != nil {
-			return "", err
+		pulls, err := g.listPulls(ctx, state, page)
+		if err != nil {
+			return ghPull{}, false, err
 		}
 		for _, p := range pulls {
 			if strings.HasPrefix(p.Head.Ref, prefix) {
-				return p.HTMLURL, nil
+				return p, true, nil
 			}
 		}
 		if len(pulls) < pullPageSize {
-			return "", nil
+			return ghPull{}, false, nil
 		}
 	}
 }

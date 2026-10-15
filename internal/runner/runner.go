@@ -1,11 +1,14 @@
 // Package runner is the schmeide runner: it pulls its steward's jobs from the
 // control node and takes each one from a GitHub issue to an opened pull
 // request, then reviews that change in the same worktree until the review
-// passes or the round limit is hit. It uses a harness that is already logged
-// in on this machine. With --pool, which defaults to off, it also takes a job
-// whose steward has no registered runner, one job at a time, its own first.
-// The factory merges the pull request only when the repo
-// config sets merge = "factory". The default is a person.
+// passes or the round limit is hit. When the issue is blocked by exactly one
+// open issue that has an open pull request on a "<number>_" branch, the
+// worktree and the new pull request use that branch as their base. It uses a
+// harness that is already logged in on this machine. With --pool, which
+// defaults to off, it also takes a job whose steward has no registered
+// runner, one job at a time, its own first. The factory merges the pull
+// request only when the repo config sets merge = "factory". The default is a
+// person.
 package runner
 
 import (
@@ -434,19 +437,22 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	if job.Title == "" {
 		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
-	base, err := gh.defaultBranch(ctx)
-	if err != nil {
-		return failed(err)
-	}
 	branch := BranchName(job.Issue, job.Title)
 	// A redelivered job whose first runner died after opening the PR must not
 	// open a second one. The first attempt's PR already links the issue, so
 	// nothing more is said there. The guard goes by the issue number, not the
-	// whole branch name, which changes when the issue is retitled.
+	// whole branch name, which changes when the issue is retitled. A stacked
+	// pull request matches here too, and a later review pushes the same head.
 	if url, err := gh.findPR(ctx, job.Issue); err != nil {
 		return failed(err)
 	} else if url != "" {
 		return outcome{state: StatePROpened, detail: url}
+	}
+	// Asked before the worktree exists, so a stacked job starts on the
+	// dependency's branch and the pull request opens against it.
+	base, err := gh.baseBranch(ctx, job.Issue)
+	if err != nil {
+		return failed(err)
 	}
 
 	ws, err := newWorktree(ctx, worktreeSpec{
