@@ -98,9 +98,10 @@ type Options struct {
 	GitHubURL string
 	// GitName and GitEmail are the identity commits are made under.
 	GitName, GitEmail string
-	// PassEnv names environment variables, beyond the basic ones, that
-	// harness sessions and gate commands may see. Nothing else from the
-	// runner's environment reaches them.
+	// PassEnv names variables to add for the harness session only, on top of
+	// the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use
+	// this list: the gate inherits the runner process environment. Git sees
+	// only the installation-token variables. Never list a secret.
 	PassEnv []string
 	// Harnesses are the harnesses to offer. The first one that passes its
 	// check runs the jobs.
