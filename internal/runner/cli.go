@@ -73,6 +73,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
 	fs.StringVar(&o.GitName, "git-name", "schmeide[bot]", "Author name for the commits a job makes: the GitHub App's bot user.")
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job is tried before its failure is final and reported on the issue. A gate failure is never retried.")
+	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The job never merges.")
 	passEnv = fs.String("pass-env", "", "Comma-separated names of environment variables that harness sessions and gate commands may see, on top of PATH, HOME, locale, and proxy settings. Every other variable, this runner's own settings included, is withheld from them. Never list a secret.")
 	claudeArgs = fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
 	return fs, o, passEnv, claudeArgs
@@ -92,10 +93,18 @@ steward with the harnesses that are installed and logged in on this machine,
 and pulls only that steward's jobs. For each job it creates a git worktree on a
 branch named <issue number>_<short-description>, runs a fresh harness session
 with a brief built from the issue as it stood when it became a job, runs the
-gate command from the repo's .schmeide/config.toml, and then pushes the branch and opens a PR as the schmeide
-GitHub App. The outcome is reported to the control node and commented on the
-issue. A job the runner does not finish is handed to another runner, and a job
-that fails is tried again up to --max-attempts times.
+gate command from the repo's .schmeide/config.toml, and then pushes the branch
+and opens a PR as the schmeide GitHub App. Once that gate has passed and the
+PR is open, a fresh reviewer session checks the change in the same worktree.
+If the reviewer requests changes and --max-review-rounds (default 3) has
+rounds left, a fresh worker session applies the findings, the gate runs
+again, and the same branch is pushed so the open PR updates. A passing review
+finishes the job. The job does not merge the pull request. Exhausting the
+rounds fails the job, comments on the issue, and leaves the pull request
+open. The outcome is reported to the control node and commented on the issue.
+A job the runner does not finish is handed to another runner, and a job that
+fails before the pull request is open is tried again up to --max-attempts
+times. A gate failure is never retried.
 
 Harness sessions and gate commands see only a basic environment (see
 --pass-env), never the runner's own settings such as its NATS token. They still
