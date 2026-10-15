@@ -51,6 +51,9 @@ type pull struct {
 	Head  string `json:"head"`
 	Base  string `json:"base"`
 	URL   string `json:"html_url"`
+	// State is "open" or "closed". Empty means open, including a pull request
+	// created through this server, which does not send a state.
+	State string `json:"state,omitempty"`
 }
 
 // reply is the pull request as GitHub returns it, where head is an object.
@@ -73,6 +76,9 @@ type fakeGitHub struct {
 	// merges is how many merge calls landed, and mergeMethod is the last one.
 	merges      int
 	mergeMethod string
+	// blockedBy is the issue-dependencies blocked-by list for an issue.
+	// A missing key is an empty list.
+	blockedBy map[int][]ghIssue
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -89,13 +95,32 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply = map[string]string{"default_branch": "main"}
 	case r.Method == http.MethodGet && path == "/pulls":
 		head := r.URL.Query().Get("head")
+		state := r.URL.Query().Get("state")
 		found := []map[string]any{}
 		for _, p := range f.pulls {
-			if head == "" || head == "o:"+p.Head {
-				found = append(found, p.reply())
+			if head != "" && head != "o:"+p.Head {
+				continue
 			}
+			if !pullVisible(p.State, state) {
+				continue
+			}
+			found = append(found, p.reply())
 		}
 		reply = found
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/issues/") && strings.HasSuffix(path, "/dependencies/blocked_by"):
+		rest := strings.TrimPrefix(path, "/issues/")
+		num, tail, ok := strings.Cut(rest, "/")
+		n, err := strconv.Atoi(num)
+		if !ok || tail != "dependencies/blocked_by" || err != nil {
+			f.t.Errorf("unexpected GitHub call %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		issues := f.blockedBy[n]
+		if issues == nil {
+			issues = []ghIssue{}
+		}
+		reply = issues
 	case r.Method == http.MethodPost && path == "/pulls":
 		var p pull
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
@@ -139,6 +164,37 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(reply)
+}
+
+// pullVisible reports whether a pull request of pullState belongs in a list
+// whose state query is query. "all" and an empty query return every state.
+// An empty pullState is open.
+func pullVisible(pullState, query string) bool {
+	if query == "" || query == "all" {
+		return true
+	}
+	if pullState == "" {
+		pullState = "open"
+	}
+	return pullState == query
+}
+
+func (f *fakeGitHub) addBlocker(issue int, blocker ghIssue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.blockedBy == nil {
+		f.blockedBy = map[int][]ghIssue{}
+	}
+	f.blockedBy[issue] = append(f.blockedBy[issue], blocker)
+}
+
+func (f *fakeGitHub) seedPull(p pull) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p.URL == "" {
+		p.URL = fmt.Sprintf("https://github.test/o/r/pull/%d", len(f.pulls)+1)
+	}
+	f.pulls = append(f.pulls, p)
 }
 
 func (f *fakeGitHub) snapshot() ([]pull, map[string][]string) {
@@ -255,6 +311,20 @@ func newWorld(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	return w
+}
+
+// pushBranch commits content at name on a new branch of the test repo.
+func (w *world) pushBranch(t *testing.T, branch, name, content string) {
+	t.Helper()
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", branch)
+	git(t, src, "push", "-q", "origin", "HEAD:"+branch)
 }
 
 // pushConfig commits body as .schmeide/config.toml on the remote default branch.
@@ -1580,4 +1650,238 @@ func TestPoolRunnersShareOneJob(t *testing.T) {
 	if len(pulls) != 1 || pulls[0].Head != "9_fix-the-thing" {
 		t.Errorf("pulls = %+v, want exactly one", pulls)
 	}
+}
+
+func assertBlockedBeforeOpen(t *testing.T, w *world, issue int) {
+	t.Helper()
+	blocked, opened := -1, -1
+	needle := fmt.Sprintf("GET /repos/%s/issues/%d/dependencies/blocked_by", testRepo, issue)
+	open := "POST /repos/" + testRepo + "/pulls"
+	for i, call := range w.gh.callsSnapshot() {
+		if blocked < 0 && call == needle {
+			blocked = i
+		}
+		if opened < 0 && call == open {
+			opened = i
+		}
+	}
+	if blocked < 0 {
+		t.Errorf("GitHub was not asked which issues block #%d: %v", issue, w.gh.callsSnapshot())
+	}
+	if opened >= 0 && blocked > opened {
+		t.Errorf("blocked-by was requested after the pull request was opened: %v", w.gh.callsSnapshot())
+	}
+}
+
+func pullByHead(pulls []pull, head string) (pull, int) {
+	found := pull{}
+	n := 0
+	for _, p := range pulls {
+		if p.Head == head {
+			found = p
+			n++
+		}
+	}
+	return found, n
+}
+
+func assertCommitParent(t *testing.T, bare, branch, parent string) {
+	t.Helper()
+	got := git(t, bare, "rev-parse", branch+"^")
+	want := git(t, bare, "rev-parse", parent)
+	if got != want {
+		t.Errorf("parent of %s is %s, want the tip of %s (%s)", branch, got, parent, want)
+	}
+}
+
+func assertNoBlob(t *testing.T, bare, rev, name string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "cat-file", "-e", rev+":"+name)
+	cmd.Dir = bare
+	if err := cmd.Run(); err == nil {
+		t.Errorf("%s contains %s", rev, name)
+	}
+}
+
+func TestNoDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
+	const branch = "7_fix-the-thing"
+	w := newWorld(t)
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a pull request", states)
+	}
+	assertBlockedBeforeOpen(t, w, 7)
+	pulls, _ := w.gh.snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != "main" {
+		t.Errorf("base = %q, want main", got.Base)
+	}
+	assertCommitParent(t, w.bare, branch, "main")
+}
+
+func TestOneOpenDependencyStacksThePullRequest(t *testing.T) {
+	const (
+		dep    = "3_lay-the-groundwork"
+		branch = "7_fix-the-thing"
+	)
+	w := newWorld(t)
+	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
+	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
+	w.gh.seedPull(pull{Head: dep, Base: "main", State: "open"})
+
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a pull request", states)
+	}
+	assertBlockedBeforeOpen(t, w, 7)
+	pulls, _ := w.gh.snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != dep {
+		t.Errorf("base = %q, want %s", got.Base, dep)
+	}
+	assertCommitParent(t, w.bare, branch, dep)
+	if file := git(t, w.bare, "show", branch+":stacked.txt"); file != "from-3" {
+		t.Errorf("stacked.txt = %q, want the dependency branch's file", file)
+	}
+	assertNoBlob(t, w.bare, "main", "stacked.txt")
+}
+
+func TestMergedDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
+	const (
+		dep    = "3_already-merged"
+		branch = "7_fix-the-thing"
+	)
+	w := newWorld(t)
+	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
+	w.gh.addBlocker(7, ghIssue{Number: 3, State: "closed"})
+	w.gh.seedPull(pull{Head: dep, Base: "main", State: "closed"})
+
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a pull request on the default branch", states)
+	}
+	assertBlockedBeforeOpen(t, w, 7)
+	pulls, _ := w.gh.snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != "main" {
+		t.Errorf("base = %q, want main", got.Base)
+	}
+	assertCommitParent(t, w.bare, branch, "main")
+	assertNoBlob(t, w.bare, branch, "stacked.txt")
+}
+
+func TestTwoOpenDependenciesOpenNothing(t *testing.T) {
+	w := newWorld(t)
+	w.pushBranch(t, "3_first-part", "stacked.txt", "from-3\n")
+	w.pushBranch(t, "4_second-part", "stacked.txt", "from-4\n")
+	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
+	w.gh.addBlocker(7, ghIssue{Number: 4, State: "open"})
+	w.gh.seedPull(pull{Head: "3_first-part", Base: "main", State: "open"})
+	w.gh.seedPull(pull{Head: "4_second-part", Base: "main", State: "open"})
+
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	states := w.await(t, "alice", 7)
+	if states[len(states)-1] != StateFailed {
+		t.Fatalf("states = %v, want the job failed", states)
+	}
+	for _, state := range states {
+		if state == StateWorking || state == StatePROpened {
+			t.Errorf("job went ahead: %v", states)
+			break
+		}
+	}
+	assertBlockedBeforeOpen(t, w, 7)
+	if got := sessions.Load(); got != 0 {
+		t.Errorf("sessions = %d, want none", got)
+	}
+	pulls, comments := w.gh.snapshot()
+	if _, n := pullByHead(pulls, "7_fix-the-thing"); n != 0 {
+		t.Errorf("pulls = %+v, want no pull request for the job", pulls)
+	}
+	if branches := git(t, w.bare, "branch", "--list", "7_*"); branches != "" {
+		t.Errorf("branch pushed: %s", branches)
+	}
+	comment := ""
+	if len(comments["7"]) == 1 {
+		comment = comments["7"][0]
+	}
+	if !strings.Contains(comment, "only one open dependency is supported") || !strings.Contains(comment, "did not open a pull request") {
+		t.Errorf("issue comments = %q, want one that says only one open dependency is supported and that no pull request was opened", comments["7"])
+	}
+}
+
+func TestBlockerWithoutSchmeidePullRequestUsesDefaultBranch(t *testing.T) {
+	const branch = "7_fix-the-thing"
+	w := newWorld(t)
+	w.pushBranch(t, "wip", "stacked.txt", "from-wip\n")
+	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
+	w.gh.seedPull(pull{Head: "wip", Base: "main", State: "open"})
+
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a pull request on the default branch", states)
+	}
+	pulls, _ := w.gh.snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != "main" {
+		t.Errorf("base = %q, want main", got.Base)
+	}
+	assertCommitParent(t, w.bare, branch, "main")
+	assertNoBlob(t, w.bare, branch, "stacked.txt")
+}
+
+func TestOneStackableDependencyIgnoresAnUnstackableBlocker(t *testing.T) {
+	const (
+		dep    = "3_lay-the-groundwork"
+		branch = "7_fix-the-thing"
+	)
+	w := newWorld(t)
+	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
+	w.gh.addBlocker(7, ghIssue{Number: 5, State: "open"})
+	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
+	w.gh.seedPull(pull{Head: dep, Base: "main", State: "open"})
+
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a stacked pull request", states)
+	}
+	pulls, _ := w.gh.snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != dep {
+		t.Errorf("base = %q, want %s", got.Base, dep)
+	}
+	assertCommitParent(t, w.bare, branch, dep)
 }
