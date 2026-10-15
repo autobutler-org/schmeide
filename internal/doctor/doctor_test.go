@@ -130,3 +130,143 @@ func TestReportWrongRunnerToken(t *testing.T) {
 		}
 	}
 }
+
+// namedHarness gives a [harness.Harness] its own name. Tests wrap
+// [harness.Fake], so Check starts no process and a report can tell two
+// fakes apart.
+type namedHarness struct {
+	harness.Harness
+	name string
+}
+
+func (n namedHarness) Name() string { return n.name }
+
+// reachableControl starts a control node the same way TestReportAllGood does
+// and returns its NATS address.
+func reachableControl(t *testing.T) string {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	queue, err := control.StartQueue(t.Context(), control.QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: map[string]string{"alice": "alice-nats"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(queue.Close)
+	if err := queue.ServeTokens(func(context.Context, control.Job) (control.Token, error) { return control.Token{}, nil }, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+func TestReportPassesWhenOneHarnessIsReady(t *testing.T) {
+	addr := reachableControl(t)
+	const fix = "install the Grok CLI and put it on PATH"
+	missing := namedHarness{
+		Harness: &harness.Fake{CheckErr: fmt.Errorf("%w: %s", harness.ErrNotInstalled, fix)},
+		name:    "grok",
+	}
+	ready := namedHarness{Harness: &harness.Fake{}, name: "claude-code"}
+	// Both orders. A report that stops at the first error cannot pass just
+	// because a later harness is ready.
+	for _, hs := range [][]harness.Harness{{missing, ready}, {ready, missing}} {
+		var out bytes.Buffer
+		if !Report(t.Context(), &out, Checks("nats://"+addr, "alice", "alice-nats", hs)) {
+			t.Errorf("Report = false, want true when one harness is ready; output:\n%s", out.String())
+		}
+		for _, want := range []string{
+			"ok    harness claude-code: installed and logged in",
+			"skip  harness grok: not selected: harness not installed: " + fix,
+			"ok    control node: reachable at nats://" + addr,
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("output %q does not contain %q", out.String(), want)
+			}
+		}
+		if strings.Contains(out.String(), "FAIL  harness") {
+			t.Errorf("output %q fails a harness the runner will not use", out.String())
+		}
+	}
+}
+
+func TestReportFailsWhenEveryHarnessFails(t *testing.T) {
+	addr := reachableControl(t)
+	const (
+		claudeFix = "install Claude Code and put it on PATH"
+		grokFix   = "run `grok login` on this machine, then try again"
+	)
+	claude := namedHarness{
+		Harness: &harness.Fake{CheckErr: fmt.Errorf("%w: %s", harness.ErrNotInstalled, claudeFix)},
+		name:    "claude-code",
+	}
+	grok := namedHarness{
+		Harness: &harness.Fake{CheckErr: fmt.Errorf("%w: %s", harness.ErrNotLoggedIn, grokFix)},
+		name:    "grok",
+	}
+	var out bytes.Buffer
+	if Report(t.Context(), &out, Checks("nats://"+addr, "alice", "alice-nats", []harness.Harness{claude, grok})) {
+		t.Error("Report = true, want false when every harness fails")
+	}
+	for _, want := range []string{
+		"ok    git: ",
+		"FAIL  harness claude-code: harness not installed: " + claudeFix,
+		"FAIL  harness grok: harness not logged in: " + grokFix,
+		"ok    control node: reachable at nats://" + addr,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output %q does not contain %q", out.String(), want)
+		}
+	}
+	if strings.Contains(out.String(), "not selected") {
+		t.Errorf("output %q reports a harness as not selected when none is ready", out.String())
+	}
+}
+
+func TestReportGitFailsBesideAReadyHarness(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	const fix = "install the Grok CLI and put it on PATH"
+	missing := namedHarness{
+		Harness: &harness.Fake{CheckErr: fmt.Errorf("%w: %s", harness.ErrNotInstalled, fix)},
+		name:    "grok",
+	}
+	ready := namedHarness{Harness: &harness.Fake{}, name: "claude-code"}
+	var checks []Check
+	for _, c := range Checks("", "alice", "", []harness.Harness{missing, ready}) {
+		if c.Name != "control node" {
+			checks = append(checks, c)
+		}
+	}
+	var out bytes.Buffer
+	if Report(t.Context(), &out, checks) {
+		t.Errorf("Report = true, want false when git is missing; output:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"FAIL  git: git was not found on PATH; install it",
+		"skip  harness grok: not selected: harness not installed: " + fix,
+		"ok    harness claude-code: installed and logged in",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output %q does not contain %q", out.String(), want)
+		}
+	}
+}
+
+func TestReportControlNodeFailsBesideAReadyHarness(t *testing.T) {
+	const fix = "install the Grok CLI and put it on PATH"
+	missing := namedHarness{
+		Harness: &harness.Fake{CheckErr: fmt.Errorf("%w: %s", harness.ErrNotInstalled, fix)},
+		name:    "grok",
+	}
+	ready := namedHarness{Harness: &harness.Fake{}, name: "claude-code"}
+	var out bytes.Buffer
+	if Report(t.Context(), &out, Checks("nats://127.0.0.1:1", "", "", []harness.Harness{missing, ready})) {
+		t.Errorf("Report = true, want false when the control node has no steward; output:\n%s", out.String())
+	}
+	const want = "FAIL  control node: no steward to connect as; pass your GitHub login with --steward"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output %q does not contain %q", out.String(), want)
+	}
+}

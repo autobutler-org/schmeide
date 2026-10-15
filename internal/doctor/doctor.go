@@ -1,5 +1,6 @@
 // Package doctor checks that a machine is ready to run `schmeide runner` and
-// says how to fix whatever is not.
+// says how to fix whatever is not. One working harness is enough. A harness
+// the runner will not use is reported as not selected.
 package doctor
 
 import (
@@ -17,6 +18,9 @@ import (
 // Check is one thing doctor looks at.
 type Check struct {
 	Name string
+	// Harness is true when this check is one harness. Those checks pass as
+	// a group when at least one of them passes.
+	Harness bool
 	// Run returns a short description of what it found, or an error whose
 	// text says how to fix the problem.
 	Run func(ctx context.Context) (string, error)
@@ -33,7 +37,7 @@ func Checks(natsURL, steward, natsToken string, harnesses []harness.Harness) []C
 		return path, nil
 	}}}
 	for _, h := range harnesses {
-		checks = append(checks, Check{Name: "harness " + h.Name(), Run: func(ctx context.Context) (string, error) {
+		checks = append(checks, Check{Name: "harness " + h.Name(), Harness: true, Run: func(ctx context.Context) (string, error) {
 			return "installed and logged in", h.Check(ctx)
 		}})
 	}
@@ -51,17 +55,40 @@ func Checks(natsURL, steward, natsToken string, harnesses []harness.Harness) []C
 }
 
 // Report runs the checks, writes one result per check to w, and reports
-// whether all of them passed.
+// whether this machine is ready. Git and the control node fail the report
+// on their own. Harness checks pass when at least one of them passes; each
+// other harness is written as not selected, with the fix its error carries,
+// and that line does not fail the report. When every harness fails, each
+// one is reported with its fix and the report fails.
 func Report(ctx context.Context, w io.Writer, checks []Check) bool {
-	ok := true
+	type result struct {
+		check Check
+		found string
+		err   error
+	}
+	// Run every check before printing. A harness failure is not selected
+	// only once some other harness has passed, which may come later.
+	results := make([]result, 0, len(checks))
+	harnessPassed := false
 	for _, c := range checks {
 		found, err := c.Run(ctx)
-		if err != nil {
-			ok = false
-			fmt.Fprintf(w, "FAIL  %s: %v\n", c.Name, err)
+		results = append(results, result{check: c, found: found, err: err})
+		if c.Harness && err == nil {
+			harnessPassed = true
+		}
+	}
+	ok := true
+	for _, r := range results {
+		if r.err != nil && r.check.Harness && harnessPassed {
+			fmt.Fprintf(w, "skip  %s: not selected: %v\n", r.check.Name, r.err)
 			continue
 		}
-		fmt.Fprintf(w, "ok    %s: %s\n", c.Name, found)
+		if r.err != nil {
+			ok = false
+			fmt.Fprintf(w, "FAIL  %s: %v\n", r.check.Name, r.err)
+			continue
+		}
+		fmt.Fprintf(w, "ok    %s: %s\n", r.check.Name, r.found)
 	}
 	return ok
 }
@@ -78,9 +105,11 @@ func doctorFlags() (fs *flag.FlagSet, natsURL, steward, natsToken *string) {
 func Usage() string {
 	fs, _, _, _ := doctorFlags()
 	return `schmeide doctor checks that this machine can run 'schmeide runner': git is
-installed, a harness is installed and logged in, and the control node is
-reachable. Each failed check says how to fix it. The exit code is 0 when every
-check passes and 1 otherwise.
+installed, at least one harness is installed and logged in, and the control
+node is reachable. A harness that fails while another passes is reported as
+not selected and does not fail the check. Each failed check says how to fix
+it. The exit code is 0 when git, the control node, and at least one harness
+pass, and 1 otherwise.
 
 Usage:
   schmeide doctor [flags]
