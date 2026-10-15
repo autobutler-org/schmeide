@@ -87,9 +87,9 @@ flowchart LR
   [Credentials and the job environment](#credentials-and-the-job-environment).
 - **Runners bring their own agent login.** A runner uses the first harness
   whose `Check` passes on its machine. Claude Code and the Grok CLI are both
-  built. See [Harnesses](#harnesses). schmeide does not handle agent API
-  keys. A Claude Code session's environment keeps `ANTHROPIC_*` and
-  `CLAUDE_*` so that login still works.
+  built. See [Harnesses](#harnesses). schmeide does not mint or store agent
+  keys. A harness session keeps `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` from
+  the runner's own environment so an existing login still works.
 
 ## Job lifecycle
 
@@ -258,9 +258,11 @@ node's own NATS connection uses a generated password
 variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and the lowercase forms),
 `SSL_CERT_FILE`, `SSL_CERT_DIR`, any name starting with `LC_` or `XDG_`, and
 any name passed in `--pass-env`. A harness session also sees names starting
-with `ANTHROPIC_` or `CLAUDE_`. The runner starts the session with that
-environment, so the session does not see the runner's `SCHMEIDE_*` settings,
-including its NATS token.
+with `ANTHROPIC_`, `CLAUDE_`, or `XAI_`. The session keeps those prefixes
+from the runner's own environment so an existing login still works.
+schmeide does not mint or store agent keys. The runner starts the session
+with that environment, so the session does not see the runner's `SCHMEIDE_*`
+settings, including its NATS token.
 
 The worktree runs git and the gate with whatever environment it was given, and
 adds the installation token only to git's environment. The runner does not pass
@@ -344,7 +346,7 @@ Not in the first slice, and not shipped:
 | Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>` when the assignee has a registered runner, and on a pool subject when the assignee has none. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go`, `internal/control/queue.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
-| What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*` and `CLAUDE_*`, plus `--pass-env`. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
+| What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
 | Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers fail the job. The runner comments on the issue that only one open dependency is supported and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
