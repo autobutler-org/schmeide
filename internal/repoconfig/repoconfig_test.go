@@ -57,4 +57,58 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestMergePolicy(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		want    string
+		errHas  []string
+	}{
+		{name: "absent", content: "gate = \"make check\"\n", want: ""},
+		{name: "empty", content: "gate = \"make check\"\nmerge = \"\"\n", want: ""},
+		{name: "blank", content: "gate = \"make check\"\nmerge = \"  \"\n", want: ""},
+		{name: "human", content: "gate = \"make check\"\nmerge = \"human\"\n", want: MergeHuman},
+		{name: "factory", content: "gate = \"make check\"\nmerge = \"factory\"\n", want: MergeFactory},
+		{name: "nope", content: "gate = \"make check\"\nmerge = \"nope\"\n", errHas: []string{"nope", MergeFactory, MergeHuman}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse(Path, []byte(tc.content))
+			if tc.errHas == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.Gate != "make check" || cfg.Merge != tc.want {
+					t.Fatalf("config = %+v, want gate %q and merge %q", cfg, "make check", tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, s := range tc.errHas {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q missing %q", err, s)
+				}
+			}
+		})
+	}
+}
+
+func TestUnknownKeyDoesNotClaimOnlyGateIsSupported(t *testing.T) {
+	t.Parallel()
+	_, err := Parse(Path, []byte("gate = \"x\"\ngaet = \"y\"\n"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unknown key") || !strings.Contains(err.Error(), "gaet") {
+		t.Fatalf("error = %q, want the unknown key", err)
+	}
+	if strings.Contains(err.Error(), `only "gate"`) {
+		t.Fatalf("error = %q, want no claim that only gate is supported", err)
+	}
+}
+
 func ptr(s string) *string { return &s }

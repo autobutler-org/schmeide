@@ -129,7 +129,8 @@ func roundsExhausted(rounds int, prURL string) outcome {
 }
 
 // review runs reviewer sessions in the job's existing worktree until one
-// passes or the round limit is hit. It does not merge.
+// passes or the round limit is hit. A pass returns an opened pull request.
+// The caller merges only when the repo config says to.
 func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string) outcome {
 	rounds := r.opts.MaxReviewRounds
 	if rounds <= 0 {

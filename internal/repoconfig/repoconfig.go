@@ -10,6 +10,11 @@
 //
 //	# Required. Shell command a job must pass before a PR is opened.
 //	gate = "make check test"
+//
+//	# Optional. Who merges after review has passed and CI is green.
+//	# Absent, empty, and "human" leave the pull request for a person.
+//	# "factory" means the factory merges.
+//	merge = "human"
 package repoconfig
 
 import (
@@ -27,10 +32,23 @@ import (
 // Path is the config file location relative to the repo root.
 const Path = ".schmeide/config.toml"
 
+const (
+	// MergeHuman leaves the pull request for a person. An absent or empty
+	// merge key means the same thing.
+	MergeHuman = "human"
+	// MergeFactory merges after review has passed and every check run on the
+	// head commit has succeeded.
+	MergeFactory = "factory"
+)
+
 // Config is the per-repo schmeide configuration.
 type Config struct {
 	// Gate is the command a job must pass before a PR is opened.
 	Gate string `toml:"gate"`
+	// Merge is who merges a pull request that passed review once CI is green.
+	// Empty and [MergeHuman] leave it for a person. [MergeFactory] means the
+	// runner merges.
+	Merge string `toml:"merge"`
 }
 
 // Load reads and validates the config in the repo rooted at repoDir.
@@ -58,12 +76,21 @@ func Parse(name string, data []byte) (Config, error) {
 			for _, e := range strict.Errors {
 				keys = append(keys, strings.Join(e.Key(), "."))
 			}
-			return Config{}, fmt.Errorf("%s: unknown key(s) %s; remove them or fix the spelling (only \"gate\" is supported)", name, strings.Join(keys, ", "))
+			return Config{}, fmt.Errorf("%s: unknown key(s) %s; remove them or fix the spelling", name, strings.Join(keys, ", "))
 		}
 		return Config{}, fmt.Errorf("%s: malformed TOML, fix the syntax: %w", name, err)
 	}
 	if strings.TrimSpace(cfg.Gate) == "" {
 		return Config{}, fmt.Errorf("%s: gate is missing or empty; set gate = \"<command>\", e.g. gate = \"make check test\"", name)
+	}
+	switch cfg.Merge {
+	case "", MergeHuman, MergeFactory:
+	default:
+		if strings.TrimSpace(cfg.Merge) == "" {
+			cfg.Merge = ""
+			break
+		}
+		return Config{}, fmt.Errorf("%s: merge = %q is not a legal value; set merge = %q or merge = %q", name, cfg.Merge, MergeFactory, MergeHuman)
 	}
 	return cfg, nil
 }

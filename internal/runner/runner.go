@@ -2,7 +2,8 @@
 // control node and takes each one from a GitHub issue to an opened pull
 // request, then reviews that change in the same worktree until the review
 // passes or the round limit is hit. It uses a harness that is already logged
-// in on this machine. Merging is out of scope.
+// in on this machine. The factory merges the pull request only when the repo
+// config sets merge = "factory". The default is a person.
 package runner
 
 import (
@@ -67,6 +68,8 @@ const (
 
 	StateReviewing    State = "reviewing"
 	StateReviewFailed State = "review_failed"
+	StateMerged       State = "merged"
+	StateMergeFailed  State = "merge_failed"
 )
 
 // Options configures a runner.
@@ -341,7 +344,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
 	// pass is final too: the pull request is already open, and a redelivery
-	// would treat that as done.
+	// would treat that as done. A factory merge that does not land is final
+	// for the same reason.
 	if out.state == StateFailed {
 		n := r.recordWorkFailure(job.Subject())
 		if n < r.opts.MaxAttempts {
@@ -457,7 +461,14 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if err != nil {
 		return failed(err)
 	}
-	return r.review(ctx, ws, job, cfg.Gate, url)
+	out := r.review(ctx, ws, job, cfg.Gate, url)
+	// The merge policy was read with the gate, before the session ran, so the
+	// session cannot turn factory merge on for itself. Absent and "human"
+	// leave the pull request for a person.
+	if cfg.Merge != repoconfig.MergeFactory || out.state != StatePROpened {
+		return out
+	}
+	return r.mergeWhenGreen(ctx, ws, gh, url)
 }
 
 // gateOutcome reports a failed gate. prURL is empty when no pull request was
