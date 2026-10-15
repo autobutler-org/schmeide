@@ -59,8 +59,59 @@ func TestAvailable(t *testing.T) {
 	if len(got) != 1 || got[0] != Harness(ready) {
 		t.Errorf("Available = %v, want only the ready harness", got)
 	}
-	if all := All(); len(all) != 1 || all[0].Name() != "claude-code" {
-		t.Errorf("All = %v, want claude-code", all)
+}
+
+// firstPassing is the runner's rule: the first harness whose Check passes.
+func firstPassing(ctx context.Context, hs []Harness) Harness {
+	for _, h := range hs {
+		if h.Check(ctx) == nil {
+			return h
+		}
+	}
+	return nil
+}
+
+func TestAllOrdersClaudeCodeBeforeGrok(t *testing.T) {
+	all := All()
+	if len(all) != 2 || all[0].Name() != "claude-code" || all[1].Name() != "grok" {
+		names := make([]string, len(all))
+		for i, h := range all {
+			names[i] = h.Name()
+		}
+		t.Fatalf("All() = %q, want claude-code then grok", names)
+	}
+}
+
+func TestGrokSelectedOnlyWhenClaudeCodeIsNotUsable(t *testing.T) {
+	claude := fakeClaude(t, `echo '{"loggedIn": true}'`)
+	grok := fakeGrok(t, `echo 'You are logged in with grok.com.'`)
+	// The pair is All()'s order: Claude Code, then Grok.
+	all := All()
+	pair := []Harness{claude, grok}
+	if len(all) != len(pair) {
+		t.Fatalf("All() has %d harnesses, pair has %d", len(all), len(pair))
+	}
+	for i := range all {
+		if all[i].Name() != pair[i].Name() {
+			t.Fatalf("All()[%d] = %s, pair has %s", i, all[i].Name(), pair[i].Name())
+		}
+	}
+
+	if got := firstPassing(t.Context(), pair); got == nil || got.Name() != "claude-code" {
+		t.Fatalf("both usable: chose %v, want claude-code", got)
+	}
+
+	missing := &ClaudeCode{Bin: filepath.Join(t.TempDir(), "claude")}
+	if got := firstPassing(t.Context(), []Harness{missing, grok}); got == nil || got.Name() != "grok" {
+		t.Fatalf("claude missing: chose %v, want grok", got)
+	}
+	loggedOut := fakeClaude(t, `echo '{"loggedIn": false}'; exit 1`)
+	if got := firstPassing(t.Context(), []Harness{loggedOut, grok}); got == nil || got.Name() != "grok" {
+		t.Fatalf("claude logged out: chose %v, want grok", got)
+	}
+	grokOut := fakeGrok(t, `echo 'You are not authenticated.'`)
+	if got := firstPassing(t.Context(), []Harness{missing, grokOut}); got != nil {
+		t.Fatalf("neither usable: chose %s, want none", got.Name())
 	}
 }
 
@@ -173,7 +224,7 @@ func waitGone(t *testing.T, pid int) {
 	t.Errorf("process %d is still running", pid)
 }
 
-// childPID waits for the fake claude to record the PID of its child.
+// childPID waits for the fake CLI to record the PID of its child.
 func childPID(t *testing.T, dir string) int {
 	t.Helper()
 	for range 100 {
@@ -184,7 +235,7 @@ func childPID(t *testing.T, dir string) int {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("fake claude never wrote child.pid")
+	t.Fatal("fake CLI never wrote child.pid")
 	return 0
 }
 
