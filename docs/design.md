@@ -33,7 +33,8 @@ In scope:
 - **Issue to PR.** Agents take an issue and produce a pull request. This is
   what the first slice does.
 - **Review and merge.** An AI review stage, and merging once the gates pass.
-  The review stage is built. Merging is not.
+  Both are built. Absent, empty, and `human` leave the pull request for a
+  person. `factory` merges only when the repo config says so.
 
 Out of scope for now: planning and intake (turning ideas into issues,
 prioritizing, assigning) and keeping repo settings consistent across the org.
@@ -101,11 +102,11 @@ flowchart LR
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
 | 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes or the round limit is reached. | Done |
-| 9 | With the review passed and CI green, the PR is merged by the factory or by a person, depending on the repo's config. A missing merge setting means a person presses merge. The factory merges only when the config says so. | Later |
+| 9 | After review passes, absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | Done |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
-Steps 4 and 9 have not been built. The pool opt-in and the merge default are
+Step 9, merging, has shipped. Step 4 has not been built. The pool opt-in is
 accepted, and the code is not updated in this change.
 
 ## Decisions
@@ -149,17 +150,21 @@ reads that file and removes it before any later commit. The runner allows up
 to `--max-review-rounds` reviewer sessions (default 3). When the reviewer
 requests changes and a round remains, a fresh worker session applies the
 findings, the gate runs again, and the same branch is pushed. A pass finishes
-the job and does not merge. Exhausting the rounds, or a gate failure on a
-fix, comments on the issue and leaves the pull request open.
+the review. What happens next is under [Merge](#merge). Exhausting the rounds,
+or a gate failure on a fix, comments on the issue and leaves the pull request
+open.
 
 ### Merge
 
-Each repo chooses in its tracked config whether the factory merges a PR that
-has passed review and CI, or whether a person presses merge. The accepted
-default (#32) is that a missing merge setting means a person presses merge.
-The factory merges only when the config says so. Merging is not built, the
-repo config schema has no merge setting yet, and the code is not updated in
-this change.
+Each repo chooses in `.schmeide/config.toml` who merges a pull request after
+review has passed. The `merge` key is optional. Absent, empty, and `human`
+leave the pull request for a person. `factory` merges with a merge commit
+after review only when every check run on the head has succeeded within two
+minutes. No check runs is not green. A failed check or a wait that ends
+without success comments on the issue, leaves the pull request open, and is
+not retried. The runner reads `merge` with the gate, before the harness
+session, so the session cannot turn factory merge on for itself
+(`internal/repoconfig`, `internal/runner/merge.go`).
 
 ### PR shape
 
@@ -197,13 +202,15 @@ runner.
 ### Repo config
 
 Each repo the factory works on carries its own schmeide config, checked in and
-reviewed like code. The file is `.schmeide/config.toml` and the only key is
-`gate`, the command that must pass before a PR is opened. Unknown keys are an
+reviewed like code. The file is `.schmeide/config.toml`. `gate` is required:
+the command that must pass before a PR is opened. `merge` is optional. Absent,
+empty, and `human` leave the pull request for a person. `factory` is the only
+other legal value, and [Merge](#merge) is what it does. Unknown keys are an
 error. The runner reads the file before the harness session, so the session
-cannot change the gate it is about to be held to. Other settings (merge
-policy, reviewer prompts) are added to the schema when the feature that reads
-them is built. A pull request dependency is GitHub's issue dependency, not a
-config key. The merge setting is not in the schema yet.
+cannot change the gate it is about to be held to, and cannot turn factory
+merge on for itself. Other settings, such as reviewer prompts, are added to
+the schema when the feature that reads them is built. A pull request
+dependency is GitHub's issue dependency, not a config key.
 
 ### Credentials and the job environment
 
@@ -295,12 +302,12 @@ Follow-ups that landed with the slice:
 The schmeide GitHub App is a prerequisite for a live delivery. Tests use saved
 webhook payloads, a fake GitHub API, and a fake harness.
 
-The AI review stage shipped after this slice. See [Review](#review).
+The AI review stage shipped after this slice. See [Review](#review). Merging
+shipped after this slice. See [Merge](#merge).
 
 Not in the first slice, and not shipped:
 
 - Falling back to a pool of other people's runners
-- Merging
 - Stacked PRs for declared issue dependencies
 - Container isolation for jobs
 - Harnesses other than Claude Code. The accepted Grok CLI harness is not built.
@@ -312,14 +319,14 @@ Not in the first slice, and not shipped:
 | Decision | Outcome | Where |
 |---|---|---|
 | Name of the ready label | `schmeide:ready`. Override with `--ready-label`. | `internal/control/intake.go` (`DefaultReadyLabel`) |
-| Path and format of the per-repo config file | `.schmeide/config.toml`. The only key is `gate`, and it must be a non-empty command. Unknown keys are an error. | `internal/repoconfig` |
+| Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `merge` is optional: absent, empty, and `human` leave the pull request for a person, and `factory` is the only other legal value. Unknown keys are an error. | `internal/repoconfig` |
 | Which orgs or App installations may create jobs | Required. `--allowed-orgs` (owner logins, compared case-insensitively) or `--allowed-installations` (numeric installation IDs), or both. A job is accepted when it matches either list. `schmeide control` refuses to start when both are empty, and an empty allowlist allows no job. A delivery that would create a job and matches neither list is rejected with 403. A delivery that does not describe a ready job is ignored, including one from outside the allowlist. A bad signature is rejected before that check. | `internal/control/intake.go`, `internal/control/cli.go` |
 | Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>`. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*` and `CLAUDE_*`, plus `--pass-env`. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | Pool opt-in (#31) | An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. Not built yet. | The code is not updated in this change. |
-| Merge default (#32) | A missing merge setting means a person presses merge. The factory merges only when the config says so. Not built yet. | The code is not updated in this change. |
+| Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | GitHub's issue dependency, not a config key. Not built yet. | The code is not updated in this change. |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. Not built yet. | The code is not updated in this change. |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |
@@ -332,8 +339,7 @@ There are none.
 
 Roughly in the order they are expected to matter. None of these have been built:
 
-1. Merging. A missing merge setting means a person presses merge. The factory merges only when the config says so.
-2. Pool fallback. An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists.
-3. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
-4. Container isolation for jobs
-5. A second harness that shells out to the Grok CLI, the same shape as Claude Code, with no new module dependency.
+1. Pool fallback. An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists.
+2. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
+3. Container isolation for jobs
+4. A second harness that shells out to the Grok CLI, the same shape as Claude Code, with no new module dependency.
