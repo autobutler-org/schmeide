@@ -75,7 +75,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job's work may fail before that failure is final and reported on the issue. Handing the job back because a token could not be minted, or because the runner is shutting down, does not count. A gate failure is never retried.")
 	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets merge = \"factory\". The default is a person.")
-	passEnv = fs.String("pass-env", "", "Comma-separated names of environment variables that harness sessions and gate commands may see, on top of PATH, HOME, locale, and proxy settings. Every other variable, this runner's own settings included, is withheld from them. Never list a secret.")
+	passEnv = fs.String("pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
 	claudeArgs = fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
 	return fs, o, passEnv, claudeArgs
 }
@@ -130,10 +130,12 @@ times. Handing a job back because a token could not be minted, or because the
 runner is shutting down, does not count as one of those tries. A gate failure
 is never retried.
 
-Harness sessions and gate commands see only a basic environment (see
---pass-env), never the runner's own settings such as its NATS token. They still
-run as this machine's user, so run the runner as a user that holds nothing else
-worth taking.
+A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_,
+and --pass-env, and does not see the runner's SCHMEIDE_* settings unless a
+name is passed that way. The gate inherits the runner process environment.
+Git sees only the installation-token variables. They still run as this
+machine's user, so run the runner as a user that holds nothing else worth
+taking.
 
 Usage:
   schmeide runner --steward <github login> [flags]
