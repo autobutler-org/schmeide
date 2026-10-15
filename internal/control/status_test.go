@@ -115,3 +115,112 @@ func TestTrackerReportsLatestStatePerJob(t *testing.T) {
 		t.Errorf("status of a job nobody reported = %+v, want none", got)
 	}
 }
+
+func TestTrackerRemembersRunnersAndStatusAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
+	bob := Registration{Steward: "bob", Harnesses: []string{"claude"}, Host: "bob-desktop"}
+	aliceAgain := Registration{Steward: "alice", Harnesses: []string{"claude", "fake"}, Host: "alice-laptop"}
+	alicePhone := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-phone"}
+	first := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}
+	untouched := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "alice"}
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	runner.publish(RegisterSubjectPrefix+"bob", bob)
+	runner.publish(RegisterSubjectPrefix+"alice", aliceAgain)
+	runner.publish(RegisterSubjectPrefix+"alice", alicePhone)
+	runner.report(first, StateClaimed, "")
+	runner.report(first, StatePROpened, "https://github.com/o/r/pull/9")
+
+	wantRunners := []Registration{bob, aliceAgain, alicePhone}
+	wantStatus := Status{State: StatePROpened, Detail: "https://github.com/o/r/pull/9"}
+	eventually(t, func() bool {
+		status, ok := tracker.JobStatus(first.Subject())
+		return ok && status == wantStatus && reflect.DeepEqual(tracker.Runners(), wantRunners)
+	})
+	if got := tracker.Runners(); !reflect.DeepEqual(got, wantRunners) {
+		t.Fatalf("runners before restart = %+v, want %+v", got, wantRunners)
+	}
+
+	q = restartQueue(t, q, dir)
+	tracker = startTracker(t, q)
+	if got := tracker.Runners(); !reflect.DeepEqual(got, wantRunners) {
+		t.Errorf("runners = %+v, want %+v", got, wantRunners)
+	}
+	if got, ok := tracker.JobStatus(first.Subject()); !ok || got != wantStatus {
+		t.Errorf("status of %s = %+v, %v; want %+v", first.Subject(), got, ok, wantStatus)
+	}
+	if got, ok := tracker.JobStatus(untouched.Subject()); ok {
+		t.Errorf("status of a job nobody reported = %+v, want none", got)
+	}
+
+	// A report after the restart is still recorded.
+	startFakeRunner(t, q).report(first, StateFailed, "gave up")
+	eventually(t, func() bool {
+		status, _ := tracker.JobStatus(first.Subject())
+		return status.State == StateFailed
+	})
+	if got, ok := tracker.JobStatus(first.Subject()); !ok || got != (Status{State: StateFailed, Detail: "gave up"}) {
+		t.Errorf("status after restart = %+v, %v; want failed", got, ok)
+	}
+}
+
+func TestTrackerRestartDropsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	runner.report(job, StateWorking, "")
+	// A registration for someone else's subject, junk, and an empty status
+	// are not recorded, and a restart must not bring them back.
+	runner.publish(RegisterSubjectPrefix+"mallory", alice)
+	runner.publish(RegisterSubjectPrefix+"carol", []byte("not json"))
+	runner.publish(StatusSubjectPrefix+"alice.7.1", []byte("not json"))
+	runner.publish(StatusSubjectPrefix+"alice.7.1", Status{})
+	runner.publish(StatusSubjectPrefix+"alice.7.2", []byte("not json"))
+
+	want := []Registration{alice}
+	wantStatus := Status{State: StateWorking}
+	eventually(t, func() bool {
+		status, ok := tracker.JobStatus(job.Subject())
+		return ok && status == wantStatus && reflect.DeepEqual(tracker.Runners(), want)
+	})
+	if got := tracker.Runners(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runners before restart = %+v, want %+v", got, want)
+	}
+
+	tracker = startTracker(t, restartQueue(t, q, dir))
+	if got := tracker.Runners(); !reflect.DeepEqual(got, want) {
+		t.Errorf("runners = %+v, want %+v", got, want)
+	}
+	if got, ok := tracker.JobStatus(job.Subject()); !ok || got != wantStatus {
+		t.Errorf("status of %s = %+v, %v; want %+v", job.Subject(), got, ok, wantStatus)
+	}
+	junkOnly := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "alice"}
+	if got, ok := tracker.JobStatus(junkOnly.Subject()); ok {
+		t.Errorf("status of a junk-only job = %+v, want none", got)
+	}
+}
+
+func startQueueIn(t *testing.T, dir string) *Queue {
+	t.Helper()
+	q, err := StartQueue(t.Context(), QueueOptions{DataDir: dir, RunnerTokens: testRunnerTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(q.Close)
+	return q
+}
+
+func restartQueue(t *testing.T, q *Queue, dir string) *Queue {
+	t.Helper()
+	q.Close()
+	return startQueueIn(t, dir)
+}
