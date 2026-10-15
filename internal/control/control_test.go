@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +88,7 @@ type delivery struct {
 	event     string // defaults to "issues"
 	body      []byte
 	signature string
+	id        string // X-Github-Delivery; empty means the header is omitted
 }
 
 // deliver posts one webhook to the handler and returns the status code.
@@ -99,6 +101,9 @@ func deliver(t *testing.T, h http.Handler, d delivery) int {
 	req.Header.Set("X-Github-Event", d.event)
 	if d.signature != "" {
 		req.Header.Set("X-Hub-Signature-256", d.signature)
+	}
+	if d.id != "" {
+		req.Header.Set("X-Github-Delivery", d.id)
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -200,7 +205,7 @@ func TestWebhookIntake(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			q := startQueue(t)
 			allow := Allowlist{Orgs: []string{"autobutler-org"}}
-			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler), WebhookPolicy{})
 			for i, d := range tt.deliveries {
 				if got := deliver(t, h, d); got != tt.wantCodes[i] {
 					t.Errorf("delivery %d: status = %d, want %d", i, got, tt.wantCodes[i])
@@ -241,7 +246,7 @@ func TestWebhookAllowlist(t *testing.T) {
 				t.Fatal(err)
 			}
 			q := startQueue(t)
-			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+			h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Allow: allow, Publish: q.Publish}, slog.New(slog.DiscardHandler), WebhookPolicy{})
 			if got := deliver(t, h, delivery{body: tt.body, signature: sign(tt.body)}); got != tt.wantCode {
 				t.Errorf("status = %d, want %d", got, tt.wantCode)
 			}
@@ -258,13 +263,302 @@ func TestEmptyAllowlistAllowsNoOne(t *testing.T) {
 	}
 	ready := payload(t, "issues_assigned_labeled.json")
 	q := startQueue(t)
-	h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Publish: q.Publish}, slog.New(slog.DiscardHandler))
+	h := Handler(Intake{Secret: []byte(testSecret), ReadyLabel: DefaultReadyLabel, Publish: q.Publish}, slog.New(slog.DiscardHandler), WebhookPolicy{})
 	if got := deliver(t, h, delivery{body: ready, signature: sign(ready)}); got != http.StatusForbidden {
 		t.Errorf("status = %d, want %d from an Intake with no allowlist", got, http.StatusForbidden)
 	}
 	if got := jobs(t, q); len(got) != 0 {
 		t.Errorf("jobs = %+v, want none", got)
 	}
+}
+
+// webhookHandler builds the intake handler. published counts Publish calls
+// when it is non-nil.
+func webhookHandler(q *Queue, policy WebhookPolicy, published *int) http.Handler {
+	return Handler(Intake{
+		Secret:     []byte(testSecret),
+		ReadyLabel: DefaultReadyLabel,
+		Allow:      Allowlist{Orgs: []string{"autobutler-org"}},
+		Publish: func(ctx context.Context, job Job) (bool, error) {
+			if published != nil {
+				*published++
+			}
+			return q.Publish(ctx, job)
+		},
+	}, slog.New(slog.DiscardHandler), policy)
+}
+
+func TestOversizedWebhookPublishesNothing(t *testing.T) {
+	body := make([]byte, maxWebhookBytes+1)
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{}, &published)
+	if got := deliver(t, h, delivery{body: body, signature: sign(body)}); got != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", got, http.StatusBadRequest)
+	}
+	if published != 0 {
+		t.Errorf("Publish calls = %d, want 0", published)
+	}
+	if got := jobs(t, q); len(got) != 0 {
+		t.Errorf("jobs = %+v, want none", got)
+	}
+}
+
+func TestWebhookRateLimitPublishesNoJob(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	again := bytes.Replace(ready, []byte(`"number": 42`), []byte(`"number": 43`), 1)
+	now := time.Now()
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{
+		RequestsPerMinute: 1,
+		DeliveryTTL:       time.Minute,
+		now:               func() time.Time { return now },
+	}, &published)
+
+	first := delivery{body: ready, signature: sign(ready), id: "rate-1"}
+	if got := deliver(t, h, first); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", got, http.StatusAccepted)
+	}
+	if published != 1 {
+		t.Fatalf("Publish calls = %d, want 1", published)
+	}
+	second := delivery{body: again, signature: sign(again), id: "rate-2"}
+	if got := deliver(t, h, second); got != http.StatusTooManyRequests {
+		t.Fatalf("limited status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if published != 1 {
+		t.Errorf("Publish calls = %d, want 1; the rejected request must publish no job", published)
+	}
+	if got := jobs(t, q); len(got) != 1 || got[0].Issue != 42 {
+		t.Errorf("jobs = %+v, want only issue 42", got)
+	}
+
+	now = now.Add(time.Minute)
+	if got := deliver(t, h, second); got != http.StatusAccepted {
+		t.Fatalf("status after the window = %d, want %d", got, http.StatusAccepted)
+	}
+	if published != 2 {
+		t.Errorf("Publish calls = %d, want 2 after the window resets", published)
+	}
+	if got := jobs(t, q); len(got) != 2 {
+		t.Errorf("jobs = %+v, want both issues once the window resets", got)
+	}
+}
+
+func TestRepeatedDeliveryIsAcknowledgedWithoutPublishing(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	now := time.Now()
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{
+		RequestsPerMinute: 100,
+		DeliveryTTL:       10 * time.Minute,
+		now:               func() time.Time { return now },
+	}, &published)
+
+	d := delivery{body: ready, signature: sign(ready), id: "deliv-1"}
+	if got := deliver(t, h, d); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", got, http.StatusAccepted)
+	}
+	if published != 1 {
+		t.Fatalf("Publish calls = %d, want 1", published)
+	}
+	if got := deliver(t, h, d); got/100 != 2 {
+		t.Fatalf("replay status = %d, want a 2xx so GitHub does not retry", got)
+	}
+	if published != 1 {
+		t.Errorf("Publish calls = %d, want 1; a repeated delivery id must not publish again", published)
+	}
+	if got := jobs(t, q); len(got) != 1 {
+		t.Errorf("jobs = %+v, want one", got)
+	}
+
+	now = now.Add(10*time.Minute + time.Second)
+	if got := deliver(t, h, d); got != http.StatusOK {
+		t.Fatalf("status after the ttl = %d, want %d from the idempotent job, not a replay", got, http.StatusOK)
+	}
+	if published != 2 {
+		t.Errorf("Publish calls = %d, want 2 once the delivery id expires", published)
+	}
+	if got := jobs(t, q); len(got) != 1 {
+		t.Errorf("jobs = %+v, want the one idempotent job", got)
+	}
+}
+
+func TestDifferentDeliveryIDKeepsIdempotentJob(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{RequestsPerMinute: 100, DeliveryTTL: 10 * time.Minute}, &published)
+	first := delivery{body: ready, signature: sign(ready), id: "deliv-a"}
+	second := delivery{body: ready, signature: sign(ready), id: "deliv-b"}
+	if got := deliver(t, h, first); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := deliver(t, h, second); got != http.StatusOK {
+		t.Fatalf("second status = %d, want %d", got, http.StatusOK)
+	}
+	if published != 2 {
+		t.Errorf("Publish calls = %d, want 2; a new delivery id still reaches Publish", published)
+	}
+	if got := jobs(t, q); len(got) != 1 {
+		t.Errorf("jobs = %+v, want one job", got)
+	}
+}
+
+func TestWebhookReadTimeoutCutsOffASlowClient(t *testing.T) {
+	var published int
+	h := Handler(Intake{
+		Secret:     []byte(testSecret),
+		ReadyLabel: DefaultReadyLabel,
+		Allow:      Allowlist{Orgs: []string{"autobutler-org"}},
+		Publish: func(context.Context, Job) (bool, error) {
+			published++
+			return true, nil
+		},
+	}, slog.New(slog.DiscardHandler), WebhookPolicy{RequestsPerMinute: 10, DeliveryTTL: time.Minute})
+	srv := newWebhookServer(h)
+	if srv.ReadTimeout <= 0 || srv.ReadHeaderTimeout <= 0 {
+		t.Fatal("ReadTimeout is unset; a slow client can hold the connection open")
+	}
+	srv.ReadHeaderTimeout = time.Second
+	srv.ReadTimeout = 200 * time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	// Headers and one body byte, then stall. The rest never arrives.
+	stall := "POST /webhook HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\nX-Github-Event: issues\r\n\r\nx"
+	if _, err := conn.Write([]byte(stall)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "400") {
+		t.Errorf("response = %q, want 400 once ReadTimeout cuts off the body", buf[:n])
+	}
+	if published != 0 {
+		t.Errorf("Publish calls = %d, want 0", published)
+	}
+}
+
+func TestRejectedDeliveryIDIsNotRemembered(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{RequestsPerMinute: 100, DeliveryTTL: 10 * time.Minute}, &published)
+	bad := delivery{body: ready, signature: "sha256=abcd", id: "deliv-bad"}
+	if got := deliver(t, h, bad); got != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", got, http.StatusUnauthorized)
+	}
+	good := delivery{body: ready, signature: sign(ready), id: "deliv-bad"}
+	if got := deliver(t, h, good); got != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; a rejected id must not block the real delivery", got, http.StatusAccepted)
+	}
+	if published != 1 {
+		t.Errorf("Publish calls = %d, want 1", published)
+	}
+}
+
+func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
+	dir := t.TempDir()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "app.pem")
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(keyPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	natsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	natsAddr := natsLn.Addr().String()
+	if err := natsLn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs lockedBuffer
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			HTTPAddr:                "127.0.0.1:0",
+			NATSAddr:                natsAddr,
+			RunnerTokens:            "octocat:t",
+			DataDir:                 filepath.Join(dir, "data"),
+			WebhookSecret:           testSecret,
+			ReadyLabel:              DefaultReadyLabel,
+			AllowedOrgs:             "autobutler-org",
+			GitHubAppID:             "12345",
+			GitHubAppPrivateKeyFile: keyPath,
+			GitHubAPIURL:            DefaultGitHubAPIURL,
+			WebhookRate:             "1000",
+			DeliveryTTL:             "10m",
+		}, slog.New(slog.NewTextHandler(&logs, nil)))
+	}()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		text := logs.String()
+		if strings.Contains(text, "plain HTTP") && strings.Contains(text, "TLS-terminating proxy") && strings.Contains(text, "http://") {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned before the startup log: %v; log=%s", err, logs.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("startup log = %q, want plain HTTP behind a TLS-terminating proxy", logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want a clean shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for one writer and one reader.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func TestParseRunnerTokens(t *testing.T) {

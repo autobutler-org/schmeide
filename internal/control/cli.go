@@ -28,7 +28,9 @@ func (s setting) env() string {
 
 var controlSettings = []setting{
 	{name: "config", usage: "Path of a config file with one 'name = value' line per setting, named as the flags are."},
-	{name: "http-addr", def: ":8080", usage: "Address the webhook endpoint listens on. GitHub must be able to reach /webhook here."},
+	{name: "http-addr", def: ":8080", usage: "Address the plain HTTP webhook endpoint listens on. The listener is HTTP and must sit behind a TLS-terminating proxy. GitHub must be able to reach /webhook there."},
+	{name: "webhook-rate", def: "1000", usage: "Maximum webhook requests accepted per minute. Further requests are rejected and publish no job. The default leaves room for GitHub's retries and redeliveries."},
+	{name: "delivery-ttl", def: "10m", usage: "How long an X-Github-Delivery id is remembered. A repeat within this time is acknowledged with success and is not published again."},
 	{name: "nats-addr", def: "127.0.0.1:4222", usage: "Address the embedded NATS server listens on. Runners connect here."},
 	{name: "runner-tokens", required: true, usage: "Comma-separated '<steward login>:<token>' entries, one per steward. A runner connects to NATS as its steward with that steward's token, and can only reach that steward's jobs and job tokens. Prefer the environment variable or config file, so the tokens stay out of the process list."},
 	{name: "data-dir", def: "schmeide-data", usage: "Directory where the job queue is stored."},
@@ -46,7 +48,8 @@ func Usage() string {
 	var b strings.Builder
 	b.WriteString(`schmeide control runs the control node: an embedded NATS server with JetStream
 that holds the job queue, and an HTTP endpoint (/webhook) for the schmeide
-GitHub App. An open issue that is assigned and carries the ready label becomes
+GitHub App. The listener is HTTP and must sit behind a TLS-terminating proxy.
+An open issue that is assigned and carries the ready label becomes
 one job, with the assignee as its steward.
 
 Usage:
@@ -150,6 +153,12 @@ func parseControl(args []string) (Config, error) {
 	if _, err := ParseAllowlist(values["allowed-orgs"], values["allowed-installations"]); err != nil {
 		return Config{}, fmt.Errorf("%w; fix --allowed-orgs or --allowed-installations", err)
 	}
+	if _, err := parseWebhookRate(values["webhook-rate"]); err != nil {
+		return Config{}, err
+	}
+	if _, err := parseDeliveryTTL(values["delivery-ttl"]); err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddr:                values["http-addr"],
 		NATSAddr:                values["nats-addr"],
@@ -162,6 +171,8 @@ func parseControl(args []string) (Config, error) {
 		GitHubAppID:             values["github-app-id"],
 		GitHubAppPrivateKeyFile: values["github-app-private-key-file"],
 		GitHubAPIURL:            values["github-api-url"],
+		WebhookRate:             values["webhook-rate"],
+		DeliveryTTL:             values["delivery-ttl"],
 	}, nil
 }
 
