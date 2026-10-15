@@ -138,11 +138,48 @@ func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	return string(out), err
 }
 
-// Push implements [Workspace]. The branch belongs to the job, so a branch an
-// earlier attempt pushed before dying is overwritten.
+// Push implements [Workspace]. A missing remote branch, or one whose head is
+// an ancestor of HEAD, is updated without force. That is how a review round
+// publishes another commit on the same branch. A remote head that is not an
+// ancestor was not written by this checkout, so it is left in place and the
+// push fails.
 func (w *worktree) Push(ctx context.Context) error {
-	_, err := w.git(ctx, w.dir, "push", "-q", "--force", w.spec.url, "HEAD:refs/heads/"+w.spec.branch)
+	ref := "refs/heads/" + w.spec.branch
+	remote, err := w.remoteHead(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if remote != "" && !w.ancestorOfHEAD(ctx, remote) {
+		return fmt.Errorf("the branch %s moved on the remote and was not overwritten; someone has to look at that branch", w.spec.branch)
+	}
+	_, err = w.git(ctx, w.dir, "push", "-q", w.spec.url, "HEAD:"+ref)
 	return err
+}
+
+// remoteHead is the commit the remote branch points at, or "" when that
+// branch does not exist.
+func (w *worktree) remoteHead(ctx context.Context, ref string) (string, error) {
+	out, err := w.git(ctx, w.dir, "ls-remote", w.spec.url, ref)
+	if err != nil {
+		return "", err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		sha, got, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if ok && got == ref && sha != "" {
+			return sha, nil
+		}
+	}
+	return "", nil
+}
+
+// ancestorOfHEAD reports whether commit is an ancestor of HEAD, including
+// HEAD itself. A commit this checkout does not contain cannot be one.
+func (w *worktree) ancestorOfHEAD(ctx context.Context, commit string) bool {
+	if _, err := w.git(ctx, w.dir, "cat-file", "-e", commit+"^{commit}"); err != nil {
+		return false
+	}
+	_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", commit, "HEAD")
+	return err == nil
 }
 
 // Close implements [Workspace].

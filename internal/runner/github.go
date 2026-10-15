@@ -68,23 +68,31 @@ type ghPull struct {
 	} `json:"head"`
 }
 
+// pullPageSize is how many pull requests one list page holds. A shorter page
+// is the last page.
+const pullPageSize = 100
+
 // findPR returns the URL of a pull request, open or not, on a branch of the
-// issue ("<issue number>_..."), or "" when there is none.
-//
-// ponytail: looks at the 100 newest pull requests only, which covers a
-// redelivery minutes after the first attempt; page through them if a job can
-// come back after 100 other pull requests were opened.
+// issue ("<issue number>_..."), or "" when there is none. The match is the
+// issue-number prefix, so a retitle of the issue still finds the pull request.
+// Pages are followed until that branch is found or a page comes back short.
 func (g github) findPR(ctx context.Context, issue int) (string, error) {
-	var pulls []ghPull
-	if err := g.do(ctx, http.MethodGet, "/pulls?state=all&per_page=100", nil, &pulls); err != nil {
-		return "", err
-	}
-	for _, p := range pulls {
-		if strings.HasPrefix(p.Head.Ref, fmt.Sprintf("%d_", issue)) {
-			return p.HTMLURL, nil
+	prefix := fmt.Sprintf("%d_", issue)
+	for page := 1; ; page++ {
+		var pulls []ghPull
+		path := fmt.Sprintf("/pulls?state=all&per_page=%d&page=%d", pullPageSize, page)
+		if err := g.do(ctx, http.MethodGet, path, nil, &pulls); err != nil {
+			return "", err
+		}
+		for _, p := range pulls {
+			if strings.HasPrefix(p.Head.Ref, prefix) {
+				return p.HTMLURL, nil
+			}
+		}
+		if len(pulls) < pullPageSize {
+			return "", nil
 		}
 	}
-	return "", nil
 }
 
 func (g github) openPR(ctx context.Context, title, body, head, base string) (string, error) {
