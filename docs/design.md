@@ -171,15 +171,25 @@ session, so the session cannot turn factory merge on for itself
 
 ### PR shape
 
-PRs are independent by default: one issue, one PR against the default branch.
-The branch name is `<issue number>_<short-description>`, taken from the issue
-title stored on the job. A job whose repository already has a pull request, open
-or closed, on a branch starting with `<issue number>_` is treated as already
-opened, including after the issue is retitled. The check looks at the 100 pull
-requests returned by one list call (`state=all&per_page=100`). PRs are stacked
-only when an issue declares a dependency on another issue. The accepted
-declaration (#34) is GitHub's issue dependency, not a config key. Stacked PRs
-are not built, and the code is not updated in this change.
+One issue is one pull request. The branch name is
+`<issue number>_<short-description>`, taken from the issue title stored on
+the job. A job whose repository already has a pull request, open or closed,
+on a branch starting with `<issue number>_` is treated as already opened.
+The check follows pages until that branch is found or a short page comes
+back. The match is the `<issue number>_` prefix, including after a retitle,
+and it counts open and closed pull requests.
+
+Stacked pull requests have shipped (#58). The dependency is GitHub's
+issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`.
+The worktree is created from the base branch, and the pull request opens
+against that same branch. No open blocker with an open pull request whose
+head branch starts with `<issue number>_` means the base is the repository
+default branch. The prefix is that blocker's issue number. A blocker that
+is not open, and an open blocker with no such pull request, do not count.
+Exactly one such open blocker selects that pull request's head branch as
+the base. Two or more such open blockers fail the job. The runner comments
+on the issue that only one open dependency is supported and does not open a
+pull request (`internal/runner/github.go`, `internal/runner/runner.go`).
 
 ### Harnesses
 
@@ -219,7 +229,8 @@ error. The runner reads the file before the harness session, so the session
 cannot change the gate it is about to be held to, and cannot turn factory
 merge on for itself. Other settings, such as reviewer prompts, are added to
 the schema when the feature that reads them is built. A pull request
-dependency is GitHub's issue dependency, not a config key.
+dependency is GitHub's issue-dependencies blocked-by list, not a key in
+this file. See [PR shape](#pr-shape).
 
 ### Credentials and the job environment
 
@@ -314,11 +325,11 @@ webhook payloads, a fake GitHub API, and a fake harness.
 The AI review stage shipped after this slice. See [Review](#review). Merging
 shipped after this slice. See [Merge](#merge). The Grok CLI harness shipped
 after this slice. See [Harnesses](#harnesses). Pool fallback shipped after
-this slice. See [Routing](#routing).
+this slice. See [Routing](#routing). Stacked pull requests shipped after
+this slice. See [PR shape](#pr-shape).
 
 Not in the first slice, and not shipped:
 
-- Stacked PRs for declared issue dependencies
 - Container isolation for jobs
 - Polling GitHub for issues
 - More than one job at a time on a runner. Accepted as no change: a runner stays on one job, which is already how the code works.
@@ -336,7 +347,7 @@ Not in the first slice, and not shipped:
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*` and `CLAUDE_*`, plus `--pass-env`. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
 | Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | `internal/repoconfig`, `internal/runner/merge.go` |
-| Dependency declaration (#34) | GitHub's issue dependency, not a config key. Not built yet. | The code is not updated in this change. |
+| Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers fail the job. The runner comments on the issue that only one open dependency is supported and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |
 
@@ -348,5 +359,4 @@ There are none.
 
 Roughly in the order they are expected to matter. None of these have been built:
 
-1. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
-2. Container isolation for jobs
+1. Container isolation for jobs
