@@ -1,16 +1,36 @@
 name: Feature Request
-description: Request a new feature
+description: Propose work that takes one issue to one pull request.
 title: "[Feature] "
 labels:
   - enhancement
 assignees: []
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for shoveling more work onto us!
   - type: textarea
-    id: attachments
+    id: summary
     attributes:
-      label: Extra info
-      description: Tell us whatever
+      label: Summary
+      description: What should change, in a few sentences. Name the control node, runner, gate, or harness when the work sits in one of those.
+      placeholder: The runner comments the gate result on the issue and opens a pull request only when the gate passes.
+    validations:
+      required: true
+  - type: textarea
+    id: in-scope
+    attributes:
+      label: In scope
+      description: The behavior this issue includes. One issue becomes one job and one pull request, so list only what that pull request should deliver.
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this issue does not include, so a runner does not take on later work.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How to tell it is done
+      description: The behavior that must be true, or the checks to run, before the pull request is ready. Name the repo gate when it covers the change.
+    validations:
+      required: true
