@@ -2,12 +2,12 @@
 
 The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The default is that a person presses merge.
 
-See [docs/design.md](docs/design.md) for the agreed design. The first slice, the AI review stage, merging, and the Grok CLI harness are done. Pool fallback is later.
+See [docs/design.md](docs/design.md) for the agreed design. The first slice, the AI review stage, merging, the Grok CLI harness, and pool fallback are done. `--pool` defaults off, and a runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. Stacked pull requests and container isolation are not built.
 
 ## Commands
 
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
-- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. The factory merges that pull request only when the repo config sets `merge = "factory"`. The default is a person.
+- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. With `--pool`, which defaults off, it registers as a pool runner and can take a job whose assignee has no registered runner. It still works one job at a time and takes its own job first. The factory merges that pull request only when the repo config sets `merge = "factory"`. The default is a person.
 - `schmeide doctor` checks that this machine can run a runner.
 
 Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting.
