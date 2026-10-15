@@ -98,7 +98,7 @@ flowchart LR
 | 1 | An issue is assigned and marked ready with a label. | Done |
 | 2 | GitHub delivers the webhook. The control node creates one job, with the assignee as steward, and stores the issue title and body from that delivery. | Done |
 | 3 | A runner belonging to the steward pulls the job. | Done |
-| 4 | If the steward has no runner available, a pool runner that has opted in takes the job. The opt-in is an explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. | Later |
+| 4 | When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. `--pool` defaults off. A runner that sets it registers as a pool runner. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | Done |
 | 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job. | Done |
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
@@ -107,8 +107,8 @@ flowchart LR
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
-Step 9, merging, has shipped. Step 4 has not been built. The pool opt-in is
-accepted, and the code is not updated in this change.
+Step 9, merging, has shipped. Step 4, pool fallback, has shipped. See
+[Routing](#routing).
 
 ## Decisions
 
@@ -121,17 +121,19 @@ not change one that already exists.
 
 ### Routing
 
-A job goes to its steward's own runners. Several runners for one steward share
-one queue consumer, so each of that steward's jobs goes to one of them. There
-is no fallback to anyone else's runner. A runner stays on one job. That is
-already how the code works, and the code is not updated in this change.
+When the assignee has a registered runner, the job stays on that steward's
+subject. Several runners for one steward share one queue consumer, so each of
+that steward's jobs goes to one of them.
 
-Pool fallback would send a job to a runner that has opted in to taking other
-people's work when the steward's own runners cannot take it. Pool runners
-would spend their owner's agent subscription on someone else's job. The
-accepted opt-in (#31) is an explicit runner flag, default off, at most one
-pool job, and only for an installation the control node already allowlists.
-Pool fallback is not built, and the code is not updated in this change.
+When the assignee has no registered runner, the control node publishes the
+job on a pool subject. `--pool` defaults off. A runner that sets it registers
+as a pool runner. Pool runners share one consumer, work one job at a time,
+and take their own job first. The token, gate, review, and merge path are the
+same. A pool runner spends its owner's agent subscription on someone else's
+job, so the flag defaults off.
+
+A runner stays on one job. That is already how the code works, and the code
+is not updated in this change.
 
 ### Identity
 
@@ -311,11 +313,11 @@ webhook payloads, a fake GitHub API, and a fake harness.
 
 The AI review stage shipped after this slice. See [Review](#review). Merging
 shipped after this slice. See [Merge](#merge). The Grok CLI harness shipped
-after this slice. See [Harnesses](#harnesses).
+after this slice. See [Harnesses](#harnesses). Pool fallback shipped after
+this slice. See [Routing](#routing).
 
 Not in the first slice, and not shipped:
 
-- Falling back to a pool of other people's runners
 - Stacked PRs for declared issue dependencies
 - Container isolation for jobs
 - Polling GitHub for issues
@@ -328,11 +330,11 @@ Not in the first slice, and not shipped:
 | Name of the ready label | `schmeide:ready`. Override with `--ready-label`. | `internal/control/intake.go` (`DefaultReadyLabel`) |
 | Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `merge` is optional: absent, empty, and `human` leave the pull request for a person, and `factory` is the only other legal value. Unknown keys are an error. | `internal/repoconfig` |
 | Which orgs or App installations may create jobs | Required. `--allowed-orgs` (owner logins, compared case-insensitively) or `--allowed-installations` (numeric installation IDs), or both. A job is accepted when it matches either list. `schmeide control` refuses to start when both are empty, and an empty allowlist allows no job. A delivery that would create a job and matches neither list is rejected with 403. A delivery that does not describe a ready job is ignored, including one from outside the allowlist. A bad signature is rejected before that check. | `internal/control/intake.go`, `internal/control/cli.go` |
-| Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>`. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go` |
+| Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>` when the assignee has a registered runner, and on a pool subject when the assignee has none. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go`, `internal/control/queue.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*` and `CLAUDE_*`, plus `--pass-env`. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
-| Pool opt-in (#31) | An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. Not built yet. | The code is not updated in this change. |
+| Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
 | Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | GitHub's issue dependency, not a config key. Not built yet. | The code is not updated in this change. |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
@@ -346,6 +348,5 @@ There are none.
 
 Roughly in the order they are expected to matter. None of these have been built:
 
-1. Pool fallback. An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists.
-2. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
-3. Container isolation for jobs
+1. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
+2. Container isolation for jobs
