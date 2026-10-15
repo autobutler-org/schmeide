@@ -85,3 +85,16 @@ func TestRunnerHelpDoesNotLimitHarnessesToClaude(t *testing.T) {
 		t.Fatalf("help does not say the runner uses the harnesses installed on this machine:\n%s", got)
 	}
 }
+
+func TestUsageDescribesTheGateEnvironment(t *testing.T) {
+	got := Usage()
+	if !strings.Contains(got, "The gate inherits the runner process environment.") {
+		t.Fatalf("Usage() does not say the gate inherits the runner process environment:\n%s", got)
+	}
+	if !strings.Contains(got, "A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_") {
+		t.Fatalf("Usage() does not say a session keeps XAI_:\n%s", got)
+	}
+	if strings.Contains(got, "gate commands see only a basic environment") {
+		t.Fatalf("Usage() says that gate commands see only a basic environment:\n%s", got)
+	}
+}
