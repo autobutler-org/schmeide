@@ -1,5 +1,5 @@
 // Package harness defines how a runner drives an agent harness, which is an
-// agent CLI such as Claude Code, and holds the implementations.
+// agent CLI such as Claude Code or the Grok CLI, and holds the implementations.
 //
 // # Contract
 //
@@ -73,9 +73,10 @@ type Harness interface {
 	Run(ctx context.Context, req Request) error
 }
 
-// All returns every harness schmeide knows about, usable or not.
+// All returns every harness schmeide knows about, usable or not. Claude Code
+// is first, so a machine where its Check passes keeps using it.
 func All() []Harness {
-	return []Harness{&ClaudeCode{}}
+	return []Harness{&ClaudeCode{}, &Grok{}}
 }
 
 // Available returns the harnesses from hs that pass Check, which is the list
