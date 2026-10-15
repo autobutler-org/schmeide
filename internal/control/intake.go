@@ -215,6 +215,8 @@ const (
 	OutcomeIgnored   Outcome = "ignored"
 	OutcomeCreated   Outcome = "created"
 	OutcomeDuplicate Outcome = "duplicate"
+	// OutcomeReplay is a delivery id this process already acknowledged.
+	OutcomeReplay Outcome = "replay"
 )
 
 // Intake turns verified webhook deliveries into jobs.

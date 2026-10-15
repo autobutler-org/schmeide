@@ -9,11 +9,34 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
-// maxWebhookBytes is GitHub's cap on webhook payload size.
-const maxWebhookBytes = 25 << 20
+const (
+	// maxWebhookBytes is GitHub's cap on a webhook payload. A lower cap would
+	// drop valid deliveries.
+	maxWebhookBytes = 25 << 20
+	// webhookReadHeaderTimeout bounds how long a client may take to send headers.
+	webhookReadHeaderTimeout = 10 * time.Second
+	// webhookReadTimeout bounds how long a client may take to send the whole
+	// request, so a slow sender cannot hold the connection open.
+	webhookReadTimeout = 30 * time.Second
+)
+
+// WebhookPolicy is the in-memory limit on the webhook handler.
+type WebhookPolicy struct {
+	// RequestsPerMinute is how many requests are accepted per minute.
+	// Zero or less disables the limit. The command rejects a non-positive value.
+	RequestsPerMinute int
+	// DeliveryTTL is how long an X-Github-Delivery id is remembered. A repeat
+	// inside the window is acknowledged and not published again. Zero or less
+	// disables replay detection. An empty delivery id is never a replay.
+	DeliveryTTL time.Duration
+	// now is the clock. Nil means time.Now. Tests set it.
+	now func() time.Time
+}
 
 // Config is everything the control node needs to run.
 type Config struct {
@@ -42,15 +65,33 @@ type Config struct {
 	GitHubAppPrivateKeyFile string
 	// GitHubAPIURL is the GitHub REST API base URL.
 	GitHubAPIURL string
+	// WebhookRate is the maximum number of webhook requests accepted per minute.
+	WebhookRate string
+	// DeliveryTTL is how long an X-Github-Delivery id is remembered.
+	DeliveryTTL string
 }
 
-// Handler is the webhook endpoint. It only extracts the delivery from the
-// request, hands it to Intake, and maps the outcome to a status code.
-func Handler(in Intake, log *slog.Logger) http.Handler {
+// Handler is the webhook endpoint. It caps the body, rate-limits requests,
+// drops replays of an X-Github-Delivery id, hands the delivery to Intake, and
+// maps the outcome to a status code.
+func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
+	gate := newWebhookGate(policy)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "webhook deliveries must be POSTed", http.StatusMethodNotAllowed)
+			return
+		}
+		now := gate.now()
+		delivery := r.Header.Get("X-Github-Delivery")
+		if gate.replay(delivery, now) {
+			log.Info("webhook handled", "delivery", delivery, "outcome", string(OutcomeReplay))
+			fmt.Fprintln(w, OutcomeReplay)
+			return
+		}
+		if !gate.allow(now) {
+			log.Warn("webhook rejected", "delivery", delivery, "err", errRateLimited)
+			http.Error(w, errRateLimited.Error(), http.StatusTooManyRequests)
 			return
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBytes))
@@ -58,7 +99,6 @@ func Handler(in Intake, log *slog.Logger) http.Handler {
 			http.Error(w, "could not read the payload", http.StatusBadRequest)
 			return
 		}
-		delivery := r.Header.Get("X-Github-Delivery")
 		outcome, err := in.Handle(r.Context(), r.Header.Get("X-Github-Event"), r.Header.Get("X-Hub-Signature-256"), body)
 		switch {
 		case errors.Is(err, ErrBadSignature):
@@ -71,6 +111,7 @@ func Handler(in Intake, log *slog.Logger) http.Handler {
 			log.Error("webhook failed", "delivery", delivery, "err", err)
 			http.Error(w, "could not process the delivery", http.StatusInternalServerError)
 		default:
+			gate.remember(delivery, now)
 			log.Info("webhook handled", "delivery", delivery, "outcome", string(outcome))
 			if outcome == OutcomeCreated {
 				w.WriteHeader(http.StatusAccepted)
@@ -78,6 +119,24 @@ func Handler(in Intake, log *slog.Logger) http.Handler {
 			fmt.Fprintln(w, outcome)
 		}
 	})
+}
+
+// parseWebhookRate reads the --webhook-rate value, a positive count per minute.
+func parseWebhookRate(value string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("webhook rate %q is not a positive number of requests per minute; pass --webhook-rate or set SCHMEIDE_WEBHOOK_RATE", value)
+	}
+	return n, nil
+}
+
+// parseDeliveryTTL reads the --delivery-ttl value, a positive duration.
+func parseDeliveryTTL(value string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("delivery ttl %q is not a positive duration (for example 10m); pass --delivery-ttl or set SCHMEIDE_DELIVERY_TTL", value)
+	}
+	return d, nil
 }
 
 // Run starts the embedded NATS server and the webhook listener and blocks
@@ -88,6 +147,14 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 		return err
 	}
 	runnerTokens, err := ParseRunnerTokens(cfg.RunnerTokens)
+	if err != nil {
+		return err
+	}
+	rate, err := parseWebhookRate(cfg.WebhookRate)
+	if err != nil {
+		return err
+	}
+	ttl, err := parseDeliveryTTL(cfg.DeliveryTTL)
 	if err != nil {
 		return err
 	}
@@ -119,14 +186,16 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 		ReadyLabel: cfg.ReadyLabel,
 		Allow:      allow,
 		Publish:    queue.Publish,
-	}, log))
+	}, log, WebhookPolicy{RequestsPerMinute: rate, DeliveryTTL: ttl}))
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.HTTPAddr)
 	if err != nil {
 		return fmt.Errorf("listen for webhooks on %s: %w", cfg.HTTPAddr, err)
 	}
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := newWebhookServer(mux)
 	log.Info("control node started",
-		"webhook", "http://"+listener.Addr().String()+"/webhook", "nats", cfg.NATSAddr, "ready_label", cfg.ReadyLabel)
+		"webhook", "http://"+listener.Addr().String()+"/webhook",
+		"listener", "plain HTTP; must sit behind a TLS-terminating proxy",
+		"nats", cfg.NATSAddr, "ready_label", cfg.ReadyLabel)
 
 	failed := make(chan error, 1)
 	go func() { failed <- srv.Serve(listener) }()
@@ -138,4 +207,17 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// newWebhookServer builds the plain HTTP webhook listener.
+// ReadTimeout bounds the whole request so a slow client cannot hold the
+// connection open. IdleTimeout is left unset, so it follows ReadTimeout:
+// a keep-alive connection that sends nothing is closed too. Shutdown is
+// unchanged.
+func newWebhookServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: webhookReadHeaderTimeout,
+		ReadTimeout:       webhookReadTimeout,
+	}
 }

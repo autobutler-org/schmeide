@@ -8,10 +8,14 @@ import (
 )
 
 func TestControlUsageDocumentsEverySetting(t *testing.T) {
+	usage := Usage()
 	for _, s := range controlSettings {
-		if got := Usage(); !strings.Contains(got, "--"+s.name+"\n") || !strings.Contains(got, s.env()) || s.usage == "" {
+		if !strings.Contains(usage, "--"+s.name+"\n") || !strings.Contains(usage, s.env()) || s.usage == "" {
 			t.Errorf("usage does not document --%s and %s", s.name, s.env())
 		}
+	}
+	if !strings.Contains(usage, "HTTP") || !strings.Contains(usage, "TLS-terminating proxy") {
+		t.Error("usage does not say the listener is HTTP and must sit behind a TLS-terminating proxy")
 	}
 }
 
@@ -20,15 +24,16 @@ func TestParseControl(t *testing.T) {
 		t.Setenv(s.env(), "")
 	}
 	file := filepath.Join(t.TempDir(), "conf")
-	conf := "# control node\nwebhook-secret = from-file\ngithub-app-id = \"111\"\nready-label = file:ready\nallowed-orgs = autobutler-org, exokomodo\nrunner-tokens = octocat:t1\ndata-dir = /file\n"
+	conf := "# control node\nwebhook-secret = from-file\ngithub-app-id = \"111\"\nready-label = file:ready\nallowed-orgs = autobutler-org, exokomodo\nrunner-tokens = octocat:t1\ndata-dir = /file\ndelivery-ttl = 5m\nwebhook-rate = 40\n"
 	if err := os.WriteFile(file, []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("SCHMEIDE_READY_LABEL", "env:ready")
 	t.Setenv("SCHMEIDE_DATA_DIR", "/env")
 	t.Setenv("SCHMEIDE_GITHUB_APP_PRIVATE_KEY_FILE", "/env/key.pem")
+	t.Setenv("SCHMEIDE_WEBHOOK_RATE", "80")
 
-	got, err := parseControl([]string{"--config", file, "--data-dir", "/flag"})
+	got, err := parseControl([]string{"--config", file, "--data-dir", "/flag", "--delivery-ttl", "15m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,9 +48,25 @@ func TestParseControl(t *testing.T) {
 		GitHubAppID:             "111", // quotes are optional
 		GitHubAppPrivateKeyFile: "/env/key.pem",
 		GitHubAPIURL:            DefaultGitHubAPIURL,
+		WebhookRate:             "80",  // env beats the file
+		DeliveryTTL:             "15m", // flag beats the file
 	}
 	if got != want {
 		t.Errorf("config = %+v, want %+v", got, want)
+	}
+	t.Setenv("SCHMEIDE_WEBHOOK_RATE", "")
+	t.Setenv("SCHMEIDE_DELIVERY_TTL", "")
+	bare := filepath.Join(t.TempDir(), "bare")
+	bareConf := "webhook-secret = s\ngithub-app-id = 1\nallowed-orgs = acme\nrunner-tokens = octocat:t\ngithub-app-private-key-file = /k.pem\n"
+	if err := os.WriteFile(bare, []byte(bareConf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = parseControl([]string{"--config", bare})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WebhookRate != "1000" || got.DeliveryTTL != "10m" {
+		t.Errorf("defaults = rate %q ttl %q, want 1000 and 10m", got.WebhookRate, got.DeliveryTTL)
 	}
 
 	for name, tt := range map[string]struct {
@@ -57,6 +78,8 @@ func TestParseControl(t *testing.T) {
 		"bad installation id": {args: []string{"--config", file, "--allowed-installations", "61234567,acme"}, want: `allowed installation "acme"`},
 		"missing config file": {args: []string{"--config", file + ".nope"}, want: "--config"},
 		"positional argument": {args: []string{"--config", file, "extra"}, want: `unexpected argument "extra"`},
+		"bad webhook rate":    {args: []string{"--config", file, "--webhook-rate", "0"}, want: "positive"},
+		"bad delivery ttl":    {args: []string{"--config", file, "--delivery-ttl", "soon"}, want: "duration"},
 	} {
 		if _, err := parseControl(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, tt.want)
