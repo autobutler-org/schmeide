@@ -189,8 +189,9 @@ reviewed like code. The file is `.schmeide/config.toml` and the only key is
 `gate`, the command that must pass before a PR is opened. Unknown keys are an
 error. The runner reads the file before the harness session, so the session
 cannot change the gate it is about to be held to. Other settings (merge
-policy, reviewer prompts, declared dependencies) are added to the schema when
-the feature that reads them is built.
+policy, reviewer prompts) are added to the schema when the feature that reads
+them is built. Where a pull request dependency is declared is open. See
+[Open decisions](#open-decisions).
 
 ### Credentials and the job environment
 
@@ -292,6 +293,7 @@ Not in the first slice, and not shipped:
 - Container isolation for jobs
 - Harnesses other than Claude Code
 - Polling GitHub for issues
+- More than one job at a time on a runner
 
 ## Settled decisions
 
@@ -312,6 +314,10 @@ None of these are settled. Where a value is given, it is a proposal.
 | Decision | Proposal | Affects |
 |---|---|---|
 | How a runner opts in to pool work, and what limits apply | None yet. Needed before pool fallback is turned on. | Later |
+| The merge default (#32) | When a repo omits the merge setting, a person presses merge. The factory merges only when the config says so. | Merging (#23) |
+| The dependency declaration (#34) | A pull request dependency is GitHub's issue dependency, not a config key. Stack on the dependency's open pull request, or on the default branch once that pull request has merged. | Stacked pull requests (#25) |
+| The second harness (#33) | The second harness shells out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. | #27 |
+| Concurrent jobs (#44) | A runner keeps working one job at a time. | None of the later items |
 
 ## Later
 
