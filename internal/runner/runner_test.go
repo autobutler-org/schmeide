@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -891,4 +892,106 @@ func TestReviewerSessionFailureIsFinal(t *testing.T) {
 		t.Errorf("issue comments = %q, want the reviewer failure and the open pull request", comments["7"])
 	}
 	assertNoMerge(t, w)
+}
+
+// TestForeignJobBranchCommitIsKept is a remote commit on the job branch that
+// this runner did not create. The push must leave it there and fail the job.
+func TestForeignJobBranchCommitIsKept(t *testing.T) {
+	w := newWorld(t)
+	const branch = "7_fix-the-thing"
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(src, "theirs.txt"), []byte("not ours\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "-c", "user.name=someone", "-c", "user.email=someone@example.test", "commit", "-q", "-m", "foreign")
+	git(t, src, "push", "-q", "origin", "HEAD:"+branch)
+	foreign := git(t, w.bare, "rev-parse", branch)
+
+	h, _ := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StateFailed {
+		t.Fatalf("states = %v, want the job failed", states)
+	}
+	if got := git(t, w.bare, "rev-parse", branch); got != foreign {
+		t.Fatalf("job branch is %s, want the foreign commit %s kept", got, foreign)
+	}
+	if got := git(t, w.bare, "show", branch+":theirs.txt"); got != "not ours" {
+		t.Errorf("foreign file = %q, want it kept", got)
+	}
+	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", branch); strings.Contains(files, "fix.txt") {
+		t.Errorf("the runner's commit was pushed: %s", files)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	comment := ""
+	if len(comments["7"]) == 1 {
+		comment = comments["7"][0]
+	}
+	if !strings.Contains(comment, "moved") || !strings.Contains(comment, "look at that branch") {
+		t.Errorf("issue comments = %q, want one saying the branch moved and that someone has to look at that branch", comments["7"])
+	}
+}
+
+// TestFindPRPagesPastTheNewest finds a pull request on a later page. The head
+// ref only shares the issue-number prefix, which is what survives a retitle.
+func TestFindPRPagesPastTheNewest(t *testing.T) {
+	const want = "https://github.test/o/r/pull/7"
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/"+testRepo+"/pulls" {
+			t.Errorf("path = %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("state") != "all" {
+			t.Errorf("state = %q, want all", q.Get("state"))
+		}
+		perPage, err := strconv.Atoi(q.Get("per_page"))
+		if err != nil || perPage < 1 {
+			t.Errorf("per_page = %q", q.Get("per_page"))
+			perPage = 100
+		}
+		page := q.Get("page")
+		if page == "" {
+			page = "1"
+		}
+		pages = append(pages, page)
+		var pulls []ghPull
+		switch page {
+		case "1":
+			for i := range perPage {
+				p := ghPull{HTMLURL: fmt.Sprintf("https://github.test/o/r/pull/%d", 1000+i)}
+				// 70_newer must not match issue 7. Only a "7_" prefix does.
+				p.Head.Ref = fmt.Sprintf("%d_newer", 70+i)
+				pulls = append(pulls, p)
+			}
+		case "2":
+			p := ghPull{HTMLURL: want}
+			p.Head.Ref = "7_previous-title"
+			pulls = append(pulls, p)
+		}
+		if err := json.NewEncoder(w).Encode(pulls); err != nil {
+			t.Error(err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := (github{api: srv.URL, repo: testRepo, token: testToken}).findPR(t.Context(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("findPR = %q, want %q", got, want)
+	}
+	if !slices.Equal(pages, []string{"1", "2"}) {
+		t.Errorf("pages = %v, want the first page and the next", pages)
+	}
 }
