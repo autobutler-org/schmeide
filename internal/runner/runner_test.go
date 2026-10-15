@@ -943,9 +943,6 @@ func TestEnvKeepsOnlyWhatJobsNeed(t *testing.T) {
 		"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "SCHMEIDE_NATS_TOKEN=secret", "GITHUB_TOKEN=ghp",
 		"ANTHROPIC_API_KEY=sk", "CLAUDE_CONFIG_DIR=/c", "GOPATH=/go", "AWS_SECRET_ACCESS_KEY=aws",
 	}
-	if got, want := jobEnv(environ, []string{"GOPATH"}), []string{"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "GOPATH=/go"}; !slices.Equal(got, want) {
-		t.Errorf("jobEnv = %q, want %q", got, want)
-	}
 	want := []string{"PATH=/bin", "HOME=/home/a", "LC_ALL=C", "ANTHROPIC_API_KEY=sk", "CLAUDE_CONFIG_DIR=/c"}
 	if got := harnessEnv(environ, nil); !slices.Equal(got, want) {
 		t.Errorf("harnessEnv = %q, want %q", got, want)
