@@ -647,6 +647,102 @@ func TestJobOpensPR(t *testing.T) {
 	}
 }
 
+// TestJobLocksGateGitAndHarnessEnvironments runs one job and checks the three
+// environments that job starts. The harness session is harnessEnv: the base
+// list plus ANTHROPIC_, CLAUDE_, XAI_, and --pass-env, with no SCHMEIDE_ name.
+// newWorktree is called without an environment, so git sees only the variables
+// newWorktree appends and does not see SCHMEIDE_NATS_TOKEN. The gate command's
+// environment stays nil, so the gate inherits the runner process environment,
+// including SCHMEIDE_NATS_TOKEN and SCHMEIDE_TEST_GATE_PROOF, which is not on
+// the base list. --pass-env does not filter the gate.
+func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
+	const secret = "gate-sees-this-nats-secret"
+	dir := t.TempDir()
+	proof := filepath.Join(dir, "gate-proof")
+	logPath := filepath.Join(dir, "git-env.log")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("find git: %v", err)
+	}
+	wrapperDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(wrapperDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The runner's git process has no PATH. LookPath in this process finds the
+	// wrapper; the wrapper execs the real git by absolute path.
+	quote := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	script := "#!/bin/sh\n" +
+		"{ printf '%s\\n' '---'; export -p; } >> " + quote(logPath) + " || exit 1\n" +
+		"exec " + quote(realGit) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newWorld(t)
+	gate := `printf '%s' "$SCHMEIDE_NATS_TOKEN" > "$SCHMEIDE_TEST_GATE_PROOF"`
+	w.pushConfig(t, "gate = "+strconv.Quote(gate)+"\n")
+
+	t.Setenv("SCHMEIDE_NATS_TOKEN", secret)
+	t.Setenv("SCHMEIDE_TEST_GATE_PROOF", proof)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var mu sync.Mutex
+	var sessions [][]string
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		mu.Lock()
+		sessions = append(sessions, slices.Clone(req.Env))
+		mu.Unlock()
+		if strings.Contains(req.Prompt, reviewLead) {
+			return writeVerdict(req, "pass\n")
+		}
+		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600)
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
+		proofBody, _ := os.ReadFile(proof)
+		gitLog, _ := os.ReadFile(logPath)
+		t.Fatalf("states = %s, want %s\ngate proof = %q\ngit environment:\n%s", got, want, proofBody, gitLog)
+	}
+
+	gotProof, err := os.ReadFile(proof)
+	if err != nil {
+		t.Fatalf("read gate proof: %v", err)
+	}
+	if string(gotProof) != secret {
+		t.Errorf("gate wrote %q, want SCHMEIDE_NATS_TOKEN %q", gotProof, secret)
+	}
+
+	gitLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read git environment log: %v", err)
+	}
+	if !strings.Contains(string(gitLog), "GIT_TERMINAL_PROMPT=") {
+		t.Errorf("git environment = %s, want GIT_TERMINAL_PROMPT from newWorktree", gitLog)
+	}
+	if strings.Contains(string(gitLog), "SCHMEIDE_NATS_TOKEN") || strings.Contains(string(gitLog), secret) {
+		t.Errorf("git environment contains SCHMEIDE_NATS_TOKEN:\n%s", gitLog)
+	}
+
+	mu.Lock()
+	seen := append([][]string(nil), sessions...)
+	mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("harness ran no session")
+	}
+	for _, env := range seen {
+		if env == nil || slices.ContainsFunc(env, func(v string) bool { return strings.HasPrefix(v, "SCHMEIDE_") }) {
+			t.Errorf("session environment = %q, want one without a SCHMEIDE_ name", env)
+		}
+		if !slices.ContainsFunc(env, func(v string) bool { return strings.HasPrefix(v, "PATH=") }) {
+			t.Errorf("session environment = %q, want the base list, including PATH", env)
+		}
+	}
+}
+
 func TestGateFailureOpensNoPR(t *testing.T) {
 	w := newWorld(t)
 	h, _ := writes(map[string]string{"broken": "x"})
