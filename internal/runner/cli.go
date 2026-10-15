@@ -84,6 +84,23 @@ func splitList(value string) []string {
 	return slices.DeleteFunc(strings.Split(value, ","), func(name string) bool { return name == "" })
 }
 
+// harnesses returns harness.All in that order. claudeArgs applies only to the
+// Claude Code harness; every other harness keeps the defaults All gave it.
+// An empty claudeArgs means no extra Claude flags, the same as --claude-args
+// set to empty: Fields returns nil, which is what the runner stores today.
+func harnesses(claudeArgs string) []harness.Harness {
+	list := harness.All()
+	args := strings.Fields(claudeArgs)
+	for _, h := range list {
+		cc, ok := h.(*harness.ClaudeCode)
+		if !ok {
+			continue
+		}
+		cc.Args = args
+	}
+	return list
+}
+
 // Usage is the help text of `schmeide runner`.
 func Usage() string {
 	fs, _, _, _ := runnerFlags()
@@ -142,7 +159,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	o.PassEnv = splitList(strings.ReplaceAll(*passEnv, " ", ""))
-	o.Harnesses = []harness.Harness{&harness.ClaudeCode{Args: strings.Fields(*claudeArgs)}}
+	o.Harnesses = harnesses(*claudeArgs)
 	o.Output = stderr
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
