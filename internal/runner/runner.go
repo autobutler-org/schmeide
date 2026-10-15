@@ -98,8 +98,10 @@ type Options struct {
 	// AckWait is how long the control node waits without a heartbeat before
 	// it redelivers a job. Zero means 30 seconds.
 	AckWait time.Duration
-	// MaxAttempts is how many times a job is delivered before a failure is
-	// final. Zero means 3.
+	// MaxAttempts is how many StateFailed outcomes this process allows for
+	// one job before that failure is final. A hand-back for a missing token
+	// or a shutdown is not one of them. Zero means 3. The count is kept in
+	// memory, so a restarted process starts over.
 	MaxAttempts int
 	// MaxReviewRounds is how many reviewer sessions run after the pull
 	// request is open. Zero means 3. Exhausting them fails the job and leaves
@@ -117,6 +119,10 @@ type Runner struct {
 	nc      *nats.Conn
 	cons    jetstream.Consumer
 	harness harness.Harness
+	// failures counts StateFailed outcomes per job subject. Token hand-backs
+	// and shutdown hand-backs are not counted. Only handle writes it, and
+	// Run works one job at a time.
+	failures map[string]int
 }
 
 // Connect opens a connection to the control node's NATS as the steward and
@@ -174,7 +180,7 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runner{opts: o, log: log, nc: nc}
+	r := &Runner{opts: o, log: log, nc: nc, failures: map[string]int{}}
 	if err := r.register(ctx, js); err != nil {
 		nc.Close()
 		return nil, err
@@ -284,8 +290,9 @@ func (r *Runner) token(ctx context.Context, subject string) (string, error) {
 
 // handle works one delivered job. It acknowledges the job only once the job
 // has reached a final state, so a runner that dies before then leaves the job
-// to be redelivered. A failed job is handed back to be tried again until it
-// has been delivered Options.MaxAttempts times.
+// to be redelivered. A StateFailed outcome is handed back until this process
+// has seen Options.MaxAttempts of them. A hand-back because the token request
+// failed, or because the runner's context is canceled, does not count.
 func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	var job control.Job
 	if err := json.Unmarshal(msg.Data(), &job); err != nil || job.Subject() != msg.Subject() {
@@ -315,6 +322,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	if err != nil {
 		// Without a token the outcome cannot be put on the issue, so the job
 		// is handed back instead of being failed where nobody would see it.
+		// This delivery is not a work failure and does not count.
 		r.log.Error("handing the job back", "repo", job.Repo, "issue", job.Issue, "err", err)
 		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
@@ -322,24 +330,28 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	gh := github{api: r.opts.GitHubAPIURL, repo: job.Repo, token: token}
 	out := r.work(ctx, gh, job, token)
 	if ctx.Err() != nil {
-		_ = msg.Nak() // shutting down: let another runner have it now
+		// Shutting down. Hand the job to another runner now, and do not count
+		// this delivery as a work failure.
+		_ = msg.Nak()
 		return
 	}
 	// A failure may be passing (a harness outage, a GitHub error), so the job
-	// is redelivered a bounded number of times before the failure is final.
-	// A gate failure is the session's own result and is not retried. A review
-	// that does not pass is final too: the pull request is already open, and
-	// a redelivery would treat that as done.
-	//
-	// ponytail: every delivery counts as an attempt, including ones handed
-	// back for want of a token or by a runner shutting down; count failures
-	// in the status history if those eat too many attempts.
-	if meta, err := msg.Metadata(); out.state == StateFailed && err == nil && meta.NumDelivered < uint64(r.opts.MaxAttempts) {
-		r.report(job, StateRetrying, fmt.Sprintf("attempt %d of %d failed: %s", meta.NumDelivered, r.opts.MaxAttempts, out.detail))
-		if err := msg.NakWithDelay(r.opts.RetryDelay); err == nil {
-			return
+	// is tried again until this process has seen MaxAttempts StateFailed
+	// outcomes. The JetStream delivery count is not that number: a token
+	// hand-back and a shutdown hand-back are deliveries too. A gate failure
+	// is the session's own result and is not retried. A review that does not
+	// pass is final too: the pull request is already open, and a redelivery
+	// would treat that as done.
+	if out.state == StateFailed {
+		n := r.recordWorkFailure(job.Subject())
+		if n < r.opts.MaxAttempts {
+			r.report(job, StateRetrying, fmt.Sprintf("attempt %d of %d failed: %s", n, r.opts.MaxAttempts, out.detail))
+			if err := msg.NakWithDelay(r.opts.RetryDelay); err == nil {
+				return
+			}
 		}
 	}
+	delete(r.failures, job.Subject())
 	if out.comment != "" {
 		if err := gh.comment(ctx, job.Issue, out.comment); err != nil {
 			r.log.Error("could not comment on the issue", "repo", job.Repo, "issue", job.Issue, "err", err)
@@ -349,6 +361,13 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	if err := msg.Ack(); err != nil {
 		r.log.Error("could not acknowledge the job; it will be redelivered", "repo", job.Repo, "issue", job.Issue, "err", err)
 	}
+}
+
+// recordWorkFailure counts one StateFailed outcome for the job and returns
+// how many this process has seen.
+func (r *Runner) recordWorkFailure(subject string) int {
+	r.failures[subject]++
+	return r.failures[subject]
 }
 
 // outcome is the final state of one attempt at a job.

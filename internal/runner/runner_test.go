@@ -23,6 +23,7 @@ import (
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 var testRunnerTokens = map[string]string{"alice": "alice-nats", "bob": "bob-nats"}
@@ -151,6 +152,10 @@ type world struct {
 	bare     string
 	client   *nats.Conn
 	statuses chan statusMsg
+	// mint, when set, answers a job's token request. Nil mints testToken.
+	mint func(context.Context, control.Job) (control.Token, error)
+	// maxAttempts is the runner's --max-attempts. Zero keeps the default.
+	maxAttempts int
 }
 
 func newWorld(t *testing.T) *world {
@@ -172,18 +177,20 @@ func newWorld(t *testing.T) *world {
 	}
 	t.Cleanup(queue.Close)
 	log := slog.New(slog.DiscardHandler)
-	if err := queue.ServeTokens(func(context.Context, control.Job) (control.Token, error) {
-		return control.Token{Token: testToken}, nil
-	}, log); err != nil {
-		t.Fatal(err)
-	}
-
 	w := &world{
 		queue:    queue,
 		natsURL:  "nats://" + addr,
 		gh:       &fakeGitHub{t: t, comments: map[string][]string{}},
 		gitRoot:  t.TempDir(),
 		statuses: make(chan statusMsg, 64),
+	}
+	if err := queue.ServeTokens(func(ctx context.Context, job control.Job) (control.Token, error) {
+		if w.mint != nil {
+			return w.mint(ctx, job)
+		}
+		return control.Token{Token: testToken}, nil
+	}, log); err != nil {
+		t.Fatal(err)
 	}
 	api := httptest.NewServer(w.gh)
 	t.Cleanup(api.Close)
@@ -227,9 +234,8 @@ func (w *world) publish(t *testing.T, steward string, issue int) {
 	}
 }
 
-// start runs a runner for the steward until the test ends and returns it
-// along with its work directory.
-func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner, string) {
+// runner builds a runner and does not start it, so a test can call handle.
+func (w *world) runner(t *testing.T, steward string, h harness.Harness) (*Runner, string) {
 	t.Helper()
 	workDir := t.TempDir()
 	r, err := New(t.Context(), Options{
@@ -244,10 +250,20 @@ func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner,
 		Harnesses:    []harness.Harness{h},
 		AckWait:      time.Second,
 		RetryDelay:   10 * time.Millisecond,
+		MaxAttempts:  w.maxAttempts,
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(r.Close)
+	return r, workDir
+}
+
+// start runs a runner for the steward until the test ends and returns it
+// along with its work directory.
+func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner, string) {
+	t.Helper()
+	r, workDir := w.runner(t, steward, h)
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan struct{})
 	go func() {
@@ -260,6 +276,37 @@ func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner,
 		r.Close()
 	})
 	return r, workDir
+}
+
+// nextJob waits for the runner's consumer to deliver one job.
+func nextJob(t *testing.T, r *Runner) jetstream.Msg {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		msg, err := r.cons.Next(jetstream.FetchMaxWait(pollWait))
+		if err == nil {
+			return msg
+		}
+		last = err
+	}
+	t.Fatalf("no job arrived: %v", last)
+	return nil
+}
+
+// take reads statuses until have has n of them.
+func (w *world) take(t *testing.T, have []State, n int) []State {
+	t.Helper()
+	timeout := time.After(15 * time.Second)
+	for len(have) < n {
+		select {
+		case s := <-w.statuses:
+			have = append(have, s.State)
+		case <-timeout:
+			t.Fatalf("saw %v, want %d states", have, n)
+		}
+	}
+	return have
 }
 
 // await returns the states reported for the issue, up to and including the
@@ -545,6 +592,103 @@ func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	}
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "the model was overloaded") {
 		t.Errorf("issue comments = %q, want one reporting the final failure", comments["7"])
+	}
+}
+
+// TestTokenHandBackDoesNotConsumeAttempts is two token refusals and then one
+// work failure, with --max-attempts 3. The work failure is still retried.
+func TestTokenHandBackDoesNotConsumeAttempts(t *testing.T) {
+	w := newWorld(t)
+	w.maxAttempts = 3
+	var tokenReqs atomic.Int32
+	w.mint = func(context.Context, control.Job) (control.Token, error) {
+		if tokenReqs.Add(1) <= 2 {
+			return control.Token{}, errors.New("github is down")
+		}
+		return control.Token{Token: testToken}, nil
+	}
+	h, _ := writes(map[string]string{"fix.txt": "x"})
+	succeed := h.RunFunc
+	var failedWork atomic.Bool
+	h.RunFunc = func(ctx context.Context, req harness.Request) error {
+		if !strings.Contains(req.Prompt, reviewLead) && !failedWork.Swap(true) {
+			return errors.New("the model was overloaded")
+		}
+		return succeed(ctx, req)
+	}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	// Two token hand-backs, one retried work failure, then the pull request.
+	want := []State{
+		StateClaimed, StateClaimed, StateClaimed, StateWorking, StateRetrying,
+		StateClaimed, StateWorking, StateReviewing, StatePROpened,
+	}
+	if got := w.await(t, "alice", 7); !slices.Equal(got, want) {
+		t.Errorf("states = %v, want %v", got, want)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want one after the retried work failure", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "opened a pull request") {
+		t.Errorf("issue comments = %q, want only the pull request comment", comments["7"])
+	}
+}
+
+// TestShutdownHandBackDoesNotConsumeAttempts is a shutdown Nak and then one
+// work failure. MaxAttempts is 2, so that shutdown delivery would already be
+// the last try if deliveries were attempts. The work failure is retried.
+func TestShutdownHandBackDoesNotConsumeAttempts(t *testing.T) {
+	w := newWorld(t)
+	w.maxAttempts = 2
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var calls int
+	h := &harness.Fake{RunFunc: func(runCtx context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			return writeVerdict(req, "pass\n")
+		}
+		calls++
+		switch calls {
+		case 1:
+			cancel()
+			<-runCtx.Done()
+			return runCtx.Err()
+		case 2:
+			return errors.New("the model was overloaded")
+		default:
+			return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("x\n"), 0o600)
+		}
+	}}
+	r, _ := w.runner(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	r.handle(ctx, nextJob(t, r))
+	var states []State
+	states = w.take(t, states, 2)
+	if got, want := fmt.Sprint(states), "[claimed working]"; got != want {
+		t.Fatalf("states after shutdown = %s, want %s", got, want)
+	}
+
+	r.handle(t.Context(), nextJob(t, r))
+	states = w.take(t, states, 5)
+	if states[len(states)-1] != StateRetrying {
+		t.Fatalf("states after the work failure = %v, want it retried", states)
+	}
+
+	r.handle(t.Context(), nextJob(t, r))
+	states = w.take(t, states, 9)
+	want := "[claimed working claimed working retrying claimed working reviewing pr_opened]"
+	if got := fmt.Sprint(states); got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want one after the retried work failure", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "opened a pull request") {
+		t.Errorf("issue comments = %q, want only the pull request comment", comments["7"])
 	}
 }
 
