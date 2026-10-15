@@ -47,7 +47,7 @@ prioritizing, assigning) and keeping repo settings consistent across the org.
 | Control node | The single process that receives GitHub webhooks, holds the job queue, and hands out per-job GitHub tokens. |
 | Runner | A process on a machine that has an agent harness installed and already logged in. It registers with the control node and pulls jobs. |
 | Job | One unit of work: one GitHub issue to be taken to a pull request. |
-| Harness | An agent CLI that a runner drives, such as Claude Code. |
+| Harness | An agent CLI that a runner drives, such as Claude Code or the Grok CLI. |
 | Gate | The command a repo requires to pass before a PR is opened, such as `make check test`. |
 
 ## Architecture
@@ -85,9 +85,10 @@ flowchart LR
 - **Per-job GitHub tokens, per-steward NATS tokens.** A runner has no
   long-lived GitHub credential and no personal GitHub token. See
   [Credentials and the job environment](#credentials-and-the-job-environment).
-- **Runners bring their own agent login.** A runner uses the harness that is
-  already installed and logged in on its machine. schmeide does not handle
-  agent API keys. A Claude Code session's environment keeps `ANTHROPIC_*` and
+- **Runners bring their own agent login.** A runner uses the first harness
+  whose `Check` passes on its machine. Claude Code and the Grok CLI are both
+  built. See [Harnesses](#harnesses). schmeide does not handle agent API
+  keys. A Claude Code session's environment keeps `ANTHROPIC_*` and
   `CLAUDE_*` so that login still works.
 
 ## Job lifecycle
@@ -181,11 +182,17 @@ are not built, and the code is not updated in this change.
 ### Harnesses
 
 Harnesses are pluggable. The runner drives a harness through an adapter
-interface that states what every harness must support. Claude Code is the
-first and only implementation (`internal/harness`). The accepted second
-harness (#33) shells out to the Grok CLI, the same shape as the Claude Code
-adapter, with no new module dependency. That harness is not built, and the
-code is not updated in this change.
+interface that states what every harness must support. Claude Code and the
+Grok CLI are both implementations (`internal/harness`). The Grok adapter
+shells out to the Grok CLI, the same shape as the Claude Code adapter, with
+no new module dependency.
+
+`All()` offers Claude Code first and the Grok CLI second. The runner uses
+the first harness whose `Check` passes, so a working Claude Code is still
+selected. The runner offers that list, and `--claude-args` applies only to
+Claude Code (`internal/runner/cli.go`, `internal/runner/runner.go`). A
+missing or logged-out harness is skipped when another one is ready. Doctor
+fails the harness check only when every harness fails (`internal/doctor`).
 
 ### Isolation
 
@@ -303,14 +310,14 @@ The schmeide GitHub App is a prerequisite for a live delivery. Tests use saved
 webhook payloads, a fake GitHub API, and a fake harness.
 
 The AI review stage shipped after this slice. See [Review](#review). Merging
-shipped after this slice. See [Merge](#merge).
+shipped after this slice. See [Merge](#merge). The Grok CLI harness shipped
+after this slice. See [Harnesses](#harnesses).
 
 Not in the first slice, and not shipped:
 
 - Falling back to a pool of other people's runners
 - Stacked PRs for declared issue dependencies
 - Container isolation for jobs
-- Harnesses other than Claude Code. The accepted Grok CLI harness is not built.
 - Polling GitHub for issues
 - More than one job at a time on a runner. Accepted as no change: a runner stays on one job, which is already how the code works.
 
@@ -328,7 +335,7 @@ Not in the first slice, and not shipped:
 | Pool opt-in (#31) | An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. Not built yet. | The code is not updated in this change. |
 | Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | GitHub's issue dependency, not a config key. Not built yet. | The code is not updated in this change. |
-| Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. Not built yet. | The code is not updated in this change. |
+| Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |
 
 ## Open decisions
@@ -342,4 +349,3 @@ Roughly in the order they are expected to matter. None of these have been built:
 1. Pool fallback. An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists.
 2. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
 3. Container isolation for jobs
-4. A second harness that shells out to the Grok CLI, the same shape as Claude Code, with no new module dependency.

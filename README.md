@@ -2,7 +2,7 @@
 
 The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The default is that a person presses merge.
 
-See [docs/design.md](docs/design.md) for the agreed design. The first slice, the AI review stage, and merging are done. Pool fallback is later.
+See [docs/design.md](docs/design.md) for the agreed design. The first slice, the AI review stage, merging, and the Grok CLI harness are done. Pool fallback is later.
 
 ## Commands
 
@@ -14,7 +14,7 @@ Run `schmeide --help` or `schmeide <command> --help` for that command's flags. E
 
 ## Running the first slice
 
-One control node and one runner, on the same machine or not. The target repository needs `.schmeide/config.toml` (below). The schmeide GitHub App supplies the app ID, private key, and webhook secret. Claude Code is the harness, and it must already be installed and logged in on the runner. schmeide does not handle agent API keys.
+One control node and one runner, on the same machine or not. The target repository needs `.schmeide/config.toml` (below). The schmeide GitHub App supplies the app ID, private key, and webhook secret. Claude Code and the Grok CLI are the harnesses. The runner uses the first one whose check passes. Claude Code is offered first, so Claude Code wins when it is usable. At least one of them must already be installed and logged in on the runner. A missing or logged-out harness is skipped when another one is ready. schmeide does not handle agent API keys.
 
 1. Start the control node. These settings are required: `--webhook-secret`, `--github-app-id`, `--github-app-private-key-file`, `--runner-tokens`, and at least one of `--allowed-orgs` or `--allowed-installations`. `--runner-tokens` is a comma-separated list of `<github login>:<token>`, one entry per steward. Put secrets in the environment or the config file so they stay out of the process list.
 
@@ -36,15 +36,15 @@ One control node and one runner, on the same machine or not. The target reposito
    schmeide runner --steward octocat --nats-token a-token-for-octocat
    ```
 
-   Doctor checks that git is on `PATH`, that a harness is installed and logged in, and that the control node answers for that steward. Each failed check says how to fix it.
+   Doctor checks that git is on `PATH`, that at least one harness is installed and logged in, and that the control node answers for that steward. It fails the harness check only when every harness fails. Each failed check says how to fix it.
 
-3. On an open issue in an allowed repository, assign it to that login and add the label `schmeide:ready` (the `--ready-label` default). An `assigned` or `labeled` delivery creates one job and stores the issue title and body from that delivery. The runner checks out a git worktree on a branch named `<issue number>_<short-description>`, runs a fresh Claude Code session from that stored text, runs the repo's gate, then pushes the branch and opens a pull request as the GitHub App.
+3. On an open issue in an allowed repository, assign it to that login and add the label `schmeide:ready` (the `--ready-label` default). An `assigned` or `labeled` delivery creates one job and stores the issue title and body from that delivery. The runner checks out a git worktree on a branch named `<issue number>_<short-description>`, runs a fresh harness session from that stored text, runs the repo's gate, then pushes the branch and opens a pull request as the GitHub App. Claude Code runs that session when it is usable.
 
 After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the review. Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
 
 A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3).
 
-By default each Claude Code session is started with `--permission-mode acceptEdits`, which only lets it edit files in its worktree. `--claude-args` replaces those flags when a session needs to run commands.
+By default each harness session is started with `--permission-mode acceptEdits`, which only lets it edit files in its worktree. `--claude-args` replaces those flags for Claude Code when a session needs to run commands. It does not apply to the Grok CLI.
 
 A harness session's environment is `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `TZ`, `TMPDIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and the lowercase forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`, names starting with `LC_` or `XDG_`, names starting with `ANTHROPIC_` or `CLAUDE_`, and any names listed in `--pass-env`. The runner's own `SCHMEIDE_*` settings, including its NATS token, are left out of that session. The gate is not given that list. It inherits the runner process's environment. The session and the gate run as the user that started the runner, so run the runner as a user that holds nothing else worth taking.
 
