@@ -566,7 +566,7 @@ func TestParseRunnerTokens(t *testing.T) {
 	if err != nil || len(got) != 2 || got["octocat"] != "a:b" || got["hubot"] != "c" {
 		t.Errorf("ParseRunnerTokens = %v, %v, want octocat=a:b and hubot=c", got, err)
 	}
-	for _, bad := range []string{"", " , ", "octocat", "octocat:", ":t", "octo.cat:t", "octocat:a,octocat:b"} {
+	for _, bad := range []string{"", " , ", "octocat", "octocat:", ":t", "octo.cat:t", "octocat:a,octocat:b", PoolName + ":t"} {
 		if _, err := ParseRunnerTokens(bad); err == nil {
 			t.Errorf("ParseRunnerTokens(%q) succeeded, want an error", bad)
 		} else if strings.Contains(err.Error(), "a,") || strings.Contains(err.Error(), ":b") {
@@ -813,5 +813,121 @@ func TestRunnerCredentialsAreScopedToTheirSteward(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("hubot subscribed to %s", subject)
 		}
+	}
+}
+
+func TestPublishWithoutTrackingKeepsTheStewardSubject(t *testing.T) {
+	q := startQueue(t)
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", Title: "t"}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	got := jobs(t, q)
+	if len(got) != 1 || got[0].Pool || got[0].Subject() != "schmeide.jobs.octocat.7.1" {
+		t.Fatalf("jobs = %+v, want the steward subject", got)
+	}
+}
+
+func TestPublishRoutesByRegistration(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{
+		Steward: "octocat", Harnesses: []string{"fake"}, Host: "laptop", Pool: true,
+	})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+
+	kept := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), kept); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "hubot", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), pooled); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	// A later registration does not move a job that is already on the pool,
+	// and does not create a second one.
+	runner.publish(RegisterSubjectPrefix+"hubot", Registration{Steward: "hubot", Harnesses: []string{"fake"}, Host: "desk"})
+	eventually(t, func() bool { return tracker.hasRunner("hubot") })
+	if created, err := q.Publish(t.Context(), pooled); err != nil || created {
+		t.Fatalf("second Publish = %v, %v, want a duplicate", created, err)
+	}
+
+	got := jobs(t, q)
+	if len(got) != 2 {
+		t.Fatalf("jobs = %+v, want two", got)
+	}
+	if got[0].Pool || got[0].Subject() != kept.Subject() {
+		t.Errorf("registered steward's job = %+v on %s, want the steward subject", got[0], got[0].Subject())
+	}
+	if !got[1].Pool || got[1].Steward != "hubot" || got[1].Subject() != "schmeide.jobs."+PoolName+".7.2" {
+		t.Errorf("unregistered steward's job = %+v on %s, want the pool subject", got[1], got[1].Subject())
+	}
+	if strings.HasPrefix(got[1].Subject(), strings.TrimSuffix(JobFilter("octocat"), ">")) ||
+		strings.HasPrefix(got[1].Subject(), strings.TrimSuffix(JobFilter("hubot"), ">")) {
+		t.Errorf("pool subject %s matches a steward filter", got[1].Subject())
+	}
+	if !strings.HasPrefix(got[1].Subject(), strings.TrimSuffix(JobFilter(PoolName), ">")) {
+		t.Errorf("pool subject %s is outside %s", got[1].Subject(), JobFilter(PoolName))
+	}
+}
+
+func TestPoolNameIsRejectedAsASteward(t *testing.T) {
+	q := startQueue(t)
+	if _, err := q.Publish(t.Context(), Job{Steward: PoolName, RepoID: 1, Issue: 1}); err == nil {
+		t.Fatal("Publish accepted the pool name as a steward")
+	}
+	if got := jobs(t, q); len(got) != 0 {
+		t.Fatalf("jobs = %+v, want none", got)
+	}
+	body := bytes.ReplaceAll(payload(t, "issues_assigned_labeled.json"), []byte("octocat"), []byte(PoolName))
+	if job, err := JobFromIssuesEvent(body, DefaultReadyLabel); err == nil {
+		t.Fatalf("JobFromIssuesEvent = %+v, %v; want the pool name rejected", job, err)
+	}
+}
+
+func TestPoolJobTokenRequiresThePoolFlag(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	if err := q.ServeTokens(func(context.Context, Job) (Token, error) {
+		return Token{Token: "ghs_pool"}, nil
+	}, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	stored := jobs(t, q)
+	if len(stored) != 1 || !stored[0].Pool {
+		t.Fatalf("jobs = %+v, want one pool job", stored)
+	}
+	request := func(steward, subject string) TokenReply {
+		t.Helper()
+		msg, err := q.nc.Request(TokenSubjectPrefix+steward, []byte(subject), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply TokenReply
+		if err := json.Unmarshal(msg.Data, &reply); err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	if got := request("hubot", stored[0].Subject()); got.Error == "" || got.Token.Token != "" {
+		t.Fatalf("token before opt-in = %+v, want a refusal", got)
+	}
+	runner := startFakeRunner(t, q)
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"fake"}, Host: "h"})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") && !tracker.poolRunner("octocat") })
+	if got := request("octocat", stored[0].Subject()); got.Error == "" || got.Token.Token != "" {
+		t.Fatalf("token without --pool = %+v, want a refusal", got)
+	}
+	runner.publish(RegisterSubjectPrefix+"hubot", Registration{
+		Steward: "hubot", Harnesses: []string{"fake"}, Host: "h", Pool: true,
+	})
+	eventually(t, func() bool { return tracker.poolRunner("hubot") })
+	if got := request("hubot", stored[0].Subject()); got.Error != "" || got.Token.Token != "ghs_pool" {
+		t.Fatalf("pool token = %+v, want ghs_pool", got)
 	}
 }

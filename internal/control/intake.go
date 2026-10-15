@@ -38,6 +38,9 @@ type Job struct {
 	Issue int `json:"issue"`
 	// Steward is the login of the issue assignee, who owns the job.
 	Steward string `json:"steward"`
+	// Pool is true when the job was published on the pool subject because
+	// Steward had no registered runner. Subject then uses PoolName.
+	Pool bool `json:"pool,omitempty"`
 	// InstallationID is the GitHub App installation the webhook came from.
 	InstallationID int64 `json:"installation_id"`
 	// Title and Body are the issue as it stood when it became a job. The
@@ -48,9 +51,14 @@ type Job struct {
 }
 
 // Subject is the JetStream subject the job is published on. A runner pulls its
-// steward's jobs with the filter "schmeide.jobs.<steward>.>".
+// steward's jobs with the filter "schmeide.jobs.<steward>.>". A pooled job
+// uses PoolName instead of the steward, so it matches no steward's filter.
 func (j Job) Subject() string {
-	return fmt.Sprintf("schmeide.jobs.%s.%d.%d", j.Steward, j.RepoID, j.Issue)
+	name := j.Steward
+	if j.Pool {
+		name = PoolName
+	}
+	return fmt.Sprintf("schmeide.jobs.%s.%d.%d", name, j.RepoID, j.Issue)
 }
 
 // VerifySignature checks a GitHub X-Hub-Signature-256 header value against the
@@ -119,8 +127,10 @@ func JobFromIssuesEvent(body []byte, readyLabel string) (*Job, error) {
 	if steward == "" || !ready || ev.Issue.State != "open" || !slices.Contains(jobActions, ev.Action) {
 		return nil, nil //nolint:nilnil // no job is a normal outcome, not an error
 	}
-	// The steward becomes a NATS subject token, so it must not carry subject syntax.
-	if strings.ContainsAny(steward, ".*> \t\r\n") {
+	// The steward becomes a NATS subject token, so it must not carry subject
+	// syntax, and it must not be the pool token. That token would make the
+	// job subject match the pool filter.
+	if strings.ContainsAny(steward, ".*> \t\r\n") || steward == PoolName {
 		return nil, fmt.Errorf("assignee login %q cannot be used as a steward", steward)
 	}
 	if ev.Issue.Number == 0 || ev.Repository.ID == 0 || ev.Installation.ID == 0 {
@@ -187,7 +197,7 @@ func ParseRunnerTokens(value string) (map[string]string, error) {
 		switch {
 		case !ok || steward == "" || token == "":
 			return nil, errors.New("a runner token entry is not '<steward login>:<token>'")
-		case strings.ContainsAny(steward, ".*>/\\ \t\r\n"):
+		case strings.ContainsAny(steward, ".*>/\\ \t\r\n") || steward == PoolName:
 			return nil, fmt.Errorf("runner token steward %q is not a GitHub login", steward)
 		case tokens[steward] != "":
 			return nil, fmt.Errorf("steward %q has more than one runner token", steward)

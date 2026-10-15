@@ -22,11 +22,17 @@ const (
 	JobStream = "SCHMEIDE_JOBS"
 	// TokenSubjectPrefix plus a steward is the request subject a runner sends
 	// a job's subject to in order to get that job's GitHub token. The reply is
-	// a TokenReply. A steward can only publish on its own token subject, and
-	// only gets tokens for its own jobs.
+	// a TokenReply. A steward can only publish on its own token subject. It
+	// gets a token for its own jobs, and for a pool job when it registered
+	// with the pool flag.
 	TokenSubjectPrefix = "schmeide.token."
 
 	jobSubjectPrefix = "schmeide.jobs."
+	// PoolName is the subject token for a job whose steward has no registered
+	// runner. The job stays on the job stream, at
+	// schmeide.jobs.<PoolName>.<repo>.<issue>. PoolName is not a steward: that
+	// name is rejected so no steward's job filter can match the pool subject.
+	PoolName = "_pool"
 	// controlUser is not a GitHub login, so no steward can share its name.
 	controlUser  = "_schmeide_control"
 	startTimeout = 10 * time.Second
@@ -66,10 +72,11 @@ type QueueOptions struct {
 
 // Queue is the embedded NATS server with the JetStream job stream.
 type Queue struct {
-	srv    *server.Server
-	nc     *nats.Conn
-	stream jetstream.Stream
-	js     jetstream.JetStream
+	srv     *server.Server
+	nc      *nats.Conn
+	stream  jetstream.Stream
+	js      jetstream.JetStream
+	tracker *Tracker
 }
 
 // StartQueue starts the embedded NATS server and makes sure the job stream
@@ -133,17 +140,25 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 }
 
 // runnerPermissions lets a steward's runners pull and acknowledge that
-// steward's jobs, report on them, and ask for their tokens, and nothing else.
+// steward's jobs, report on them, and ask for their tokens. Every steward
+// may also use the one shared pool consumer and report a pool job's status.
+// A runner only pulls from that consumer when it was started with --pool.
 func runnerPermissions(steward string) *server.Permissions {
 	consumer := JobStream + "." + ConsumerName(steward)
+	pool := JobStream + "." + ConsumerName(PoolName)
 	return &server.Permissions{
 		Publish: &server.SubjectPermission{Allow: []string{
 			"$JS.API.CONSUMER.CREATE." + consumer + "." + JobFilter(steward),
 			"$JS.API.CONSUMER.INFO." + consumer,
 			"$JS.API.CONSUMER.MSG.NEXT." + consumer,
 			"$JS.ACK." + consumer + ".>",
+			"$JS.API.CONSUMER.CREATE." + pool + "." + JobFilter(PoolName),
+			"$JS.API.CONSUMER.INFO." + pool,
+			"$JS.API.CONSUMER.MSG.NEXT." + pool,
+			"$JS.ACK." + pool + ".>",
 			RegisterSubjectPrefix + steward,
 			StatusSubjectPrefix + steward + ".>",
+			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
 		}},
 		Subscribe: &server.SubjectPermission{Allow: []string{InboxPrefix(steward) + ".>"}},
@@ -164,8 +179,15 @@ func (q *Queue) Close() {
 }
 
 // Publish stores the job unless its issue already has one, whoever the steward
-// was at the time. It reports whether a job was created.
+// was at the time. It reports whether a job was created. Once Track is
+// running, a steward with no registration gets the job on the pool subject.
+// Until then there is no registration record, and the job stays on the
+// steward's subject.
 func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
+	if job.Steward == PoolName {
+		return false, fmt.Errorf("steward %q is reserved and is not a GitHub login", job.Steward)
+	}
+	job.Pool = q.tracker != nil && !q.tracker.hasRunner(job.Steward)
 	data, err := json.Marshal(job)
 	if err != nil {
 		return false, err
@@ -180,8 +202,9 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 }
 
 // ServeTokens answers requests on a steward's token subject. The request body
-// is the subject of one of that steward's jobs in the stream, so tokens are
-// only minted for real jobs, and only for the steward who owns the job.
+// is the subject of a job in the stream, so tokens are only minted for real
+// jobs. A steward gets a token for its own jobs, and for a pool job when it
+// registered with the pool flag.
 func (q *Queue) ServeTokens(mint func(context.Context, Job) (Token, error), log *slog.Logger) error {
 	_, err := q.nc.Subscribe(TokenSubjectPrefix+"*", func(m *nats.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
@@ -203,7 +226,12 @@ func (q *Queue) ServeTokens(mint func(context.Context, Job) (Token, error), log 
 }
 
 func (q *Queue) tokenFor(ctx context.Context, steward, subject string, mint func(context.Context, Job) (Token, error)) (Token, error) {
-	if !strings.HasPrefix(subject, jobSubjectPrefix+steward+".") || strings.ContainsAny(subject, "*> ") {
+	if strings.ContainsAny(subject, "*> ") {
+		return Token{}, fmt.Errorf("%q is not a job of steward %q", subject, steward)
+	}
+	own := strings.HasPrefix(subject, jobSubjectPrefix+steward+".")
+	pooled := strings.HasPrefix(subject, jobSubjectPrefix+PoolName+".")
+	if !own && !pooled {
 		return Token{}, fmt.Errorf("%q is not a job of steward %q", subject, steward)
 	}
 	msg, err := q.stream.GetLastMsgForSubject(ctx, subject)
@@ -214,7 +242,12 @@ func (q *Queue) tokenFor(ctx context.Context, steward, subject string, mint func
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
 		return Token{}, fmt.Errorf("decode job %q: %w", subject, err)
 	}
-	if job.Steward != steward {
+	switch {
+	case pooled:
+		if !job.Pool || job.Subject() != subject || q.tracker == nil || !q.tracker.poolRunner(steward) {
+			return Token{}, fmt.Errorf("%q is not a pool job %q can take", subject, steward)
+		}
+	case job.Steward != steward:
 		return Token{}, fmt.Errorf("job %q belongs to %q, not %q", subject, job.Steward, steward)
 	}
 	return mint(ctx, job)

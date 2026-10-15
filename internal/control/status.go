@@ -52,6 +52,9 @@ type Registration struct {
 	Steward   string   `json:"steward"`
 	Harnesses []string `json:"harnesses"`
 	Host      string   `json:"host"`
+	// Pool is true only when the runner was started with --pool. Such a
+	// runner may take a job whose steward has no registration.
+	Pool bool `json:"pool,omitempty"`
 }
 
 // Tracker records what runners report: who registered and where each job
@@ -95,6 +98,9 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	if err := t.follow(ctx, stream, log, info.State.LastSeq+1); err != nil {
 		return nil, err
 	}
+	// Publish consults this. It is set only after replay, so a restart
+	// already knows which stewards have a runner.
+	q.tracker = t
 	return t, nil
 }
 
@@ -147,7 +153,7 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 		log.Warn("dropping a malformed runner registration", "subject", subject, "err", err)
 		return
 	}
-	log.Info("runner registered", "steward", reg.Steward, "host", reg.Host, "harnesses", strings.Join(reg.Harnesses, ","))
+	log.Info("runner registered", "steward", reg.Steward, "host", reg.Host, "harnesses", strings.Join(reg.Harnesses, ","), "pool", reg.Pool)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// A restarted runner registers again; keep one entry per steward and host.
@@ -168,6 +174,28 @@ func (t *Tracker) observeStatus(log *slog.Logger, subject string, data []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.jobs[job] = status
+}
+
+// hasRunner reports whether the steward has at least one registration.
+// Registrations are not expired: a runner that stops stays registered.
+func (t *Tracker) hasRunner(steward string) bool {
+	return t.registered(steward, false)
+}
+
+// poolRunner reports whether the steward has a registration with the pool flag.
+func (t *Tracker) poolRunner(steward string) bool {
+	return t.registered(steward, true)
+}
+
+func (t *Tracker) registered(steward string, poolOnly bool) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, r := range t.runners {
+		if r.Steward == steward && (!poolOnly || r.Pool) {
+			return true
+		}
+	}
+	return false
 }
 
 // Runners returns the registered runners, oldest registration first.
