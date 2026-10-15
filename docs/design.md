@@ -69,9 +69,10 @@ flowchart LR
 
 - **One control node binary.** `schmeide control` embeds a NATS server with
   JetStream. The job stream is the record of which issues already have a job.
-  Runner registration and the latest status of each job are kept in memory and
-  forgotten when the process restarts. There is one process to host. It can be
-  split into separate pieces later if it outgrows that.
+  Runner registration and the latest status of each job are stored on the
+  SCHMEIDE_STATUS JetStream stream in the queue's data directory. A restarted
+  control node loads them before it accepts new messages. There is one process
+  to host. It can be split into separate pieces later if it outgrows that.
 - **Webhooks only.** The control node learns about issues from GitHub App
   webhooks. The listener is HTTP and serves `POST /webhook`. It checks
   `X-Hub-Signature-256` against the App's webhook secret. It does not poll
@@ -261,11 +262,15 @@ ready-labeled issue to an opened pull request, using Claude Code.
 Follow-ups that landed with the slice:
 
 - **#14.** The control node subscribes to runner registration and job status.
-  Both live in memory.
+  Both are stored on the SCHMEIDE_STATUS JetStream stream in the queue's data
+  directory. A restarted control node loads them before it accepts new
+  messages.
 - **#15.** A job that fails for a reason other than the gate is tried again, up
-  to `--max-attempts` (default 3). The wait before the next try is 30 seconds
-  and has no flag. A gate failure is final. A pull request on a branch named
-  `<issue number>_*` suppresses a second PR.
+  to `--max-attempts` (default 3). The runner counts those work failures
+  itself, and a token hand-back or a shutdown does not consume an attempt. The
+  wait before the next try is 30 seconds and has no flag. A gate failure is
+  final. A pull request on a branch named `<issue number>_*` suppresses a
+  second PR.
 - **#16.** Webhooks are limited to an allowlist of orgs or App installations.
 - **Pull request #30.** Runner credentials are scoped per steward, the job
   carries the issue text from the event that created it, the harness session
