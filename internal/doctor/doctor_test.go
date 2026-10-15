@@ -3,14 +3,17 @@ package doctor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/nats-io/nats.go"
 )
 
 func TestReportSaysHowToFixEachFailure(t *testing.T) {
@@ -54,6 +57,7 @@ func TestReportAllGood(t *testing.T) {
 	if err := queue.ServeTokens(func(context.Context, control.Job) (control.Token, error) { return control.Token{}, nil }, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
+	waitForAliceToken(t, queue.Conn())
 
 	var out bytes.Buffer
 	if !Report(t.Context(), &out, Checks("nats://"+addr, "alice", "alice-nats", []harness.Harness{&harness.Fake{}})) {
@@ -142,7 +146,10 @@ type namedHarness struct {
 func (n namedHarness) Name() string { return n.name }
 
 // reachableControl starts a control node the same way TestReportAllGood does
-// and returns its NATS address.
+// and returns its NATS address. It does not return until alice's token subject
+// answers. ServeTokens returns when Subscribe returns, which is before the
+// server is serving that subject, so a check that runs immediately can hear
+// "no responders" on a busy machine.
 func reachableControl(t *testing.T) string {
 	t.Helper()
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -159,7 +166,51 @@ func reachableControl(t *testing.T) string {
 	if err := queue.ServeTokens(func(context.Context, control.Job) (control.Token, error) { return control.Token{}, nil }, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
+	waitForAliceToken(t, queue.Conn())
 	return addr
+}
+
+// waitForAliceToken returns once a request to alice's token subject gets a
+// reply. Flush lets the server finish the subscription ServeTokens just sent.
+// A no-responders reply is retried until the budget runs out, then the test
+// fails with what the request returned. Waiting longer would hide a subject
+// or permissions bug.
+func waitForAliceToken(t *testing.T, nc *nats.Conn) {
+	t.Helper()
+	const budget = 2 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
+	defer cancel()
+	if err := nc.FlushWithContext(ctx); err != nil {
+		t.Fatalf("flush token subscription: %v", err)
+	}
+	subject := control.TokenSubjectPrefix + "alice"
+	var (
+		err   error
+		reply []byte
+	)
+	for {
+		var msg *nats.Msg
+		msg, err = nc.RequestWithContext(ctx, subject, nil)
+		if err == nil {
+			return
+		}
+		if msg != nil {
+			reply = msg.Data
+		}
+		if !errors.Is(err, nats.ErrNoResponders) || ctx.Err() != nil {
+			break
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	t.Fatalf("token request %s returned %v (reply %q)", subject, err, reply)
 }
 
 func TestReportPassesWhenOneHarnessIsReady(t *testing.T) {
