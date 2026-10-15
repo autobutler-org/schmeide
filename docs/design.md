@@ -1,9 +1,11 @@
 # schmeide design
 
 This document records the design the team has agreed on so far. It is meant to
-give a teammate enough context to pick up an issue. Decisions the code has
-settled are in [Settled decisions](#settled-decisions). Anything not yet
-decided is listed under [Open decisions](#open-decisions), not stated as fact.
+give a teammate enough context to pick up an issue. Accepted decisions are in
+[Settled decisions](#settled-decisions). The Where column names the code that
+implements a decision, or says the code is not updated in this change.
+Anything not yet decided is listed under [Open decisions](#open-decisions),
+not stated as fact.
 
 ## Purpose
 
@@ -94,16 +96,17 @@ flowchart LR
 | 1 | An issue is assigned and marked ready with a label. | Done |
 | 2 | GitHub delivers the webhook. The control node creates one job, with the assignee as steward, and stores the issue title and body from that delivery. | Done |
 | 3 | A runner belonging to the steward pulls the job. | Done |
-| 4 | If the steward has no runner available, a pool runner takes the job. | Later |
+| 4 | If the steward has no runner available, a pool runner that has opted in takes the job. The opt-in is an explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. | Later |
 | 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job. | Done |
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
 | 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes or the round limit is reached. | Done |
-| 9 | With the review passed and CI green, the PR is merged by the factory or by a person, depending on the repo's config. | Later |
+| 9 | With the review passed and CI green, the PR is merged by the factory or by a person, depending on the repo's config. A missing merge setting means a person presses merge. The factory merges only when the config says so. | Later |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
-Steps 4 and 9 have not been built.
+Steps 4 and 9 have not been built. The pool opt-in and the merge default are
+accepted, and the code is not updated in this change.
 
 ## Decisions
 
@@ -118,13 +121,15 @@ not change one that already exists.
 
 A job goes to its steward's own runners. Several runners for one steward share
 one queue consumer, so each of that steward's jobs goes to one of them. There
-is no fallback to anyone else's runner.
+is no fallback to anyone else's runner. A runner stays on one job. That is
+already how the code works, and the code is not updated in this change.
 
-Pool fallback, if it is built, would send a job to a runner that has opted in
-to taking other people's work when the steward's own runners cannot take it.
-Pool runners would spend their owner's agent subscription on someone else's
-job, so the opt-in rules and limits need to be settled before that fallback is
-turned on. See [Open decisions](#open-decisions).
+Pool fallback would send a job to a runner that has opted in to taking other
+people's work when the steward's own runners cannot take it. Pool runners
+would spend their owner's agent subscription on someone else's job. The
+accepted opt-in (#31) is an explicit runner flag, default off, at most one
+pool job, and only for an installation the control node already allowlists.
+Pool fallback is not built, and the code is not updated in this change.
 
 ### Identity
 
@@ -150,8 +155,11 @@ fix, comments on the issue and leaves the pull request open.
 ### Merge
 
 Each repo chooses in its tracked config whether the factory merges a PR that
-has passed review and CI, or whether a person presses merge. Merging is not
-built, and the repo config schema has no merge setting yet.
+has passed review and CI, or whether a person presses merge. The accepted
+default (#32) is that a missing merge setting means a person presses merge.
+The factory merges only when the config says so. Merging is not built, the
+repo config schema has no merge setting yet, and the code is not updated in
+this change.
 
 ### PR shape
 
@@ -161,14 +169,18 @@ title stored on the job. A job whose repository already has a pull request, open
 or closed, on a branch starting with `<issue number>_` is treated as already
 opened, including after the issue is retitled. The check looks at the 100 pull
 requests returned by one list call (`state=all&per_page=100`). PRs are stacked
-only when an issue declares a dependency on another issue. Stacked PRs are not
-built.
+only when an issue declares a dependency on another issue. The accepted
+declaration (#34) is GitHub's issue dependency, not a config key. Stacked PRs
+are not built, and the code is not updated in this change.
 
 ### Harnesses
 
 Harnesses are pluggable. The runner drives a harness through an adapter
 interface that states what every harness must support. Claude Code is the
-first and only implementation (`internal/harness`). A second harness is later.
+first and only implementation (`internal/harness`). The accepted second
+harness (#33) shells out to the Grok CLI, the same shape as the Claude Code
+adapter, with no new module dependency. That harness is not built, and the
+code is not updated in this change.
 
 ### Isolation
 
@@ -190,8 +202,8 @@ reviewed like code. The file is `.schmeide/config.toml` and the only key is
 error. The runner reads the file before the harness session, so the session
 cannot change the gate it is about to be held to. Other settings (merge
 policy, reviewer prompts) are added to the schema when the feature that reads
-them is built. Where a pull request dependency is declared is open. See
-[Open decisions](#open-decisions).
+them is built. A pull request dependency is GitHub's issue dependency, not a
+config key. The merge setting is not in the schema yet.
 
 ### Credentials and the job environment
 
@@ -291,9 +303,9 @@ Not in the first slice, and not shipped:
 - Merging
 - Stacked PRs for declared issue dependencies
 - Container isolation for jobs
-- Harnesses other than Claude Code
+- Harnesses other than Claude Code. The accepted Grok CLI harness is not built.
 - Polling GitHub for issues
-- More than one job at a time on a runner
+- More than one job at a time on a runner. Accepted as no change: a runner stays on one job, which is already how the code works.
 
 ## Settled decisions
 
@@ -306,25 +318,22 @@ Not in the first slice, and not shipped:
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*` and `CLAUDE_*`, plus `--pass-env`. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
+| Pool opt-in (#31) | An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists. Not built yet. | The code is not updated in this change. |
+| Merge default (#32) | A missing merge setting means a person presses merge. The factory merges only when the config says so. Not built yet. | The code is not updated in this change. |
+| Dependency declaration (#34) | GitHub's issue dependency, not a config key. Not built yet. | The code is not updated in this change. |
+| Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. Not built yet. | The code is not updated in this change. |
+| Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |
 
 ## Open decisions
 
-None of these are settled. Where a value is given, it is a proposal.
-
-| Decision | Proposal | Affects |
-|---|---|---|
-| How a runner opts in to pool work, and what limits apply | None yet. Needed before pool fallback is turned on. | Later |
-| The merge default (#32) | When a repo omits the merge setting, a person presses merge. The factory merges only when the config says so. | Merging (#23) |
-| The dependency declaration (#34) | A pull request dependency is GitHub's issue dependency, not a config key. Stack on the dependency's open pull request, or on the default branch once that pull request has merged. | Stacked pull requests (#25) |
-| The second harness (#33) | The second harness shells out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. | #27 |
-| Concurrent jobs (#44) | A runner keeps working one job at a time. | None of the later items |
+There are none.
 
 ## Later
 
-Roughly in the order they are expected to matter:
+Roughly in the order they are expected to matter. None of these have been built:
 
-1. Merging, with the per-repo choice between factory merge and human merge
-2. Pool fallback, with opt-in and limits
-3. Stacked PRs for issues that declare a dependency
+1. Merging. A missing merge setting means a person presses merge. The factory merges only when the config says so.
+2. Pool fallback. An explicit runner flag, default off, at most one pool job, and only for an installation the control node already allowlists.
+3. Stacked pull requests. The dependency is GitHub's issue dependency, not a config key.
 4. Container isolation for jobs
-5. A second harness
+5. A second harness that shells out to the Grok CLI, the same shape as Claude Code, with no new module dependency.
