@@ -127,6 +127,40 @@ func TestClaudeRun(t *testing.T) {
 	}
 }
 
+func TestClaudeRunArgsReplaceDefault(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	claude := fakeClaude(t, `echo "args=$*"`)
+	claude.Args = []string{"--verbose"}
+	if err := claude.Run(t.Context(), Request{Dir: dir, Output: &out}); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	want := "args=--print --verbose\n"
+	if out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
+func TestClaudeRunEnvIsWholeEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SCHMEIDE_PARENT_ONLY", "only-parent")
+	var out bytes.Buffer
+	// ${name+set} is empty when the variable is unset, and "set" when it is present.
+	claude := fakeClaude(t, `echo "sentinel=$SCHMEIDE_SENTINEL"; echo "parent=${SCHMEIDE_PARENT_ONLY+set}"`)
+	err := claude.Run(t.Context(), Request{
+		Dir:    dir,
+		Env:    []string{"SCHMEIDE_SENTINEL=present"},
+		Output: &out,
+	})
+	if err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	want := "sentinel=present\nparent=\n"
+	if out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
 // waitGone fails the test unless the process disappears.
 func waitGone(t *testing.T, pid int) {
 	t.Helper()
