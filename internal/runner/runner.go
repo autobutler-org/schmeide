@@ -1,6 +1,8 @@
 // Package runner is the schmeide runner: it pulls its steward's jobs from the
 // control node and takes each one from a GitHub issue to an opened pull
-// request, using a harness that is already logged in on this machine.
+// request, then reviews that change in the same worktree until the review
+// passes or the round limit is hit. It uses a harness that is already logged
+// in on this machine. Merging is out of scope.
 package runner
 
 import (
@@ -36,11 +38,12 @@ const (
 	// relative to the checkout. It is never committed.
 	prTextPath = ".schmeide/pr.md"
 
-	defaultAckWait     = 30 * time.Second
-	defaultMaxAttempts = 3
-	defaultRetryDelay  = 30 * time.Second
-	pollWait           = time.Second
-	gateTailBytes      = 4000
+	defaultAckWait         = 30 * time.Second
+	defaultMaxAttempts     = 3
+	defaultMaxReviewRounds = 3
+	defaultRetryDelay      = 30 * time.Second
+	pollWait               = time.Second
+	gateTailBytes          = 4000
 )
 
 // The messages a runner publishes are defined by the control node, which
@@ -51,7 +54,9 @@ type (
 	Registration = control.Registration
 )
 
-// The states a runner reports for a job.
+// The states a runner reports for a job. Reviewing and review failed are
+// published on the same status subject as the others. The control node stores
+// the state it is given, so the review loop does not need a new control state.
 const (
 	StateClaimed    = control.StateClaimed
 	StateWorking    = control.StateWorking
@@ -59,6 +64,9 @@ const (
 	StateGateFailed = control.StateGateFailed
 	StatePROpened   = control.StatePROpened
 	StateFailed     = control.StateFailed
+
+	StateReviewing    State = "reviewing"
+	StateReviewFailed State = "review_failed"
 )
 
 // Options configures a runner.
@@ -93,6 +101,10 @@ type Options struct {
 	// MaxAttempts is how many times a job is delivered before a failure is
 	// final. Zero means 3.
 	MaxAttempts int
+	// MaxReviewRounds is how many reviewer sessions run after the pull
+	// request is open. Zero means 3. Exhausting them fails the job and leaves
+	// the pull request open.
+	MaxReviewRounds int
 	// RetryDelay is how long a failed job waits before it is delivered
 	// again. Zero means 30 seconds.
 	RetryDelay time.Duration
@@ -146,6 +158,9 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	}
 	if o.MaxAttempts <= 0 {
 		o.MaxAttempts = defaultMaxAttempts
+	}
+	if o.MaxReviewRounds <= 0 {
+		o.MaxReviewRounds = defaultMaxReviewRounds
 	}
 	if o.RetryDelay == 0 {
 		o.RetryDelay = defaultRetryDelay
@@ -312,7 +327,9 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	// A failure may be passing (a harness outage, a GitHub error), so the job
 	// is redelivered a bounded number of times before the failure is final.
-	// A gate failure is the session's own result and is not retried.
+	// A gate failure is the session's own result and is not retried. A review
+	// that does not pass is final too: the pull request is already open, and
+	// a redelivery would treat that as done.
 	//
 	// ponytail: every delivery counts as an attempt, including ones handed
 	// back for want of a token or by a runner shutting down; count failures
@@ -400,13 +417,7 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		return failed(err)
 	}
 	r.report(job, StateWorking, r.harness.Name())
-	req := harness.Request{
-		Dir:    ws.Dir(),
-		Prompt: brief(job, cfg.Gate),
-		Env:    harnessEnv(os.Environ(), r.opts.PassEnv),
-		Output: r.opts.Output,
-	}
-	if err := r.harness.Run(ctx, req); err != nil {
+	if err := r.harness.Run(ctx, r.session(ws.Dir(), brief(job, cfg.Gate))); err != nil {
 		return failed(fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err))
 	}
 	title, body := prText(ws.Dir(), job.Issue, job.Title)
@@ -418,18 +429,7 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		return failed(fmt.Errorf("the %s session made no changes", r.harness.Name()))
 	}
 	if output, err := ws.Run(ctx, cfg.Gate); err != nil {
-		// The output stays on the runner: the session wrote the code that
-		// produced it, so it is not trusted to be safe to publish.
-		if len(output) > gateTailBytes {
-			output = "...\n" + output[len(output)-gateTailBytes:]
-		}
-		detail := fmt.Sprintf("the gate command `%s` failed: %v", cfg.Gate, err)
-		r.log.Warn("gate failed", "repo", job.Repo, "issue", job.Issue, "err", err, "output", output)
-		return outcome{
-			state:   StateGateFailed,
-			detail:  detail,
-			comment: "schmeide did not open a pull request: " + detail + ". The gate's output is in the runner's log.",
-		}
+		return r.gateOutcome(job, cfg.Gate, "", err, output)
 	}
 	if err := ws.Push(ctx); err != nil {
 		return failed(err)
@@ -438,7 +438,23 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if err != nil {
 		return failed(err)
 	}
-	return outcome{state: StatePROpened, detail: url, comment: "schmeide opened a pull request for this issue: " + url}
+	return r.review(ctx, ws, job, cfg.Gate, url)
+}
+
+// gateOutcome reports a failed gate. prURL is empty when no pull request was
+// opened. The gate's output stays in the runner log: the session wrote the
+// code that produced it, so it is not trusted to be safe to publish.
+func (r *Runner) gateOutcome(job control.Job, gate, prURL string, runErr error, output string) outcome {
+	if len(output) > gateTailBytes {
+		output = "...\n" + output[len(output)-gateTailBytes:]
+	}
+	detail := fmt.Sprintf("the gate command `%s` failed: %v", gate, runErr)
+	r.log.Warn("gate failed", "repo", job.Repo, "issue", job.Issue, "err", runErr, "output", output)
+	comment := "schmeide did not open a pull request: " + detail + ". The gate's output is in the runner's log."
+	if prURL != "" {
+		comment = "schmeide left the pull request open: " + detail + ". The gate's output is in the runner's log. " + prURL
+	}
+	return outcome{state: StateGateFailed, detail: detail, comment: comment}
 }
 
 var notSlug = regexp.MustCompile(`[^a-z0-9]+`)

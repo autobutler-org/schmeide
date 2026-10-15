@@ -65,6 +65,7 @@ type fakeGitHub struct {
 	mu       sync.Mutex
 	pulls    []pull
 	comments map[string][]string // by issue number
+	calls    []string
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +74,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
 	path := strings.TrimPrefix(r.URL.Path, "/repos/"+testRepo)
 	reply := any(nil)
 	switch {
@@ -124,6 +126,12 @@ func (f *fakeGitHub) snapshot() ([]pull, map[string][]string) {
 		comments[k] = append([]string(nil), v...)
 	}
 	return append([]pull(nil), f.pulls...), comments
+}
+
+func (f *fakeGitHub) callsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
 }
 
 type statusMsg struct {
@@ -268,7 +276,7 @@ func (w *world) await(t *testing.T, steward string, issue int) []State {
 				continue
 			}
 			states = append(states, s.State)
-			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed {
+			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed || s.State == StateReviewFailed {
 				return states
 			}
 		case <-timeout:
@@ -283,6 +291,9 @@ func writes(files map[string]string) (*harness.Fake, *atomic.Int32) {
 	var sessions atomic.Int32
 	return &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
 		sessions.Add(1)
+		if strings.Contains(req.Prompt, reviewLead) {
+			return writeVerdict(req, "pass\n")
+		}
 		for name, content := range files {
 			if err := os.WriteFile(filepath.Join(req.Dir, name), []byte(content), 0o600); err != nil {
 				return err
@@ -311,6 +322,9 @@ func TestJobOpensPR(t *testing.T) {
 	t.Setenv("SCHMEIDE_NATS_TOKEN", "runner-secret")
 	var prompt, env atomic.Value
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			return writeVerdict(req, "pass\n")
+		}
 		prompt.Store(req.Prompt)
 		env.Store(req.Env)
 		if err := os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600); err != nil {
@@ -321,7 +335,7 @@ func TestJobOpensPR(t *testing.T) {
 	_, workDir := w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working pr_opened]"; got != want {
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	select {
@@ -406,8 +420,8 @@ func TestRunnerOnlyTakesItsStewardsJobs(t *testing.T) {
 	}
 	// Give a wrongly delivered job time to show up.
 	time.Sleep(3 * pollWait)
-	if got := sessions.Load(); got != 1 {
-		t.Errorf("sessions = %d, want 1: only alice's job", got)
+	if got := sessions.Load(); got != 2 {
+		t.Errorf("sessions = %d, want 2: a worker and a reviewer for alice's job only", got)
 	}
 	pulls, comments := w.gh.snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" || len(comments["8"]) != 0 {
@@ -428,7 +442,7 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 		afterPR      bool
 		wantSessions int32
 	}{
-		{name: "dies mid-session", wantSessions: 1},
+		{name: "dies mid-session", wantSessions: 2},
 		{name: "dies after opening the PR", afterPR: true, wantSessions: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -493,7 +507,7 @@ func TestFailedJobIsRetried(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working retrying claimed working pr_opened]"; got != want {
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working retrying claimed working reviewing pr_opened]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	pulls, comments := w.gh.snapshot()
@@ -602,4 +616,279 @@ func TestBranchName(t *testing.T) {
 			t.Errorf("BranchName(12, %q) = %q, want %q", title, got, want)
 		}
 	}
+}
+
+func writeVerdict(req harness.Request, body string) error {
+	return os.WriteFile(filepath.Join(req.Dir, filepath.FromSlash(reviewTextPath)), []byte(body), 0o600)
+}
+
+func assertNoMerge(t *testing.T, w *world) {
+	t.Helper()
+	for _, call := range w.gh.callsSnapshot() {
+		if strings.Contains(strings.ToLower(call), "merge") {
+			t.Errorf("merge was attempted: %s", call)
+		}
+	}
+}
+
+// assertSettled fails if another status arrives, which is what a retried job
+// would publish.
+func assertSettled(t *testing.T, w *world) {
+	t.Helper()
+	time.Sleep(3 * pollWait)
+	select {
+	case s := <-w.statuses:
+		t.Errorf("unexpected status after the job finished: %+v", s)
+	default:
+	}
+}
+
+func TestRunnerHelpDocumentsReviewRounds(t *testing.T) {
+	got := Usage()
+	if !strings.Contains(got, "--max-review-rounds") || !strings.Contains(got, `default "3"`) || !strings.Contains(got, "leaves the pull request open") {
+		t.Fatalf("help does not document the review round limit:\n%s", got)
+	}
+}
+
+func TestReadVerdict(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".schmeide"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, filepath.FromSlash(reviewTextPath))
+	if _, _, err := readVerdict(dir); err == nil {
+		t.Fatal("missing verdict: want an error")
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("pass\n")
+	kind, findings, err := readVerdict(dir)
+	if err != nil || kind != verdictPass || findings != "" {
+		t.Fatalf("pass = %v, %q, %v", kind, findings, err)
+	}
+	if _, statErr := os.Stat(file); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("verdict file still present: %v", statErr)
+	}
+	write("changes\nadd a test\n")
+	kind, findings, err = readVerdict(dir)
+	if err != nil || kind != verdictChanges || findings != "add a test" {
+		t.Fatalf("changes = %v, %q, %v", kind, findings, err)
+	}
+	for _, body := range []string{"changes\n", "pass\nalso this\n", "nope\n"} {
+		write(body)
+		if _, _, err := readVerdict(dir); err == nil {
+			t.Errorf("verdict %q: want an error", body)
+		}
+	}
+}
+
+func TestReviewPassesOnFirstRound(t *testing.T) {
+	w := newWorld(t)
+	var workers, reviews atomic.Int32
+	var reviewPrompt atomic.Value
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			reviews.Add(1)
+			reviewPrompt.Store(req.Prompt)
+			return writeVerdict(req, "pass\n")
+		}
+		if workers.Add(1) != 1 {
+			return errors.New("extra worker session")
+		}
+		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600)
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if workers.Load() != 1 || reviews.Load() != 1 {
+		t.Errorf("workers = %d, reviews = %d, want one worker and one reviewer", workers.Load(), reviews.Load())
+	}
+	prompt, _ := reviewPrompt.Load().(string)
+	for _, part := range []string{"Fix the Thing!", "The thing is broken.", "#7", reviewTextPath, "pass", "changes"} {
+		if !strings.Contains(prompt, part) {
+			t.Errorf("review brief missing %q: %s", part, prompt)
+		}
+	}
+	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", "7_fix-the-thing"); strings.Contains(files, "review.md") {
+		t.Errorf("the verdict file was committed: %s", files)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" {
+		t.Fatalf("pull requests = %+v, want one on the job branch", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], pulls[0].URL) || !strings.Contains(comments["7"][0], "The review passed.") {
+		t.Errorf("issue comments = %q, want one that links the PR and says the review passed", comments["7"])
+	}
+	assertNoMerge(t, w)
+}
+
+func TestReviewChangesThenPassUpdatesSameBranch(t *testing.T) {
+	w := newWorld(t)
+	const findings = "set fix.txt to reviewed"
+	var workers, reviews atomic.Int32
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			if reviews.Add(1) == 1 {
+				return writeVerdict(req, "changes\n"+findings+"\n")
+			}
+			return writeVerdict(req, "pass\n")
+		}
+		switch workers.Add(1) {
+		case 1:
+			return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("first\n"), 0o600)
+		case 2:
+			if !strings.Contains(req.Prompt, findings) || !strings.Contains(req.Prompt, "Fix the Thing!") {
+				return fmt.Errorf("fix brief missing the findings or the issue: %s", req.Prompt)
+			}
+			return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("reviewed\n"), 0o600)
+		default:
+			return errors.New("extra worker session")
+		}
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing working reviewing pr_opened]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	if workers.Load() != 2 || reviews.Load() != 2 {
+		t.Errorf("workers = %d, reviews = %d, want one fix and a second review", workers.Load(), reviews.Load())
+	}
+	const branch = "7_fix-the-thing"
+	if got := git(t, w.bare, "show", branch+":fix.txt"); got != "reviewed" {
+		t.Errorf("pushed fix.txt = %q, want the reviewed content", got)
+	}
+	if got := git(t, w.bare, "rev-list", "--count", "main.."+branch); got != "2" {
+		t.Errorf("commits on %s = %s, want 2", branch, got)
+	}
+	if tip := git(t, w.bare, "log", "-1", "--format=%s", branch); tip != "Apply review feedback for #7" {
+		t.Errorf("tip commit = %q, want the review fix", tip)
+	}
+	pulls, _ := w.gh.snapshot()
+	if len(pulls) != 1 || pulls[0].Head != branch {
+		t.Errorf("pull requests = %+v, want the same branch updated, not a second pull request", pulls)
+	}
+	assertNoMerge(t, w)
+}
+
+func TestReviewExhaustingRoundsFailsAndDoesNotMerge(t *testing.T) {
+	w := newWorld(t)
+	var workers, reviews atomic.Int32
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			reviews.Add(1)
+			return writeVerdict(req, "changes\nstill wrong\n")
+		}
+		n := workers.Add(1)
+		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte(fmt.Sprintf("attempt %d\n", n)), 0o600)
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	want := "[claimed working reviewing working reviewing working reviewing review_failed]"
+	if got := fmt.Sprint(w.await(t, "alice", 7)); got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if reviews.Load() != int32(defaultMaxReviewRounds) || workers.Load() != int32(defaultMaxReviewRounds) {
+		t.Errorf("workers = %d, reviews = %d, want %d of each: a fix follows every rejection except the last", workers.Load(), reviews.Load(), defaultMaxReviewRounds)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the original pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "failed") || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want one failure comment that leaves the pull request open", comments["7"])
+	}
+	if got := git(t, w.bare, "show", "7_fix-the-thing:fix.txt"); got != "attempt 3" {
+		t.Errorf("pushed fix.txt = %q, want the last fix that was pushed", got)
+	}
+	assertNoMerge(t, w)
+}
+
+func TestReviewFixGateFailureStopsTheReview(t *testing.T) {
+	w := newWorld(t)
+	var workers, reviews atomic.Int32
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			if reviews.Add(1) > 1 {
+				return errors.New("review continued after the gate failed")
+			}
+			return writeVerdict(req, "changes\ncreate a file named broken\n")
+		}
+		if workers.Add(1) == 1 {
+			return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("ok\n"), 0o600)
+		}
+		return os.WriteFile(filepath.Join(req.Dir, "broken"), []byte("x\n"), 0o600)
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing working gate_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if workers.Load() != 2 || reviews.Load() != 1 {
+		t.Errorf("workers = %d, reviews = %d, want no review after the gate failure", workers.Load(), reviews.Load())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	comment := ""
+	if len(comments["7"]) == 1 {
+		comment = comments["7"][0]
+	}
+	if !strings.Contains(comment, "gate command `test ! -e broken` failed") || !strings.Contains(comment, "left the pull request open") || !strings.Contains(comment, pulls[0].URL) {
+		t.Errorf("issue comments = %q, want the gate failure and the open pull request", comments["7"])
+	}
+	if strings.Contains(comment, "```") || strings.Contains(comment, "did not open a pull request") {
+		t.Errorf("issue comment = %q, want no gate output and no claim that the pull request was not opened", comment)
+	}
+	if got := git(t, w.bare, "show", "7_fix-the-thing:fix.txt"); got != "ok" {
+		t.Errorf("pushed fix.txt = %q, want the content from before the failing fix", got)
+	}
+	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", "7_fix-the-thing"); strings.Contains(files, "broken") {
+		t.Errorf("the failing fix was pushed: %s", files)
+	}
+	assertNoMerge(t, w)
+}
+
+func TestReviewerSessionFailureIsFinal(t *testing.T) {
+	w := newWorld(t)
+	var workers, reviews atomic.Int32
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			reviews.Add(1)
+			return errors.New("the reviewer crashed")
+		}
+		workers.Add(1)
+		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("x\n"), 0o600)
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing review_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if workers.Load() != 1 || reviews.Load() != 1 {
+		t.Errorf("workers = %d, reviews = %d, want no retry and no fix session", workers.Load(), reviews.Load())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "the reviewer crashed") || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want the reviewer failure and the open pull request", comments["7"])
+	}
+	assertNoMerge(t, w)
 }
