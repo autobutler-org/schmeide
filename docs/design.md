@@ -355,7 +355,9 @@ Not in the first slice, and not shipped:
 
 ## Open decisions
 
-There are none.
+- Which runtime isolates a pool job, whether that isolation applies only to
+  pool jobs, and what image the job runs in. Proposed in #59 and not accepted,
+  so container isolation stays unbuilt.
 
 ## Later
 
