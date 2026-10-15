@@ -1,13 +1,13 @@
 # schmeide
 
-The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The job does not merge.
+The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The default is that a person presses merge.
 
-See [docs/design.md](docs/design.md) for the agreed design. The first slice and the AI review stage are done. Merging and pool fallback are later.
+See [docs/design.md](docs/design.md) for the agreed design. The first slice, the AI review stage, and merging are done. Pool fallback is later.
 
 ## Commands
 
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
-- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. It does not merge.
+- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. The factory merges that pull request only when the repo config sets `merge = "factory"`. The default is a person.
 - `schmeide doctor` checks that this machine can run a runner.
 
 Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting.
@@ -40,7 +40,7 @@ One control node and one runner, on the same machine or not. The target reposito
 
 3. On an open issue in an allowed repository, assign it to that login and add the label `schmeide:ready` (the `--ready-label` default). An `assigned` or `labeled` delivery creates one job and stores the issue title and body from that delivery. The runner checks out a git worktree on a branch named `<issue number>_<short-description>`, runs a fresh Claude Code session from that stored text, runs the repo's gate, then pushes the branch and opens a pull request as the GitHub App.
 
-After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the job and does not merge. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
+After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the review. Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
 
 A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3).
 
@@ -50,14 +50,19 @@ A harness session's environment is `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `
 
 ## Repo config
 
-A target repo carries its config at `.schmeide/config.toml`. Unknown keys are an error. `gate` is required.
+A target repo carries its config at `.schmeide/config.toml`. Unknown keys are an error. `gate` is required. `merge` is optional.
 
 ```toml
 # Required. Command a job must pass before a PR is opened.
 gate = "make check test"
+
+# Optional. Who merges after review has passed and CI is green.
+# Absent, empty, and "human" leave the pull request for a person.
+# "factory" means the factory merges.
+merge = "human"
 ```
 
-See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts.
+See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts, so the session cannot change the gate or turn factory merge on.
 
 ## Development
 
