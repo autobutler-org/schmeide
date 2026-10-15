@@ -17,9 +17,9 @@ var baseEnv = []string{
 // basePrefixes are the variable name prefixes every session and gate sees.
 var basePrefixes = []string{"LC_", "XDG_"}
 
-// harnessPrefixes are what a harness session sees on top of the base: the
-// harness's own login and settings, which it needs to run at all. XAI_ is
-// the Grok CLI login (XAI_API_KEY). The gate does not see these prefixes.
+// harnessPrefixes are added for the harness session only, on top of the
+// base: the harness's own login and settings, which it needs to run at all.
+// XAI_ is the Grok CLI login (XAI_API_KEY).
 var harnessPrefixes = []string{"ANTHROPIC_", "CLAUDE_", "XAI_"}
 
 // filterEnv keeps the entries of environ whose names are in names or start
@@ -30,13 +30,6 @@ func filterEnv(environ, names, prefixes []string) []string {
 		return !slices.Contains(names, name) &&
 			!slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(name, p) })
 	})
-}
-
-// jobEnv is the environment of a job's git commands and gate. It leaves out
-// everything the runner was given that the job's code must not see, the NATS
-// token among them.
-func jobEnv(environ, passEnv []string) []string {
-	return filterEnv(environ, slices.Concat(baseEnv, passEnv), basePrefixes)
 }
 
 // harnessEnv is the environment of a job's harness session: the job's
