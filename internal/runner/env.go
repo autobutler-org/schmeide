@@ -18,8 +18,9 @@ var baseEnv = []string{
 var basePrefixes = []string{"LC_", "XDG_"}
 
 // harnessPrefixes are what a harness session sees on top of the base: the
-// harness's own login and settings, which it needs to run at all.
-var harnessPrefixes = []string{"ANTHROPIC_", "CLAUDE_"}
+// harness's own login and settings, which it needs to run at all. XAI_ is
+// the Grok CLI login (XAI_API_KEY). The gate does not see these prefixes.
+var harnessPrefixes = []string{"ANTHROPIC_", "CLAUDE_", "XAI_"}
 
 // filterEnv keeps the entries of environ whose names are in names or start
 // with one of prefixes.
