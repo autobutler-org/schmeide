@@ -1,13 +1,13 @@
 # schmeide
 
-The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request.
+The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The job does not merge.
 
-See [docs/design.md](docs/design.md) for the agreed design. The first slice is done. The AI review stage, merging, and pool fallback are later.
+See [docs/design.md](docs/design.md) for the agreed design. The first slice and the AI review stage are done. Merging and pool fallback are later.
 
 ## Commands
 
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
-- `schmeide runner` connects out to the control node, takes one steward's jobs, and opens a pull request for each.
+- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. It does not merge.
 - `schmeide doctor` checks that this machine can run a runner.
 
 Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting.
@@ -27,7 +27,7 @@ One control node and one runner, on the same machine or not. The target reposito
    schmeide control
    ```
 
-   The webhook listener is HTTP. It serves `POST /webhook` on `--http-addr` (default `:8080`). GitHub must be able to reach that path. Runners connect to `--nats-addr` (default `127.0.0.1:4222`).
+   The webhook listener is plain HTTP and must sit behind a TLS-terminating proxy. It serves `POST /webhook` on `--http-addr` (default `:8080`). GitHub must be able to reach that path. `--webhook-rate` (default `1000`) is the maximum number of webhook requests accepted per minute. Further requests are rejected and publish no job. `--delivery-ttl` (default `10m`) is how long an `X-Github-Delivery` id is remembered. A repeat within that time is acknowledged and is not published again. Runners connect to `--nats-addr` (default `127.0.0.1:4222`).
 
 2. Check the runner machine, then start it. `--nats-token` is the token `--runner-tokens` lists for `--steward`. `--nats-url` defaults to `nats://127.0.0.1:4222`.
 
@@ -40,7 +40,9 @@ One control node and one runner, on the same machine or not. The target reposito
 
 3. On an open issue in an allowed repository, assign it to that login and add the label `schmeide:ready` (the `--ready-label` default). An `assigned` or `labeled` delivery creates one job and stores the issue title and body from that delivery. The runner checks out a git worktree on a branch named `<issue number>_<short-description>`, runs a fresh Claude Code session from that stored text, runs the repo's gate, then pushes the branch and opens a pull request as the GitHub App.
 
-A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. Other failures are tried up to `--max-attempts` (default 3).
+After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the job and does not merge. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
+
+A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3).
 
 By default each Claude Code session is started with `--permission-mode acceptEdits`, which only lets it edit files in its worktree. `--claude-args` replaces those flags when a session needs to run commands.
 
