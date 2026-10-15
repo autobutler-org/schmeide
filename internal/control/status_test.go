@@ -66,7 +66,7 @@ func TestTrackerRecordsRegisteredRunners(t *testing.T) {
 	runner := startFakeRunner(t, q)
 
 	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
-	bob := Registration{Steward: "bob", Harnesses: []string{"claude"}, Host: "bob-desktop"}
+	bob := Registration{Steward: "bob", Harnesses: []string{"claude"}, Host: "bob-desktop", Pool: true}
 	aliceAgain := Registration{Steward: "alice", Harnesses: []string{"claude", "fake"}, Host: "alice-laptop"}
 	runner.publish(RegisterSubjectPrefix+"alice", alice)
 	runner.publish(RegisterSubjectPrefix+"bob", bob)
@@ -123,7 +123,7 @@ func TestTrackerRemembersRunnersAndStatusAcrossRestart(t *testing.T) {
 	runner := startFakeRunner(t, q)
 
 	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
-	bob := Registration{Steward: "bob", Harnesses: []string{"claude"}, Host: "bob-desktop"}
+	bob := Registration{Steward: "bob", Harnesses: []string{"claude"}, Host: "bob-desktop", Pool: true}
 	aliceAgain := Registration{Steward: "alice", Harnesses: []string{"claude", "fake"}, Host: "alice-laptop"}
 	alicePhone := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-phone"}
 	first := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}

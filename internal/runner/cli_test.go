@@ -58,6 +58,24 @@ func TestHarnessesFollowsAllAndAppliesClaudeArgs(t *testing.T) {
 	}
 }
 
+func TestPoolFlagDefaultsOff(t *testing.T) {
+	help := Usage()
+	if !strings.Contains(help, "whose steward has no registered runner") || !strings.Contains(help, "The default is off.") {
+		t.Fatalf("help does not describe pool opt-in as off by default:\n%s", help)
+	}
+	fs, o, _, _ := runnerFlags()
+	if o.Pool {
+		t.Fatal("pool flag defaults on")
+	}
+	if err := ParseFlags(fs, nil); err != nil || o.Pool {
+		t.Fatalf("ParseFlags() = %v, pool = %v; want off", err, o.Pool)
+	}
+	fs, o, _, _ = runnerFlags()
+	if err := ParseFlags(fs, []string{"--pool"}); err != nil || !o.Pool {
+		t.Fatalf("ParseFlags(--pool) = %v, pool = %v; want on", err, o.Pool)
+	}
+}
+
 func TestRunnerHelpDoesNotLimitHarnessesToClaude(t *testing.T) {
 	got := Usage()
 	if strings.Contains(strings.ToLower(got), "only claude code") {

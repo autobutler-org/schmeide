@@ -185,6 +185,7 @@ type world struct {
 	bare     string
 	client   *nats.Conn
 	statuses chan statusMsg
+	tracker  *control.Tracker
 	// mint, when set, answers a job's token request. Nil mints testToken.
 	mint func(context.Context, control.Job) (control.Token, error)
 	// maxAttempts is the runner's --max-attempts. Zero keeps the default.
@@ -283,11 +284,18 @@ func (w *world) publish(t *testing.T, steward string, issue int) {
 // runner builds a runner and does not start it, so a test can call handle.
 func (w *world) runner(t *testing.T, steward string, h harness.Harness) (*Runner, string) {
 	t.Helper()
+	return w.runnerWith(t, steward, h, false)
+}
+
+// runnerWith builds a runner and does not start it. pool sets --pool.
+func (w *world) runnerWith(t *testing.T, steward string, h harness.Harness, pool bool) (*Runner, string) {
+	t.Helper()
 	workDir := t.TempDir()
 	r, err := New(t.Context(), Options{
 		NATSURL:      w.natsURL,
 		NATSToken:    testRunnerTokens[steward],
 		Steward:      steward,
+		Pool:         pool,
 		WorkDir:      workDir,
 		GitHubAPIURL: w.apiURL,
 		GitHubURL:    w.gitRoot,
@@ -309,7 +317,20 @@ func (w *world) runner(t *testing.T, steward string, h harness.Harness) (*Runner
 // along with its work directory.
 func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner, string) {
 	t.Helper()
-	r, workDir := w.runner(t, steward, h)
+	return w.startWith(t, steward, h, false)
+}
+
+// startWith is start with --pool when pool is set.
+func (w *world) startWith(t *testing.T, steward string, h harness.Harness, pool bool) (*Runner, string) {
+	t.Helper()
+	r, workDir := w.runnerWith(t, steward, h, pool)
+	w.run(t, r)
+	return r, workDir
+}
+
+// run runs the runner until the test ends.
+func (w *world) run(t *testing.T, r *Runner) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan struct{})
 	go func() {
@@ -321,7 +342,82 @@ func (w *world) start(t *testing.T, steward string, h harness.Harness) (*Runner,
 		<-stopped
 		r.Close()
 	})
-	return r, workDir
+}
+
+// track starts registration tracking, which is what makes an unregistered
+// steward's job go to the pool subject.
+func (w *world) track(t *testing.T) {
+	t.Helper()
+	tracker, err := w.queue.Track(slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.tracker = tracker
+}
+
+// waitRegistered waits until the control node has the runner's registration.
+func (w *world) waitRegistered(t *testing.T, steward string, pool bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, reg := range w.tracker.Runners() {
+			if reg.Steward == steward && reg.Pool == pool {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("runner %s pool=%v did not register; have %+v", steward, pool, w.tracker.Runners())
+}
+
+// subjectOf returns the stream subject of the job for issue.
+func (w *world) subjectOf(t *testing.T, issue int) string {
+	t.Helper()
+	js, err := jetstream.New(w.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := js.Stream(t.Context(), control.JobStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := st.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := ""
+	for seq := info.State.FirstSeq; seq <= info.State.LastSeq && info.State.Msgs > 0; seq++ {
+		msg, err := st.GetMsg(t.Context(), seq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var job control.Job
+		if err := json.Unmarshal(msg.Data, &job); err != nil {
+			t.Fatal(err)
+		}
+		if job.Issue != issue {
+			continue
+		}
+		if found != "" {
+			t.Fatalf("issue %d is stored on %s and %s", issue, found, msg.Subject)
+		}
+		if msg.Subject != job.Subject() {
+			t.Fatalf("issue %d stored on %s, payload subject %s", issue, msg.Subject, job.Subject())
+		}
+		found = msg.Subject
+	}
+	if found == "" {
+		t.Fatalf("issue %d is not in the job stream", issue)
+	}
+	return found
+}
+
+func stewardSubject(steward string, issue int) string {
+	return control.Job{RepoID: testRepoID, Issue: issue, Steward: steward}.Subject()
+}
+
+func poolSubject(issue int) string {
+	return control.Job{RepoID: testRepoID, Issue: issue, Pool: true}.Subject()
 }
 
 // nextJob waits for the runner's consumer to deliver one job.
@@ -360,6 +456,13 @@ func (w *world) take(t *testing.T, have []State, n int) []State {
 func (w *world) await(t *testing.T, steward string, issue int) []State {
 	t.Helper()
 	subject := fmt.Sprintf("%s%s.%d.%d", StatusSubjectPrefix, steward, testRepoID, issue)
+	return w.awaitSubject(t, subject, issue)
+}
+
+// awaitSubject is await for an exact status subject. A pool job reports on
+// the pool subject, not the assignee's.
+func (w *world) awaitSubject(t *testing.T, subject string, issue int) []State {
+	t.Helper()
 	var states []State
 	timeout := time.After(30 * time.Second)
 	for {
@@ -434,8 +537,8 @@ func TestJobOpensPR(t *testing.T) {
 	}
 	select {
 	case reg := <-registered:
-		if reg.Steward != "alice" || fmt.Sprint(reg.Harnesses) != "[fake]" {
-			t.Errorf("registration = %+v, want steward alice with harness fake", reg)
+		if reg.Steward != "alice" || fmt.Sprint(reg.Harnesses) != "[fake]" || reg.Pool {
+			t.Errorf("registration = %+v, want steward alice with harness fake and pool off", reg)
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("runner did not register")
@@ -1336,5 +1439,145 @@ func TestFindPRPagesPastTheNewest(t *testing.T) {
 	}
 	if !slices.Equal(pages, []string{"1", "2"}) {
 		t.Errorf("pages = %v, want the first page and the next", pages)
+	}
+}
+
+func TestPoolNameIsNotASteward(t *testing.T) {
+	_, err := New(t.Context(), Options{Steward: control.PoolName}, slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), control.PoolName) {
+		t.Fatalf("New(%q) = %v, want a refusal of that steward", control.PoolName, err)
+	}
+}
+
+func TestRegisteredStewardKeepsTheJobFromThePool(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	own, ownSessions := writes(map[string]string{"fix.txt": "own"})
+	pool, poolSessions := writes(map[string]string{"fix.txt": "pool"})
+	w.start(t, "alice", own)
+	w.startWith(t, "bob", pool, true)
+	w.waitRegistered(t, "alice", false)
+	w.waitRegistered(t, "bob", true)
+
+	w.publish(t, "alice", 7)
+	if got, want := w.subjectOf(t, 7), stewardSubject("alice", 7); got != want {
+		t.Fatalf("subject = %s, want %s", got, want)
+	}
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a PR", states)
+	}
+	time.Sleep(3 * pollWait)
+	if got := poolSessions.Load(); got != 0 {
+		t.Errorf("pool runner sessions = %d, want 0", got)
+	}
+	if got := ownSessions.Load(); got != 2 {
+		t.Errorf("steward sessions = %d, want 2", got)
+	}
+}
+
+func TestUnregisteredStewardIsWorkedByAPoolRunner(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	w.startWith(t, "bob", h, true)
+	w.waitRegistered(t, "bob", true)
+
+	w.publish(t, "carol", 8)
+	if got, want := w.subjectOf(t, 8), poolSubject(8); got != want {
+		t.Fatalf("subject = %s, want %s", got, want)
+	}
+	subject := fmt.Sprintf("%s%s.%d.%d", StatusSubjectPrefix, control.PoolName, testRepoID, 8)
+	if states := w.awaitSubject(t, subject, 8); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a PR", states)
+	}
+	if got := sessions.Load(); got != 2 {
+		t.Errorf("sessions = %d, want 2", got)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 || pulls[0].Head != "8_fix-the-thing" || len(comments["8"]) != 1 {
+		t.Errorf("pulls = %+v, comments = %v; want carol's issue worked like any other job", pulls, comments)
+	}
+}
+
+func TestRunnerWithoutPoolLeavesThePoolJob(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.waitRegistered(t, "alice", false)
+
+	w.publish(t, "carol", 8)
+	w.publish(t, "alice", 7)
+	if got, want := w.subjectOf(t, 8), poolSubject(8); got != want {
+		t.Fatalf("subject = %s, want %s", got, want)
+	}
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a PR", states)
+	}
+	time.Sleep(3 * pollWait)
+	if got := sessions.Load(); got != 2 {
+		t.Errorf("sessions = %d, want 2 for alice's job only", got)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" || len(comments["8"]) != 0 {
+		t.Errorf("pulls = %+v, comments = %v; want only alice's issue touched", pulls, comments)
+	}
+	select {
+	case s := <-w.statuses:
+		t.Errorf("unexpected status %+v", s)
+	default:
+	}
+}
+
+func TestPoolRunnerWorksItsOwnJobFirst(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	r, _ := w.runnerWith(t, "alice", h, true)
+	w.waitRegistered(t, "alice", true)
+	w.publish(t, "carol", 8)
+	w.publish(t, "alice", 7)
+	if got, want := w.subjectOf(t, 8), poolSubject(8); got != want {
+		t.Fatalf("pool subject = %s, want %s", got, want)
+	}
+	if got, want := w.subjectOf(t, 7), stewardSubject("alice", 7); got != want {
+		t.Fatalf("own subject = %s, want %s", got, want)
+	}
+
+	w.run(t, r)
+	if states := w.await(t, "alice", 7); states[0] != StateClaimed || states[len(states)-1] != StatePROpened {
+		t.Fatalf("own states = %v, want alice's job to finish first", states)
+	}
+	subject := fmt.Sprintf("%s%s.%d.%d", StatusSubjectPrefix, control.PoolName, testRepoID, 8)
+	if states := w.awaitSubject(t, subject, 8); states[len(states)-1] != StatePROpened {
+		t.Fatalf("pool states = %v, want a PR", states)
+	}
+	if got := sessions.Load(); got != 4 {
+		t.Errorf("sessions = %d, want 4: worker and reviewer for each job", got)
+	}
+}
+
+func TestPoolRunnersShareOneJob(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	h1, s1 := writes(map[string]string{"fix.txt": "a"})
+	h2, s2 := writes(map[string]string{"fix.txt": "b"})
+	w.startWith(t, "alice", h1, true)
+	w.startWith(t, "bob", h2, true)
+	w.waitRegistered(t, "alice", true)
+	w.waitRegistered(t, "bob", true)
+
+	w.publish(t, "carol", 9)
+	subject := fmt.Sprintf("%s%s.%d.%d", StatusSubjectPrefix, control.PoolName, testRepoID, 9)
+	if states := w.awaitSubject(t, subject, 9); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a PR", states)
+	}
+	time.Sleep(3 * pollWait)
+	if got := s1.Load() + s2.Load(); got != 2 {
+		t.Errorf("sessions = %d + %d, want 2 between the two pool runners", s1.Load(), s2.Load())
+	}
+	pulls, _ := w.gh.snapshot()
+	if len(pulls) != 1 || pulls[0].Head != "9_fix-the-thing" {
+		t.Errorf("pulls = %+v, want exactly one", pulls)
 	}
 }

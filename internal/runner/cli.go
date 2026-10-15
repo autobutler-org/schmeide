@@ -65,6 +65,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
 	o = &Options{}
 	fs = flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
 	fs.StringVar(&o.Steward, "steward", "", "Your GitHub login. The runner only takes jobs for issues assigned to this login. Required.")
+	fs.BoolVar(&o.Pool, "pool", false, "Take a job whose steward has no registered runner. The runner still works one job at a time and takes its own job first. The default is off.")
 	fs.StringVar(&o.NATSURL, "nats-url", DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr.")
 	fs.StringVar(&o.NATSToken, "nats-token", "", "This steward's NATS token: the one the control node's --runner-tokens lists for --steward. Prefer the environment variable, so the token stays out of the process list.")
 	fs.StringVar(&o.WorkDir, "work-dir", "schmeide-work", "Directory for repository clones and per-job git worktrees.")
@@ -107,8 +108,11 @@ func Usage() string {
 	return `schmeide runner takes jobs from the control node and turns each one into a pull
 request. It connects out to the control node's NATS, registers under its
 steward with the harnesses that are installed and logged in on this machine,
-and pulls only that steward's jobs. For each job it creates a git worktree on a
-branch named <issue number>_<short-description>, runs a fresh harness session
+and pulls only that steward's jobs. With --pool, it also takes a job whose
+steward has no registered runner. The default is off. It still works one job
+at a time and takes its own steward's job first. For each job it creates a
+git worktree on a branch named <issue number>_<short-description>, runs a
+fresh harness session
 with a brief built from the issue as it stood when it became a job, runs the
 gate command from the repo's .schmeide/config.toml, and then pushes the branch
 and opens a PR as the schmeide GitHub App. Once that gate has passed and the

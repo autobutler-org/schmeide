@@ -2,7 +2,9 @@
 // control node and takes each one from a GitHub issue to an opened pull
 // request, then reviews that change in the same worktree until the review
 // passes or the round limit is hit. It uses a harness that is already logged
-// in on this machine. The factory merges the pull request only when the repo
+// in on this machine. With --pool, which defaults to off, it also takes a job
+// whose steward has no registered runner, one job at a time, its own first.
+// The factory merges the pull request only when the repo
 // config sets merge = "factory". The default is a person.
 package runner
 
@@ -81,6 +83,10 @@ type Options struct {
 	NATSToken string
 	// Steward is the GitHub login whose jobs this runner takes.
 	Steward string
+	// Pool lets this runner take a job whose steward has no registered
+	// runner. The default is false. The runner still works one job at a
+	// time and takes its own steward's job first.
+	Pool bool
 	// WorkDir is where repository clones and job worktrees are kept.
 	WorkDir string
 	// GitHubAPIURL is the GitHub REST API base URL.
@@ -117,11 +123,12 @@ type Options struct {
 
 // Runner pulls and works one steward's jobs.
 type Runner struct {
-	opts    Options
-	log     *slog.Logger
-	nc      *nats.Conn
-	cons    jetstream.Consumer
-	harness harness.Harness
+	opts     Options
+	log      *slog.Logger
+	nc       *nats.Conn
+	cons     jetstream.Consumer
+	poolCons jetstream.Consumer
+	harness  harness.Harness
 	// failures counts StateFailed outcomes per job subject. Token hand-backs
 	// and shutdown hand-backs are not counted. Only handle writes it, and
 	// Run works one job at a time.
@@ -158,8 +165,9 @@ func Connect(ctx context.Context, url, steward, token string) (*nats.Conn, jetst
 // New connects to the control node, checks this machine can do work, and
 // registers the runner under its steward.
 func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
-	// The steward becomes a NATS subject token and a consumer name.
-	if o.Steward == "" || strings.ContainsAny(o.Steward, ".*>/\\ \t\r\n") {
+	// The steward becomes a NATS subject token and a consumer name. PoolName
+	// is reserved so a steward's filter cannot match the pool subject.
+	if o.Steward == "" || o.Steward == control.PoolName || strings.ContainsAny(o.Steward, ".*>/\\ \t\r\n") {
 		return nil, fmt.Errorf("steward %q is not a GitHub login; pass your login with --steward", o.Steward)
 	}
 	if o.AckWait == 0 {
@@ -225,9 +233,29 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	if err != nil {
 		return fmt.Errorf("subscribe to %s's jobs: %w", r.opts.Steward, err)
 	}
+	if r.opts.Pool {
+		// One durable consumer for every pool runner, so each pool job is
+		// delivered to only one of them.
+		r.poolCons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
+			Durable:       control.ConsumerName(control.PoolName),
+			FilterSubject: control.JobFilter(control.PoolName),
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			AckWait:       r.opts.AckWait,
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe to pool jobs: %w", err)
+		}
+	}
 	host, _ := os.Hostname()
-	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{Steward: r.opts.Steward, Harnesses: names, Host: host})
-	r.log.Info("runner registered", "steward", r.opts.Steward, "harnesses", strings.Join(names, ","), "nats", r.opts.NATSURL)
+	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{
+		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool,
+	})
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := r.nc.FlushWithContext(flushCtx); err != nil {
+		return fmt.Errorf("register with the control node: %w", err)
+	}
+	r.log.Info("runner registered", "steward", r.opts.Steward, "harnesses", strings.Join(names, ","), "pool", r.opts.Pool, "nats", r.opts.NATSURL)
 	return nil
 }
 
@@ -241,7 +269,7 @@ func (r *Runner) Close() { r.nc.Close() }
 // has its own worktree) when a steward's queue backs up.
 func (r *Runner) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
-		msg, err := r.cons.Next(jetstream.FetchMaxWait(pollWait))
+		msg, err := r.next()
 		switch {
 		case err == nil:
 			r.handle(ctx, msg)
@@ -257,6 +285,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// next returns the steward's own job when one is waiting. A pool job is
+// fetched only when that fetch finds nothing and --pool was set. A runner
+// without --pool has no pool consumer, so it never receives a pool job.
+func (r *Runner) next() (jetstream.Msg, error) {
+	msg, err := r.cons.Next(jetstream.FetchMaxWait(pollWait))
+	if err == nil || r.poolCons == nil || !errors.Is(err, nats.ErrTimeout) {
+		return msg, err
+	}
+	return r.poolCons.Next(jetstream.FetchMaxWait(pollWait))
 }
 
 func (r *Runner) publish(subject string, v any) {
