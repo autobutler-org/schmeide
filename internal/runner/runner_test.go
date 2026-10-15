@@ -68,6 +68,11 @@ type fakeGitHub struct {
 	pulls    []pull
 	comments map[string][]string // by issue number
 	calls    []string
+	// checks is what a list of check runs returns for any head commit.
+	checks []ghCheckRun
+	// merges is how many merge calls landed, and mergeMethod is the last one.
+	merges      int
+	mergeMethod string
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +117,22 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		issue := strings.Split(path, "/")[2]
 		f.comments[issue] = append(f.comments[issue], c.Body)
 		reply = c
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/check-runs"):
+		runs := f.checks
+		if runs == nil {
+			runs = []ghCheckRun{}
+		}
+		reply = map[string]any{"total_count": len(runs), "check_runs": runs}
+	case r.Method == http.MethodPut && strings.HasSuffix(path, "/merge"):
+		var body struct {
+			Method string `json:"merge_method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			f.t.Error(err)
+		}
+		f.merges++
+		f.mergeMethod = body.Method
+		reply = map[string]any{"merged": true}
 	default:
 		f.t.Errorf("unexpected GitHub call %s %s", r.Method, r.URL)
 		http.NotFound(w, r)
@@ -134,6 +155,18 @@ func (f *fakeGitHub) callsSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.calls)
+}
+
+func (f *fakeGitHub) setChecks(runs []ghCheckRun) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks = runs
+}
+
+func (f *fakeGitHub) mergeSnapshot() (int, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.merges, f.mergeMethod
 }
 
 type statusMsg struct {
@@ -221,6 +254,19 @@ func newWorld(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	return w
+}
+
+// pushConfig commits body as .schmeide/config.toml on the remote default branch.
+func (w *world) pushConfig(t *testing.T, body string) {
+	t.Helper()
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	if err := os.WriteFile(filepath.Join(src, ".schmeide", "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "config")
+	git(t, src, "push", "-q", "origin", "HEAD:main")
 }
 
 func (w *world) publish(t *testing.T, steward string, issue int) {
@@ -324,7 +370,7 @@ func (w *world) await(t *testing.T, steward string, issue int) []State {
 				continue
 			}
 			states = append(states, s.State)
-			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed || s.State == StateReviewFailed {
+			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed || s.State == StateReviewFailed || s.State == StateMerged || s.State == StateMergeFailed {
 				return states
 			}
 		case <-timeout:
@@ -447,6 +493,7 @@ func TestGateFailureOpensNoPR(t *testing.T) {
 	if strings.Contains(comments["7"][0], "```") {
 		t.Errorf("issue comment %q carries the gate's output", comments["7"][0])
 	}
+	assertNoMerge(t, w)
 	if branches := git(t, w.bare, "branch", "--list", "7_*"); branches != "" {
 		t.Errorf("branch pushed despite the gate failure: %s", branches)
 	}
@@ -788,10 +835,162 @@ func assertSettled(t *testing.T, w *world) {
 	}
 }
 
+const testGateConfig = "gate = \"test ! -e broken\"\n"
+
+func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
+	w := newWorld(t)
+	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.gh.setChecks([]ghCheckRun{
+		{Name: "test", Status: "completed", Conclusion: "success"},
+		{Name: "lint", Status: "completed", Conclusion: "success"},
+	})
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merged]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	merges, method := w.gh.mergeSnapshot()
+	if merges != 1 || method != "merge" {
+		t.Errorf("merges = %d method %q, want one merge commit", merges, method)
+	}
+	sha := git(t, w.bare, "rev-parse", "7_fix-the-thing")
+	sawCheck := false
+	for _, call := range w.gh.callsSnapshot() {
+		if strings.Contains(call, "/commits/"+sha+"/check-runs") {
+			sawCheck = true
+		}
+	}
+	if !sawCheck {
+		t.Errorf("check runs were not read for %s: %v", sha, w.gh.callsSnapshot())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the one that was merged", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "merged") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want one that says the pull request was merged", comments["7"])
+	}
+}
+
+func TestFactoryMergeWhenACheckFails(t *testing.T) {
+	w := newWorld(t)
+	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.gh.setChecks([]ghCheckRun{
+		{Name: "test", Status: "completed", Conclusion: "success"},
+		{Name: "lint", Status: "completed", Conclusion: "failure"},
+	})
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if merges, _ := w.gh.mergeSnapshot(); merges != 0 {
+		t.Errorf("merges = %d, want none", merges)
+	}
+	assertNoMerge(t, w)
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], "failure") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want the failed check and the open pull request", comments["7"])
+	}
+}
+
+func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
+	prev := checkWait
+	checkWait = 20 * time.Millisecond
+	t.Cleanup(func() { checkWait = prev })
+
+	w := newWorld(t)
+	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	assertNoMerge(t, w)
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "no check runs") || !strings.Contains(comments["7"][0], "left the pull request open") {
+		t.Errorf("issue comments = %q, want one that says there are no check runs", comments["7"])
+	}
+}
+
+func TestMergeNopeIsAConfigError(t *testing.T) {
+	w := newWorld(t)
+	w.maxAttempts = 1
+	w.pushConfig(t, testGateConfig+"merge = \"nope\"\n")
+	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if sessions.Load() != 0 {
+		t.Errorf("sessions = %d, want none for a config error", sessions.Load())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	assertNoMerge(t, w)
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], "factory") || !strings.Contains(comments["7"][0], "human") || !strings.Contains(comments["7"][0], "did not open a pull request") {
+		t.Errorf("issue comments = %q, want a config error that names factory and human", comments["7"])
+	}
+}
+
+func TestJudgeChecks(t *testing.T) {
+	if verdict, _ := judgeChecks([]ghCheckRun{{Name: "test", Status: "completed", Conclusion: "success"}}); verdict != checksGreen {
+		t.Fatalf("one success = %v, want green", verdict)
+	}
+	verdict, why := judgeChecks(nil)
+	if verdict != checksPending || !strings.Contains(why, "no check runs") {
+		t.Fatalf("no runs = %v %q, want pending", verdict, why)
+	}
+	verdict, why = judgeChecks([]ghCheckRun{
+		{Name: "test", Status: "completed", Conclusion: "success"},
+		{Name: "lint", Status: "completed", Conclusion: "failure"},
+	})
+	if verdict != checksRed || !strings.Contains(why, "failure") || !strings.Contains(why, "lint") {
+		t.Fatalf("mixed = %v %q, want the failure", verdict, why)
+	}
+	verdict, why = judgeChecks([]ghCheckRun{
+		{Name: "test", Status: "completed", Conclusion: "failure"},
+		{Name: "lint", Status: "in_progress"},
+	})
+	if verdict != checksRed || !strings.Contains(why, "failure") {
+		t.Fatalf("failed plus pending = %v %q, want red without waiting", verdict, why)
+	}
+	verdict, _ = judgeChecks([]ghCheckRun{{Name: "test", Status: "in_progress"}})
+	if verdict != checksPending {
+		t.Fatalf("in progress = %v, want pending", verdict)
+	}
+}
+
 func TestRunnerHelpDocumentsReviewRounds(t *testing.T) {
 	got := Usage()
 	if !strings.Contains(got, "--max-review-rounds") || !strings.Contains(got, `default "3"`) || !strings.Contains(got, "leaves the pull request open") {
 		t.Fatalf("help does not document the review round limit:\n%s", got)
+	}
+	if strings.Contains(got, "never merges") || strings.Contains(got, "does not merge") {
+		t.Fatalf("help still says the job does not merge:\n%s", got)
+	}
+	if !strings.Contains(got, `merge = "factory"`) || !strings.Contains(got, "The default is a person.") {
+		t.Fatalf("help does not document factory merge:\n%s", got)
 	}
 }
 

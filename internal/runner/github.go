@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -103,4 +106,63 @@ func (g github) openPR(ctx context.Context, title, body, head, base string) (str
 
 func (g github) comment(ctx context.Context, issue int, body string) error {
 	return g.do(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/comments", issue), map[string]string{"body": body}, nil)
+}
+
+// ghCheckRun is one check run on a commit. Status is completed once GitHub
+// has a conclusion.
+type ghCheckRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+// checkPageSize is how many check runs one list page holds. A shorter page
+// is the last page.
+const checkPageSize = 100
+
+// checkRuns lists the latest check run for each name on sha. Pages are
+// followed until a short page comes back.
+func (g github) checkRuns(ctx context.Context, sha string) ([]ghCheckRun, error) {
+	var all []ghCheckRun
+	for page := 1; ; page++ {
+		if page > 20 {
+			return nil, fmt.Errorf("too many check run pages for %s", sha)
+		}
+		var resp struct {
+			TotalCount int          `json:"total_count"`
+			CheckRuns  []ghCheckRun `json:"check_runs"`
+		}
+		q := url.Values{}
+		q.Set("filter", "latest")
+		q.Set("per_page", strconv.Itoa(checkPageSize))
+		q.Set("page", strconv.Itoa(page))
+		endpoint := "/commits/" + url.PathEscape(sha) + "/check-runs?" + q.Encode()
+		if err := g.do(ctx, http.MethodGet, endpoint, nil, &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.CheckRuns...)
+		if len(resp.CheckRuns) < checkPageSize || (resp.TotalCount > 0 && len(all) >= resp.TotalCount) {
+			return all, nil
+		}
+	}
+}
+
+// mergePull merges the pull request with a merge commit. It does not squash
+// or rebase.
+func (g github) mergePull(ctx context.Context, number int) error {
+	body := map[string]string{"merge_method": "merge"}
+	return g.do(ctx, http.MethodPut, fmt.Sprintf("/pulls/%d/merge", number), body, nil)
+}
+
+// pullNumber is the pull request number at the end of a GitHub html URL.
+func pullNumber(prURL string) (int, error) {
+	u, err := url.Parse(prURL)
+	if err != nil {
+		return 0, fmt.Errorf("pull request URL %q: %w", prURL, err)
+	}
+	n, err := strconv.Atoi(path.Base(u.Path))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("pull request URL %q has no pull number", prURL)
+	}
+	return n, nil
 }

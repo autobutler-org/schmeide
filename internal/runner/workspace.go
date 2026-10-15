@@ -28,6 +28,8 @@ type Workspace interface {
 	Run(ctx context.Context, command string) (output string, err error)
 	// Push publishes the branch.
 	Push(ctx context.Context) error
+	// Head is the commit the branch points at.
+	Head(ctx context.Context) (string, error)
 	// Close removes the workspace.
 	Close() error
 }
@@ -180,6 +182,11 @@ func (w *worktree) ancestorOfHEAD(ctx context.Context, commit string) bool {
 	}
 	_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", commit, "HEAD")
 	return err == nil
+}
+
+// Head implements [Workspace].
+func (w *worktree) Head(ctx context.Context) (string, error) {
+	return w.git(ctx, w.dir, "rev-parse", "HEAD")
 }
 
 // Close implements [Workspace].
