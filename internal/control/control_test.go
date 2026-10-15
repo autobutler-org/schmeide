@@ -615,11 +615,27 @@ func fakeGitHub(t *testing.T, key *rsa.PublicKey, expires time.Time) *httptest.S
 			t.Errorf("app JWT claims = %+v, want issuer 12345 and a lifetime within GitHub's 10 minute cap", claims)
 		}
 		var body struct {
-			RepositoryIDs []int64 `json:"repository_ids"`
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
 		}
 		reqBody, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(reqBody, &body); err != nil || len(body.RepositoryIDs) != 1 || body.RepositoryIDs[0] != 901234567 {
 			t.Errorf("token request body = %s, want it limited to the job's repository", reqBody)
+		}
+		wantPerms := map[string]string{
+			"contents":      "write",
+			"pull_requests": "write",
+			"issues":        "write",
+			"checks":        "read",
+		}
+		if len(body.Permissions) != len(wantPerms) {
+			t.Errorf("permissions = %v, want %v", body.Permissions, wantPerms)
+		} else {
+			for name, level := range wantPerms {
+				if body.Permissions[name] != level {
+					t.Errorf("permissions[%s] = %q, want %q", name, body.Permissions[name], level)
+				}
+			}
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(Token{Token: "ghs_fake", ExpiresAt: expires})
