@@ -9,8 +9,11 @@ New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull requ
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
 - `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. With `--pool`, which defaults off, it registers as a pool runner and can take a job whose assignee has no registered runner. It still works one job at a time and takes its own job first. The factory merges that pull request only when the repo config sets `merge = "factory"`. The default is a person.
 - `schmeide doctor` checks that this machine can run a runner.
+- `schmeide status` shows registered runners and queued or running jobs.
+- `schmeide init` writes a repo config and a control node config in this directory.
+- `schmeide completion` prints a shell completion script for bash, zsh, or fish.
 
-Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting.
+Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting. Terms are defined in [docs/GLOSSARY.md](docs/GLOSSARY.md), and `schmeide --help` links there.
 
 ## Running the first slice
 
@@ -70,7 +73,7 @@ gate_timeout = "30m"
 session_timeout = "2h"
 ```
 
-See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts, so the session cannot change the gate or turn factory merge on.
+The full key list is in [docs/config.md](docs/config.md). See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts, so the session cannot change the gate or turn factory merge on.
 
 ## Development
 

@@ -31,6 +31,8 @@ chmod 0600 /path/to/app.pem
 
 ## 2. Add the repo config
 
+`schmeide init` writes `.schmeide/config.toml` and `.schmeide/control.conf` in the current directory, and it refuses to overwrite either file. `.schmeide/control.conf` is an operator config with placeholders, mode 0600, and must not be committed with real secrets. Pass it with `schmeide control --config .schmeide/control.conf` after you replace every placeholder.
+
 The target repository needs `.schmeide/config.toml` on its default branch:
 
 ```toml
@@ -42,7 +44,7 @@ gate = "make check test"
 merge = "human"
 ```
 
-A missing `merge` setting leaves the pull request for a person to merge. `gate` is required, and unknown keys are an error.
+A missing `merge` setting leaves the pull request for a person to merge. `gate` is required, and unknown keys are an error. Every key is listed in [config.md](config.md).
 
 ## 3. Start the control node
 
