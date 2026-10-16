@@ -67,6 +67,16 @@ func merged(prURL string) outcome {
 	}
 }
 
+// enqueued is the outcome when the base branch has a merge queue: the queue
+// merges the pull request, so the job ends as merged once it is queued.
+func enqueued(prURL string) outcome {
+	return outcome{
+		state:   StateMerged,
+		detail:  prURL,
+		comment: "schmeide added the pull request to the merge queue after the review passed and CI succeeded: " + prURL,
+	}
+}
+
 func mergeFailed(prURL string, err error) outcome {
 	return outcome{
 		state:   StateMergeFailed,
@@ -76,7 +86,8 @@ func mergeFailed(prURL string, err error) outcome {
 }
 
 // mergeWhenGreen polls check runs on the pull request's head commit and
-// merges with a merge commit when every one has succeeded. A failed check,
+// merges with a merge commit when every one has succeeded. When the base
+// branch has a merge queue, it adds the pull request to the queue instead. A failed check,
 // or a wait of the repo's check_wait that does not end in success, leaves the pull
 // request open. That failure is final: the pull request already exists, and
 // a redelivery would treat it as done.
@@ -112,6 +123,22 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 		case checksGreen:
 			if ctx.Err() != nil {
 				return outcome{}
+			}
+			queued, err := gh.queuedPull(ctx, number)
+			if err != nil {
+				if ctx.Err() != nil {
+					return outcome{}
+				}
+				return mergeFailed(prURL, fmt.Errorf("could not read the merge queue: %w", err))
+			}
+			if queued != "" {
+				if err := gh.enqueuePull(ctx, queued); err != nil {
+					if ctx.Err() != nil {
+						return outcome{}
+					}
+					return mergeFailed(prURL, fmt.Errorf("could not add the pull request to the merge queue: %w", err))
+				}
+				return enqueued(prURL)
 			}
 			if err := gh.mergePull(ctx, number); err != nil {
 				if ctx.Err() != nil {
