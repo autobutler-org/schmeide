@@ -17,7 +17,6 @@ endif
 export GOTOOLCHAIN=go1.25.0+auto
 export GOPROXY ?= https://proxy.golang.org,direct
 GO := $(shell which go)
-AIR := $(shell which air)
 
 MAIN ?= ./cmd/schmeide/main.go
 EXE ?= ./build/schmeide
@@ -25,20 +24,14 @@ EXE ?= ./build/schmeide
 ##@ Development Environment
 
 .PHONY: setup
-setup: setup/gotools setup/air
+setup: setup/gotools
 
 .PHONY: setup/gotools
 setup/gotools: ## Install go tools
-	$(GO) install golang.org/x/tools/gopls@latest
+	$(GO) install golang.org/x/tools/gopls@v0.23.0
 	$(GO) install github.com/cweill/gotests/gotests@v1.6.0
 	$(GO) install github.com/josharian/impl@v1.4.0
 	$(GO) install github.com/haya14busa/goplay/cmd/goplay@v1.0.0
-	$(GO) install github.com/go-delve/delve/cmd/dlv@latest
-	$(GO) install honnef.co/go/tools/cmd/staticcheck@latest
-
-.PHONY: setup/air
-setup/air: ## Install air tool
-	$(GO) install github.com/air-verse/air@latest
 
 ##@ Build
 
@@ -66,7 +59,7 @@ test: ## Run tests
 
 .PHONY: watch
 watch: ## Watch for changes and rebuild
-	$(AIR) \
+	$(GO) tool air \
 		--build.cmd "$(MAKE) build" \
 		--build.entrypoint "$(EXE)" \
 		--build.exclude_dir ".github,build,docs"
