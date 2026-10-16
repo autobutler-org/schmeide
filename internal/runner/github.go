@@ -131,27 +131,20 @@ func (g github) baseBranch(ctx context.Context, issue int) (string, error) {
 }
 
 type ghPull struct {
-	HTMLURL string `json:"html_url"`
-	Head    struct {
+	HTMLURL   string `json:"html_url"`
+	State     string `json:"state"`
+	CreatedAt string `json:"created_at"`
+	Head      struct {
 		Ref string `json:"ref"`
 	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
 }
 
 // pullPageSize is how many pull requests one list page holds. A shorter page
 // is the last page.
 const pullPageSize = 100
-
-// findPR returns the URL of a pull request, open or not, on a branch of the
-// issue ("<issue number>_..."), or "" when there is none. The match is the
-// issue-number prefix, so a retitle of the issue still finds the pull request.
-// Pages are followed until that branch is found or a page comes back short.
-func (g github) findPR(ctx context.Context, issue int) (string, error) {
-	pr, ok, err := g.issuePull(ctx, issue, "all")
-	if err != nil || !ok {
-		return "", err
-	}
-	return pr.HTMLURL, nil
-}
 
 // openIssueBranch returns the head branch of an open pull request whose
 // branch starts with "<issue>_", or "" when there is none.
@@ -172,7 +165,9 @@ func (g github) listPulls(ctx context.Context, state string, page int) ([]ghPull
 }
 
 // issuePull returns the first pull request in state whose head ref starts
-// with "<issue>_". ok is false when there is none.
+// with "<issue>_". ok is false when there is none. The match is the
+// issue-number prefix, so a retitle of the issue still finds the pull request.
+// Pages are followed until that branch is found or a page comes back short.
 func (g github) issuePull(ctx context.Context, issue int, state string) (ghPull, bool, error) {
 	prefix := fmt.Sprintf("%d_", issue)
 	for page := 1; ; page++ {
@@ -199,6 +194,60 @@ func (g github) openPR(ctx context.Context, title, body, head, base string) (str
 
 func (g github) comment(ctx context.Context, issue int, body string) error {
 	return g.do(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/comments", issue), map[string]string{"body": body}, nil)
+}
+
+// outcomeMarker tags the issue comment that carries a job's outcome, followed
+// by the outcome's state and " -->". A redelivered job reads it back to tell
+// that its outcome was already posted.
+const outcomeMarker = "<!-- schmeide:outcome "
+
+// markOutcome appends the outcome marker for state to an outcome comment.
+func markOutcome(body string, state State) string {
+	return body + "\n\n" + outcomeMarker + string(state) + " -->"
+}
+
+type ghComment struct {
+	Body string `json:"body"`
+	User struct {
+		Type string `json:"type"`
+	} `json:"user"`
+}
+
+// commentPageSize is how many comments one list page holds. A shorter page
+// is the last page.
+const commentPageSize = 100
+
+// postedOutcome returns the state in the last outcome comment a bot posted on
+// the issue since the RFC 3339 time since, or false when there is none. Empty
+// since reads every comment.
+func (g github) postedOutcome(ctx context.Context, issue int, since string) (State, bool, error) {
+	var state State
+	found := false
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("/issues/%d/comments?per_page=%d&page=%d", issue, commentPageSize, page)
+		if since != "" {
+			endpoint += "&since=" + url.QueryEscape(since)
+		}
+		var comments []ghComment
+		if err := g.do(ctx, http.MethodGet, endpoint, nil, &comments); err != nil {
+			return "", false, err
+		}
+		for _, c := range comments {
+			if c.User.Type != "Bot" {
+				continue
+			}
+			_, rest, ok := strings.Cut(c.Body, outcomeMarker)
+			if !ok {
+				continue
+			}
+			if s, _, ok := strings.Cut(rest, " -->"); ok {
+				state, found = State(s), true
+			}
+		}
+		if len(comments) < commentPageSize {
+			return state, found, nil
+		}
+	}
 }
 
 // ghCheckRun is one check run on a commit. Status is completed once GitHub

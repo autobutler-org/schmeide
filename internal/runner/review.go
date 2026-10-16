@@ -102,8 +102,7 @@ func dropSessionNotes(dir string) {
 }
 
 // reviewFailed is a final failure after the pull request exists. It is not
-// retried: a redelivery would see the open pull request and stop, and the
-// review would never finish.
+// retried: the rounds it spent stay spent.
 func reviewFailed(prURL string, err error) outcome {
 	return outcome{
 		state:   StateReviewFailed,
@@ -128,15 +127,22 @@ func roundsExhausted(rounds int, prURL string) outcome {
 	}
 }
 
+// fixMessage is the subject of a commit that applies review findings. The
+// commits with it on the branch are the rounds already spent.
+func fixMessage(issue int) string {
+	return fmt.Sprintf("Apply review feedback for #%d", issue)
+}
+
 // review runs reviewer sessions in the job's existing worktree until one
-// passes or the round limit is hit. A pass returns an opened pull request.
-// The caller merges only when the repo config says to.
-func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string) outcome {
+// passes or the round limit is hit. spent rounds already ran on this pull
+// request before a redelivery. A pass returns an opened pull request. The
+// caller merges only when the repo config says to.
+func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string, spent int) outcome {
 	rounds := r.opts.MaxReviewRounds
 	if rounds <= 0 {
 		rounds = defaultMaxReviewRounds
 	}
-	for round := 1; round <= rounds; round++ {
+	for round := spent + 1; round <= rounds; round++ {
 		r.report(job, StateReviewing, fmt.Sprintf("round %d of %d", round, rounds))
 		verdict, findings, err := r.reviewOnce(ctx, ws, job)
 		if err != nil {
@@ -173,7 +179,7 @@ func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Jo
 		return reviewFailed(prURL, fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err)), true
 	}
 	dropSessionNotes(ws.Dir())
-	changed, err := ws.Commit(ctx, fmt.Sprintf("Apply review feedback for #%d", job.Issue))
+	changed, err := ws.Commit(ctx, fixMessage(job.Issue))
 	if err != nil {
 		return reviewFailed(prURL, err), true
 	}
