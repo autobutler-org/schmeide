@@ -10,6 +10,12 @@ import (
 	"github.com/autobutler-org/schmeide/internal/runner"
 )
 
+func TestUsageLinksGlossary(t *testing.T) {
+	if !strings.Contains(usage, "docs/GLOSSARY.md") {
+		t.Fatal("usage does not mention docs/GLOSSARY.md")
+	}
+}
+
 func TestRun(t *testing.T) {
 	tests := []struct {
 		name       string
