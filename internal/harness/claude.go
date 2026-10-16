@@ -21,6 +21,30 @@ type ClaudeCode struct {
 	Args []string
 }
 
+// WideningArg returns the first flag in args that would widen a session past
+// the permission floor, or "" when there is none. The floor is the same for
+// Claude Code and Grok: a session may edit its worktree, and it is not handed
+// --dangerously-skip-permissions or a --permission-mode other than
+// acceptEdits. See docs/permissions.md.
+func WideningArg(args []string) string {
+	for i, arg := range args {
+		name, value, hasValue := strings.Cut(arg, "=")
+		switch name {
+		case "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions":
+			return arg
+		case "--permission-mode":
+			if !hasValue && i+1 < len(args) {
+				value = args[i+1]
+				arg += " " + value
+			}
+			if value != "acceptEdits" {
+				return arg
+			}
+		}
+	}
+	return ""
+}
+
 // Name implements [Harness].
 func (*ClaudeCode) Name() string { return "claude-code" }
 

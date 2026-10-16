@@ -73,7 +73,7 @@ func Checks(natsURL, steward, natsToken string, harnesses []harness.Harness) []C
 			return "installed and logged in", nil
 		}})
 	}
-	return append(checks, Check{Name: "control node", Group: GroupOperator, Run: func(ctx context.Context) (string, error) {
+	return append(checks, PermissionsCheck(), Check{Name: "control node", Group: GroupOperator, Run: func(ctx context.Context) (string, error) {
 		if steward == "" {
 			return "", errors.New("no steward to connect as; pass your GitHub login with --steward")
 		}
@@ -84,6 +84,14 @@ func Checks(natsURL, steward, natsToken string, harnesses []harness.Harness) []C
 		nc.Close()
 		return "reachable at " + natsURL, nil
 	}})
+}
+
+// PermissionsCheck states the harness permission floor. It never fails: the
+// runner itself refuses session flags that widen it.
+func PermissionsCheck() Check {
+	return Check{Name: "permission floor", Group: GroupOperator, Run: func(context.Context) (string, error) {
+		return "a session may edit its worktree and is not handed flags that skip permission checks; the runner refuses those in --claude-args and --grok-args unless --allow-dangerous-harness-args is given (see docs/permissions.md)", nil
+	}}
 }
 
 // GHCheck checks that the GitHub CLI is installed and logged in.

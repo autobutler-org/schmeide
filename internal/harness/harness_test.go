@@ -270,3 +270,25 @@ func TestClaudeRunLeavesNoChildOnExit(t *testing.T) {
 	}
 	waitGone(t, childPID(t, dir))
 }
+
+func TestWideningArg(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"--permission-mode", "acceptEdits"}, ""},
+		{[]string{"--permission-mode=acceptEdits", "--verbose"}, ""},
+		{[]string{"--dangerously-skip-permissions"}, "--dangerously-skip-permissions"},
+		{[]string{"--allow-dangerously-skip-permissions"}, "--allow-dangerously-skip-permissions"},
+		{[]string{"--permission-mode", "bypassPermissions"}, "--permission-mode bypassPermissions"},
+		{[]string{"--permission-mode=default"}, "--permission-mode=default"},
+		{[]string{"--permission-mode", "acceptEdits", "--permission-mode", "plan"}, "--permission-mode plan"},
+		{[]string{"--permission-mode"}, "--permission-mode"},
+	}
+	for _, c := range cases {
+		if got := WideningArg(c.args); got != c.want {
+			t.Errorf("WideningArg(%q) = %q, want %q", c.args, got, c.want)
+		}
+	}
+}
