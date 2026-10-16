@@ -75,6 +75,8 @@ Doctor checks that git is on `PATH`, that at least one harness is installed and 
 schmeide runner --steward octocat --nats-token a-token-for-octocat
 ```
 
+An unattended runner needs `SCHMEIDE_TRUST=1` the first time it uses a work directory, and on any later run of a directory and origin that have no recorded yes. The variable lets that run proceed and records nothing. On a terminal the runner asks once for a new pair and stores a yes under the user config directory (`schmeide/trust`). A non-interactive run with no recorded decision and without `SCHMEIDE_TRUST=1` refuses the job.
+
 ## 5. Get one pull request
 
 On an open issue in the repository, assign it to the steward's login (`octocat` above) and add the label `schmeide:ready`. Both the assignment and the label are needed, in either order.
