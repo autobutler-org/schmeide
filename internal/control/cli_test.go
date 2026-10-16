@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,5 +122,19 @@ func TestControlRefusesReadableKeyFile(t *testing.T) {
 	}
 	if !strings.Contains(Usage(), "chmod 0600") {
 		t.Error("usage does not document the key file mode")
+	}
+}
+
+func TestMainHelpAndBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"--help"}, &stdout, &stderr); code != 0 || stdout.String() != Usage() {
+		t.Errorf("--help: exit %d, stdout %q; want 0 and the usage", code, stdout.String())
+	}
+	stdout.Reset()
+	if code := Main([]string{"--no-such-flag"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "Run 'schmeide control --help' for usage.") {
+		t.Errorf("bad flag: exit %d, stderr %q; want 2 and the usage hint", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("bad flag wrote to stdout: %q", stdout.String())
 	}
 }
