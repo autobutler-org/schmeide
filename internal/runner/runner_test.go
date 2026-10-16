@@ -659,6 +659,41 @@ func TestJobOpensPR(t *testing.T) {
 	}
 }
 
+// TestLintGateMismatchCommentsWithoutFailingTheJob adds a Makefile check
+// target to a repo whose gate is not make check. The issue comment names the
+// detected target and the configured gate, and the job still opens a pull
+// request.
+func TestLintGateMismatchCommentsWithoutFailingTheJob(t *testing.T) {
+	w := newWorld(t)
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	if err := os.WriteFile(filepath.Join(src, "Makefile"), []byte("check:\n\ttrue\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "makefile")
+	git(t, src, "push", "-q", "origin", "HEAD:main")
+
+	const gate = "test ! -e broken"
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
+		t.Fatalf("states = %s, want %s", got, want)
+	}
+	_, comments := w.gh.snapshot()
+	var warned bool
+	for _, body := range comments["7"] {
+		if strings.Contains(body, "check") && strings.Contains(body, gate) {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("comments = %q, want one that names the detected target check and the configured gate %s", comments["7"], gate)
+	}
+}
+
 // TestJobLocksGateGitAndHarnessEnvironments runs one job and checks the three
 // environments that job starts. The harness session is harnessEnv: the base
 // list plus ANTHROPIC_, CLAUDE_, XAI_, and --pass-env, with no SCHMEIDE_ name.

@@ -32,6 +32,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/autobutler-org/schmeide/internal/lintgate"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -585,6 +586,9 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if err != nil {
 		return failed(err)
 	}
+	// The gate string is the one just read. Detection runs here, before the
+	// session, and not during git commit or git push.
+	r.warnLintGate(ctx, gh, job, ws.Dir(), cfg.Gate)
 	limits := r.deadlinesFor(cfg)
 	url, spent := prURL, 0
 	if url == "" {
@@ -613,6 +617,24 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		return out
 	}
 	return r.mergeWhenGreen(ctx, ws, gh, url, cfg.CheckWait)
+}
+
+// warnLintGate comments when the configured gate does not mention a lint
+// target detected in the checkout. The comment is a warning: the job still
+// runs. A detection or comment error is logged and does not fail the job.
+func (r *Runner) warnLintGate(ctx context.Context, gh github, job control.Job, root, gate string) {
+	found, err := lintgate.Detect(root)
+	if err != nil {
+		r.log.Warn("could not detect a repo lint gate", "repo", job.Repo, "issue", job.Issue, "err", err)
+		return
+	}
+	body := lintgate.Warning(gate, found)
+	if body == "" {
+		return
+	}
+	if err := gh.comment(ctx, job.Issue, body); err != nil {
+		r.log.Error("could not comment on the detected lint gate", "repo", job.Repo, "issue", job.Issue, "err", err)
+	}
 }
 
 // open runs the session, the gate, and the push, and opens the pull request.
