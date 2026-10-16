@@ -11,6 +11,7 @@ import (
 	"io"
 	"os/exec"
 
+	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/runner"
 )
@@ -93,23 +94,37 @@ func Report(ctx context.Context, w io.Writer, checks []Check) bool {
 	return ok
 }
 
-func doctorFlags() (fs *flag.FlagSet, natsURL, steward, natsToken *string) {
+// KeyFileCheck checks that the control node's GitHub App private key is not
+// readable by group or other, the same check control makes on start.
+func KeyFileCheck(path string) Check {
+	return Check{Name: "github app private key", Run: func(context.Context) (string, error) {
+		if err := control.CheckPrivateKeyFileMode(path); err != nil {
+			return "", err
+		}
+		return path + " is readable by its owner only", nil
+	}}
+}
+
+func doctorFlags() (fs *flag.FlagSet, natsURL, steward, natsToken, keyFile *string) {
 	fs = flag.NewFlagSet("schmeide doctor", flag.ContinueOnError)
 	steward = fs.String("steward", "", "Your GitHub login, which the runner connects to the control node as.")
 	natsURL = fs.String("nats-url", runner.DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr.")
 	natsToken = fs.String("nats-token", "", "This steward's NATS token: the one the control node's --runner-tokens lists for --steward.")
-	return fs, natsURL, steward, natsToken
+	keyFile = fs.String("github-app-private-key-file", "", "Path of the control node's GitHub App private key. When set, doctor fails if group or other can read it, as control refuses to start then. Skipped when empty.")
+	return fs, natsURL, steward, natsToken, keyFile
 }
 
 // Usage is the help text of `schmeide doctor`.
 func Usage() string {
-	fs, _, _, _ := doctorFlags()
+	fs, _, _, _, _ := doctorFlags()
 	return `schmeide doctor checks that this machine can run 'schmeide runner': git is
 installed, at least one harness is installed and logged in, and the control
 node is reachable. A harness that fails while another passes is reported as
 not selected and does not fail the check. Each failed check says how to fix
 it. The exit code is 0 when git, the control node, and at least one harness
-pass, and 1 otherwise.
+pass, and 1 otherwise. On the control node, pass --github-app-private-key-file
+to also check that the key is not readable by group or other ('chmod 0600'
+fixes it); without it that check is skipped.
 
 Usage:
   schmeide doctor [flags]
@@ -123,7 +138,7 @@ the environment.
 // Main runs `schmeide doctor` with the given arguments and returns its exit
 // code.
 func Main(args []string, stdout, stderr io.Writer) int {
-	fs, natsURL, steward, natsToken := doctorFlags()
+	fs, natsURL, steward, natsToken, keyFile := doctorFlags()
 	if err := runner.ParseFlags(fs, args); errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, Usage())
 		return 0
@@ -131,7 +146,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "schmeide doctor: %v\nRun 'schmeide doctor --help' for usage.\n", err)
 		return 2
 	}
-	if !Report(context.Background(), stdout, Checks(*natsURL, *steward, *natsToken, harness.All())) {
+	checks := Checks(*natsURL, *steward, *natsToken, harness.All())
+	if *keyFile != "" {
+		checks = append(checks, KeyFileCheck(*keyFile))
+	}
+	if !Report(context.Background(), stdout, checks) {
 		fmt.Fprintln(stderr, "schmeide doctor: fix the failed checks above, then run 'schmeide doctor' again.")
 		return 1
 	}
