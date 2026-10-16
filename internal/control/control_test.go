@@ -1072,3 +1072,138 @@ func TestIssueBucketIsSeededBeforeTheStreamIsLimited(t *testing.T) {
 		q.Close()
 	}
 }
+
+// TestStewardCannotMintAnotherStewardsToken locks the refusals in tokenFor:
+// each names the subject and the steward, and none reaches the minter.
+func TestStewardCannotMintAnotherStewardsToken(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"fake"}, Host: "h"})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+
+	octocats := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "monalisa", InstallationID: 1, Title: "t"}
+	for _, job := range []Job{octocats, pooled} {
+		if created, err := q.Publish(t.Context(), job); err != nil || !created {
+			t.Fatalf("Publish = %v, %v", created, err)
+		}
+	}
+	stored := jobs(t, q)
+	if len(stored) != 2 || stored[0].Pool || !stored[1].Pool {
+		t.Fatalf("jobs = %+v, want octocat's own job then a pool job", stored)
+	}
+	pooled = stored[1]
+	// Jobs the control node never publishes, stored by hand to reach the
+	// checks behind the subject prefix: hubot's job on octocat's subject, and
+	// a job on the pool subject that is not marked as a pool job.
+	forged, err := json.Marshal(Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "hubot", InstallationID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.js.Publish(t.Context(), "schmeide.jobs.octocat.7.3", forged); err != nil {
+		t.Fatal(err)
+	}
+	unpooled, err := json.Marshal(Job{Repo: "o/r", RepoID: 7, Issue: 4, Steward: "octocat", InstallationID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.js.Publish(t.Context(), jobSubjectPrefix+PoolName+".7.4", unpooled); err != nil {
+		t.Fatal(err)
+	}
+
+	var minted []Job
+	mint := func(_ context.Context, job Job) (Token, error) {
+		minted = append(minted, job)
+		return Token{Token: "ghs_" + job.Steward}, nil
+	}
+	poolSubject := pooled.Subject()
+	for _, tt := range []struct{ name, steward, subject, want string }{
+		{
+			"another steward's job", "hubot", octocats.Subject(),
+			`"schmeide.jobs.octocat.7.1" is not a job of steward "hubot"`,
+		},
+		{
+			"a wildcard over another steward", "hubot", "schmeide.jobs.octocat.>",
+			`"schmeide.jobs.octocat.>" is not a job of steward "hubot"`,
+		},
+		{
+			"a wildcard over every job", "hubot", "schmeide.jobs.*.7.1",
+			`"schmeide.jobs.*.7.1" is not a job of steward "hubot"`,
+		},
+		{
+			"a job stored on the asker's subject for another steward", "octocat", "schmeide.jobs.octocat.7.3",
+			`job "schmeide.jobs.octocat.7.3" belongs to "hubot", not "octocat"`,
+		},
+		{
+			"a pool job without a registration", "hubot", poolSubject,
+			`"` + poolSubject + `" is not a pool job "hubot" can take`,
+		},
+		{
+			"a pool job without the pool flag", "octocat", poolSubject,
+			`"` + poolSubject + `" is not a pool job "octocat" can take`,
+		},
+		{
+			"a job on the pool subject that is not a pool job", "octocat", jobSubjectPrefix + PoolName + ".7.4",
+			`"schmeide.jobs._pool.7.4" is not a pool job "octocat" can take`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token, err := q.tokenFor(t.Context(), tt.steward, tt.subject, mint)
+			if err == nil || err.Error() != tt.want || token.Token != "" {
+				t.Errorf("tokenFor(%s, %s) = %+v, %v; want %s", tt.steward, tt.subject, token, err, tt.want)
+			}
+		})
+	}
+	if len(minted) != 0 {
+		t.Fatalf("minted %+v for refused requests", minted)
+	}
+
+	// A pool steward gets the pool job only once it registers for the pool.
+	runner.publish(RegisterSubjectPrefix+"hubot", Registration{Steward: "hubot", Harnesses: []string{"fake"}, Host: "h", Pool: true})
+	eventually(t, func() bool { return tracker.poolRunner("hubot") })
+	if token, err := q.tokenFor(t.Context(), "hubot", poolSubject, mint); err != nil || token.Token != "ghs_monalisa" {
+		t.Fatalf("pool token = %+v, %v; want ghs_monalisa", token, err)
+	}
+	if token, err := q.tokenFor(t.Context(), "octocat", octocats.Subject(), mint); err != nil || token.Token != "ghs_octocat" {
+		t.Fatalf("own token = %+v, %v; want ghs_octocat", token, err)
+	}
+	if token, err := q.tokenFor(t.Context(), "hubot", octocats.Subject(), mint); err == nil {
+		t.Fatalf("pool steward got another steward's own job: %+v", token)
+	}
+}
+
+// TestRunnerCannotPublishOutsideItsAllowList connects as hubot and publishes
+// on subjects runnerPermissions does not grant it. Each must be refused.
+func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
+	q := startQueue(t)
+	hubot, errs := connectAs(t, q, "hubot", "hubot-token")
+	octocatConsumer := JobStream + "." + ConsumerName("octocat")
+	for _, subject := range []string{
+		TokenSubjectPrefix + "octocat",
+		TokenSubjectPrefix + PoolName,
+		RegisterSubjectPrefix + "octocat",
+		StatusSubjectPrefix + "octocat.7.1",
+		jobSubjectPrefix + "hubot.7.1",
+		jobSubjectPrefix + PoolName + ".7.1",
+		"$JS.API.CONSUMER.CREATE." + octocatConsumer + "." + JobFilter("octocat"),
+		"$JS.API.CONSUMER.CREATE." + JobStream + "." + ConsumerName("hubot") + "." + JobFilter("octocat"),
+		"$JS.API.CONSUMER.MSG.NEXT." + octocatConsumer,
+		"$JS.ACK." + octocatConsumer + ".1.1.1.1.1.0.0",
+		"$JS.API.STREAM.PURGE." + JobStream,
+		"$KV." + issueBucket + ".7.1",
+		InboxPrefix("octocat") + ".reply",
+	} {
+		if err := hubot.Publish(subject, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-errs:
+			if !errors.Is(err, nats.ErrPermissionViolation) || !strings.Contains(err.Error(), `"`+subject+`"`) {
+				t.Errorf("publish to %s: %v, want a permission violation for it", subject, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("hubot published to %s", subject)
+		}
+	}
+}
