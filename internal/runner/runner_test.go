@@ -22,6 +22,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/autobutler-org/schmeide/internal/repoconfig"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -779,6 +780,103 @@ func TestGateFailureOpensNoPR(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(filepath.Join(workDir, "worktrees")); len(left) != 0 {
 		t.Errorf("worktrees left behind: %v", left)
+	}
+}
+
+// TestGateTimeoutFailsTheJob uses a short flag so the test does not sleep
+// for the 30 minute default. The gate prints a marker and then sleeps; the
+// issue comment must say the gate timed out and must not echo that marker.
+func TestGateTimeoutFailsTheJob(t *testing.T) {
+	w := newWorld(t)
+	w.pushConfig(t, "gate = \"echo DO-NOT-ECHO; sleep 120\"\n")
+	h, _ := writes(map[string]string{"fix.txt": "x"})
+	r, _ := w.runner(t, "alice", h)
+	r.opts.GateTimeout = 200 * time.Millisecond
+	w.run(t, r)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working gate_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "the gate timed out") {
+		t.Errorf("issue comments = %q, want one saying the gate timed out", comments["7"])
+	}
+	if len(comments["7"]) == 1 && strings.Contains(comments["7"][0], "DO-NOT-ECHO") {
+		t.Errorf("issue comment echoes the gate output: %q", comments["7"][0])
+	}
+	assertNoMerge(t, w)
+	assertSettled(t, w)
+}
+
+// TestSessionTimeoutFailsTheJob cancels a harness session that blocks until
+// its context is done. The timeout is short so the test does not sleep for
+// the 2 hour default.
+func TestSessionTimeoutFailsTheJob(t *testing.T) {
+	w := newWorld(t)
+	w.maxAttempts = 1
+	h := &harness.Fake{RunFunc: func(ctx context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			return writeVerdict(req, "pass\n")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	r, _ := w.runner(t, "alice", h)
+	r.opts.SessionTimeout = 200 * time.Millisecond
+	w.run(t, r)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	_, comments := w.gh.snapshot()
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "session timed out") {
+		t.Errorf("issue comments = %q, want one saying the session timed out", comments["7"])
+	}
+	assertSettled(t, w)
+}
+
+func TestDeadlinesFollowConfigThenFlagThenDefault(t *testing.T) {
+	r := &Runner{opts: Options{GateTimeout: time.Hour, SessionTimeout: 3 * time.Hour}}
+	missing, err := repoconfig.Parse(repoconfig.Path, []byte("gate = \"true\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.deadlinesFor(missing); got.gate != time.Hour || got.session != 3*time.Hour {
+		t.Fatalf("missing key selected %+v, want the runner flags", got)
+	}
+	set, err := repoconfig.Parse(repoconfig.Path, []byte("gate = \"true\"\ngate_timeout = \"30m\"\nsession_timeout = \"30m\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.deadlinesFor(set); got.gate != 30*time.Minute || got.session != 30*time.Minute {
+		t.Fatalf("config of 30m selected %+v, want 30 minutes", got)
+	}
+	r.opts.GateTimeout = 0
+	r.opts.SessionTimeout = 0
+	if got := r.deadlinesFor(missing); got.gate != 30*time.Minute || got.session != 2*time.Hour {
+		t.Fatalf("missing key with no flag selected %+v, want 30m and 2h", got)
+	}
+}
+
+func TestTimeoutFlagDefaults(t *testing.T) {
+	fs, o, _, _ := runnerFlags()
+	if o.GateTimeout != 30*time.Minute || o.SessionTimeout != 2*time.Hour {
+		t.Fatalf("flag defaults are gate %v session %v, want 30m and 2h", o.GateTimeout, o.SessionTimeout)
+	}
+	if err := ParseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if o.GateTimeout != 30*time.Minute || o.SessionTimeout != 2*time.Hour {
+		t.Fatalf("parsed defaults are gate %v session %v, want 30m and 2h", o.GateTimeout, o.SessionTimeout)
+	}
+	help := Usage()
+	if !strings.Contains(help, "--gate-timeout") || !strings.Contains(help, "--session-timeout") || !strings.Contains(help, "default 30m") || !strings.Contains(help, "default 2h") {
+		t.Fatalf("help does not document the timeout defaults:\n%s", help)
 	}
 }
 

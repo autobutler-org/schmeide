@@ -15,6 +15,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/autobutler-org/schmeide/internal/repoconfig"
 )
 
 // DefaultNATSURL is where a control node on the same machine listens.
@@ -75,6 +76,8 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job's work may fail before that failure is final and reported on the issue. Handing the job back because a token could not be minted, or because the runner is shutting down, does not count. A gate failure is never retried.")
 	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets merge = \"factory\". The default is a person.")
+	fs.DurationVar(&o.SessionTimeout, "session-timeout", repoconfig.DefaultSessionTimeout, "How long one harness session may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config session_timeout overrides this when it is set. An empty config value keeps this flag. The default is 2h.")
+	fs.DurationVar(&o.GateTimeout, "gate-timeout", repoconfig.DefaultGateTimeout, "How long the gate command may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config gate_timeout overrides this when it is set. An empty config value keeps this flag. A gate timeout is not retried. The default is 30m.")
 	passEnv = fs.String("pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
 	claudeArgs = fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
 	return fs, o, passEnv, claudeArgs
@@ -131,6 +134,15 @@ fails before the pull request is open is tried again up to --max-attempts
 times. Handing a job back because a token could not be minted, or because the
 runner is shutting down, does not count as one of those tries. A gate failure
 is never retried.
+
+A harness session is canceled after --session-timeout (default 2h). The gate
+command is canceled after --gate-timeout (default 30m). Canceling either one
+kills its process group, fails the job, and comments on the issue that the
+session or the gate timed out. The comment does not include the command's
+output. The repo config may override either flag with session_timeout and
+gate_timeout, which are Go durations such as 30m. An empty value keeps the
+flag. A gate timeout is not retried. A session timeout before the pull
+request is open counts toward --max-attempts.
 
 A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_,
 and --pass-env, and does not see the runner's SCHMEIDE_* settings unless a

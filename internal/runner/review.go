@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
@@ -137,14 +138,14 @@ func fixMessage(issue int) string {
 // passes or the round limit is hit. spent rounds already ran on this pull
 // request before a redelivery. A pass returns an opened pull request. The
 // caller merges only when the repo config says to.
-func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string, spent int) outcome {
+func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string, spent int, limits deadlines) outcome {
 	rounds := r.opts.MaxReviewRounds
 	if rounds <= 0 {
 		rounds = defaultMaxReviewRounds
 	}
 	for round := spent + 1; round <= rounds; round++ {
 		r.report(job, StateReviewing, fmt.Sprintf("round %d of %d", round, rounds))
-		verdict, findings, err := r.reviewOnce(ctx, ws, job)
+		verdict, findings, err := r.reviewOnce(ctx, ws, job, limits.session)
 		if err != nil {
 			return reviewFailed(prURL, err)
 		}
@@ -155,7 +156,7 @@ func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate
 		if round == rounds {
 			return roundsExhausted(rounds, prURL)
 		}
-		if out, stop := r.applyFindings(ctx, ws, job, gate, prURL, findings); stop {
+		if out, stop := r.applyFindings(ctx, ws, job, gate, prURL, findings, limits); stop {
 			return out
 		}
 	}
@@ -163,9 +164,9 @@ func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate
 }
 
 // reviewOnce runs one fresh reviewer session and reads its verdict.
-func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job) (reviewVerdict, string, error) {
-	if err := r.harness.Run(ctx, r.session(ws.Dir(), reviewBrief(job))); err != nil {
-		return 0, "", fmt.Errorf("the %s reviewer session did not finish: %w", r.harness.Name(), err)
+func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job, sessionLimit time.Duration) (reviewVerdict, string, error) {
+	if err := finishSessionErr(r.harness.Name()+" reviewer", r.runSession(ctx, sessionLimit, r.session(ws.Dir(), reviewBrief(job)))); err != nil {
+		return 0, "", err
 	}
 	return readVerdict(ws.Dir())
 }
@@ -173,10 +174,10 @@ func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job) 
 // applyFindings runs one fresh worker session, the gate, and a push of the
 // same branch. stop is false when the open pull request now has the fix and
 // another review round should run.
-func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Job, gate, prURL, findings string) (outcome, bool) {
+func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Job, gate, prURL, findings string, limits deadlines) (outcome, bool) {
 	r.report(job, StateWorking, r.harness.Name())
-	if err := r.harness.Run(ctx, r.session(ws.Dir(), fixBrief(job, gate, findings))); err != nil {
-		return reviewFailed(prURL, fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err)), true
+	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), fixBrief(job, gate, findings)))); err != nil {
+		return reviewFailed(prURL, err), true
 	}
 	dropSessionNotes(ws.Dir())
 	changed, err := ws.Commit(ctx, fixMessage(job.Issue))
@@ -186,7 +187,7 @@ func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Jo
 	if !changed {
 		return reviewFailed(prURL, fmt.Errorf("the %s session made no changes for the review findings", r.harness.Name())), true
 	}
-	output, err := ws.Run(ctx, gate)
+	output, err := r.runGate(ctx, ws, limits.gate, gate)
 	if err != nil {
 		// The fix stays unpushed, and the review does not continue.
 		return r.gateOutcome(job, gate, prURL, err, output), true
