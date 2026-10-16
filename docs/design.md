@@ -310,9 +310,10 @@ Follow-ups that landed with the slice:
 - **#15.** A job that fails for a reason other than the gate is tried again, up
   to `--max-attempts` (default 3). The runner counts those work failures
   itself, and a token hand-back or a shutdown does not consume an attempt. The
-  wait before the next try is 30 seconds and has no flag. A gate failure is
-  final. A pull request on a branch named `<issue number>_*` suppresses a
-  second PR.
+  count is kept in memory, and a restarted runner starts the attempt count
+  over. The wait before the next try is 30 seconds and has no flag. A gate
+  failure is final. A pull request on a branch named `<issue number>_*`
+  suppresses a second PR.
 - **#16.** Webhooks are limited to an allowlist of orgs or App installations.
 - **Pull request #30.** Runner credentials are scoped per steward, the job
   carries the issue text from the event that created it, the harness session
