@@ -11,6 +11,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/autobutler-org/schmeide/internal/repoconfig"
 )
 
 const (
@@ -163,9 +164,32 @@ func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate
 	return roundsExhausted(rounds, prURL)
 }
 
-// reviewOnce runs one fresh reviewer session and reads its verdict.
+// reviewer is the harness for a review session: the first ready harness other
+// than the one that wrote the change, or the writer when no other is ready.
+// opts.Harnesses is harness.All() with the runner's harness args applied.
+func (r *Runner) reviewer(ctx context.Context) harness.Harness {
+	for _, h := range r.opts.Harnesses {
+		if h != r.harness && h.Check(ctx) == nil {
+			return h
+		}
+	}
+	return r.harness
+}
+
+// reviewOnce runs one fresh reviewer session and reads its verdict. The
+// deadline matches runSession's.
 func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job, sessionLimit time.Duration) (reviewVerdict, string, error) {
-	if err := finishSessionErr(r.harness.Name()+" reviewer", r.runSession(ctx, sessionLimit, r.session(ws.Dir(), reviewBrief(job)))); err != nil {
+	h := r.reviewer(ctx)
+	if sessionLimit <= 0 {
+		sessionLimit = repoconfig.DefaultSessionTimeout
+	}
+	sessionCtx, cancel := context.WithTimeout(ctx, sessionLimit)
+	defer cancel()
+	err := h.Run(sessionCtx, r.session(ws.Dir(), reviewBrief(job)))
+	if err != nil && errors.Is(sessionCtx.Err(), context.DeadlineExceeded) {
+		err = timeoutError{what: "the " + h.Name() + " reviewer session"}
+	}
+	if err := finishSessionErr(h.Name()+" reviewer", err); err != nil {
 		return 0, "", err
 	}
 	return readVerdict(ws.Dir())
