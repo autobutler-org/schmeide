@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/autobutler-org/schmeide/internal/refguard"
 	"github.com/autobutler-org/schmeide/internal/secretscan"
 )
 
@@ -63,7 +64,8 @@ var _ Workspace = (*worktree)(nil)
 
 // newWorktree fetches the base branch into the runner's clone of the
 // repository and checks it out on the job's branch. Anything an earlier,
-// interrupted attempt left behind is replaced.
+// interrupted attempt left behind is replaced. The worktree gets a hook that
+// refuses to move any other job's branch; see [refguard].
 func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	w := &worktree{
 		spec:    s,
@@ -89,6 +91,12 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	}
 	for _, args := range [][]string{
 		{"init", "-q", "--bare"},
+		// worktreeConfig lets the ref guard's hooks path live in the job
+		// worktree's own config. With it on, linked worktrees read core.bare
+		// from the shared config, so the clone keeps core.bare in its own.
+		{"config", "extensions.worktreeConfig", "true"},
+		{"config", "--worktree", "core.bare", "true"},
+		{"config", "core.bare", "false"},
 		{"worktree", "prune"},
 		{"fetch", "-q", s.url, "+refs/heads/" + s.base + ":" + w.baseRef},
 		{"worktree", "add", "-q", "-B", s.branch, w.dir, w.baseRef},
@@ -96,6 +104,13 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		if _, err := w.git(ctx, w.repoDir, args...); err != nil {
 			return nil, err
 		}
+	}
+	hooks, err := refguard.Install(w.dir, s.branch)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.git(ctx, w.dir, "config", "--worktree", "core.hooksPath", hooks); err != nil {
+		return nil, err
 	}
 	return w, nil
 }

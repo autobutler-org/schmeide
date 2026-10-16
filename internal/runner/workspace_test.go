@@ -136,3 +136,28 @@ func remoteHasBranch(t *testing.T, bare, branch string) bool {
 	cmd := exec.CommandContext(t.Context(), "git", "--git-dir", bare, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
 }
+
+func TestNewWorktreeGuardsOtherJobBranches(t *testing.T) {
+	w, _ := newPushFixture(t)
+	git(t, w.repoDir, "branch", "2_two", w.baseRef)
+	two := git(t, w.repoDir, "rev-parse", "2_two")
+	if err := os.WriteFile(filepath.Join(w.Dir(), "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := w.Commit(t.Context(), "add a"); err != nil || !changed {
+		t.Fatalf("Commit = %v, %v; want a commit on the job branch", changed, err)
+	}
+	if out := git(t, w.Dir(), "ls-files"); strings.Contains(out, ".schmeide-refguard") {
+		t.Fatalf("the hook was committed: %s", out)
+	}
+	if _, err := w.git(t.Context(), w.Dir(), "branch", "-f", "2_two", "HEAD"); err == nil {
+		t.Fatal("the job worktree moved 2_two")
+	}
+	if got := git(t, w.repoDir, "rev-parse", "2_two"); got != two {
+		t.Fatalf("2_two moved to %s", got)
+	}
+	if out, err := w.git(t.Context(), w.repoDir, "config", "core.hooksPath"); err == nil {
+		t.Fatalf("the clone has core.hooksPath %s", out)
+	}
+	git(t, w.repoDir, "branch", "-f", "2_two", w.spec.branch)
+}
