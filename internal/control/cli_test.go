@@ -138,3 +138,20 @@ func TestMainHelpAndBadFlag(t *testing.T) {
 		t.Errorf("bad flag wrote to stdout: %q", stdout.String())
 	}
 }
+
+func TestInitConfigParses(t *testing.T) {
+	for _, s := range controlSettings {
+		t.Setenv(s.env(), "")
+	}
+	file := filepath.Join(t.TempDir(), "control.conf")
+	if err := os.WriteFile(file, []byte(InitConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseControl([]string{"--config", file})
+	if err != nil {
+		t.Fatalf("init control config rejected: %v", err)
+	}
+	if got.WebhookSecret != "replace-me" || got.AllowedOrgs == "" {
+		t.Errorf("placeholders missing: %+v", got)
+	}
+}

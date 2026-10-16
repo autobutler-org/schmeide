@@ -11,7 +11,7 @@ const bashCompletion = `# bash completion for schmeide
 _schmeide() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "control runner doctor status completion -h --help" -- "$cur"))
+    COMPREPLY=($(compgen -W "control runner doctor status init completion -h --help" -- "$cur"))
   elif [ "${COMP_WORDS[1]}" = completion ]; then
     COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
   else
