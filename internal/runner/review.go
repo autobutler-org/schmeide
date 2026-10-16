@@ -198,12 +198,19 @@ func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Jo
 	return outcome{}, false
 }
 
-// session is one fresh harness session in the job's worktree.
+// session is one fresh harness session in the job's worktree. A workspace
+// with Go caches shares them with the session.
 func (r *Runner) session(dir, prompt string) harness.Request {
+	env := harnessEnv(os.Environ(), r.opts.PassEnv)
+	if ws, ok := openWorkspaces.Load(dir); ok {
+		if c, ok := ws.(goCacher); ok {
+			env = c.GoCacheEnv(env)
+		}
+	}
 	return harness.Request{
 		Dir:    dir,
 		Prompt: prompt,
-		Env:    harnessEnv(os.Environ(), r.opts.PassEnv),
+		Env:    env,
 		Output: r.opts.Output,
 	}
 }

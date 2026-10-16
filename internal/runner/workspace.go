@@ -54,16 +54,22 @@ type worktreeSpec struct {
 
 // worktree is the [Workspace] backed by a git worktree on the host.
 type worktree struct {
-	spec          worktreeSpec
-	repoDir, dir  string
+	spec         worktreeSpec
+	repoDir, dir string
+	// cacheDir holds the Go build and module caches shared by the
+	// repository's jobs.
+	cacheDir      string
 	env           []string
 	baseRef, head string
 }
 
-var _ Workspace = (*worktree)(nil)
+var (
+	_ Workspace = (*worktree)(nil)
+	_ goCacher  = (*worktree)(nil)
+)
 
 // newWorktree fetches the base branch into the runner's clone of the
-// repository and checks it out on the job's branch. Anything an earlier,
+// repository, creating the clone only the first time, and checks it out on the job's branch. Anything an earlier,
 // interrupted attempt left behind is replaced. The worktree gets a hook that
 // refuses to move any other job's branch; see [refguard].
 func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
@@ -83,14 +89,24 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 			"GIT_COMMITTER_NAME="+s.gitName, "GIT_COMMITTER_EMAIL="+s.gitEmail,
 		),
 	}
+	// GOCACHE must be absolute, and --work-dir may not be.
+	cacheDir, err := filepath.Abs(filepath.Join(s.workDir, "cache", s.repoID))
+	if err != nil {
+		return nil, err
+	}
+	w.cacheDir = cacheDir
 	if err := os.MkdirAll(w.repoDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create the work directory: %w; check that --work-dir is writable", err)
 	}
 	if err := os.RemoveAll(w.dir); err != nil {
 		return nil, fmt.Errorf("clear a leftover worktree: %w", err)
 	}
+	if _, err := os.Stat(filepath.Join(w.repoDir, "HEAD")); errors.Is(err, os.ErrNotExist) {
+		if _, err := w.git(ctx, w.repoDir, "init", "-q", "--bare"); err != nil {
+			return nil, err
+		}
+	}
 	for _, args := range [][]string{
-		{"init", "-q", "--bare"},
 		// worktreeConfig lets the ref guard's hooks path live in the job
 		// worktree's own config. With it on, linked worktrees read core.bare
 		// from the shared config, so the clone keeps core.bare in its own.
@@ -112,6 +128,7 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	if _, err := w.git(ctx, w.dir, "config", "--worktree", "core.hooksPath", hooks); err != nil {
 		return nil, err
 	}
+	openWorkspaces.Store(w.dir, w)
 	return w, nil
 }
 
@@ -153,7 +170,12 @@ func (w *worktree) Commit(ctx context.Context, message string) (bool, error) {
 func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = w.dir
-	cmd.Env = w.spec.env
+	// A nil spec env means the gate inherits the runner's environment.
+	env := w.spec.env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = w.GoCacheEnv(slices.Clone(env))
 	// Its own process group, so a canceled gate takes its children with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -161,6 +183,9 @@ func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// GoCacheEnv implements [goCacher].
+func (w *worktree) GoCacheEnv(env []string) []string { return goCacheEnv(env, w.cacheDir) }
 
 // Push implements [Workspace]. A missing remote branch, or one whose head is
 // an ancestor of HEAD, is updated without force. That is how a review round
@@ -259,6 +284,7 @@ func (w *worktree) Close() error {
 	// Cleanup still has to happen when the job's context was canceled.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	openWorkspaces.Delete(w.dir)
 	_, rmErr := w.git(ctx, w.repoDir, "worktree", "remove", "--force", w.dir)
 	_, brErr := w.git(ctx, w.repoDir, "branch", "-q", "-D", w.spec.branch)
 	return errors.Join(rmErr, brErr)
