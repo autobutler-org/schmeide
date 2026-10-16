@@ -14,6 +14,7 @@ import (
 	"sync"
 	"text/tabwriter"
 
+	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -70,6 +71,8 @@ type Registration struct {
 	// Pool is true only when the runner was started with --pool. Such a
 	// runner may take a job whose steward has no registration.
 	Pool bool `json:"pool,omitempty"`
+	// Version is the runner's release.Version.
+	Version string `json:"version,omitempty"`
 }
 
 // Tracker records what runners report: who registered and where each job
@@ -175,7 +178,12 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 		log.Warn("dropping a malformed runner registration", "subject", subject, "err", err)
 		return
 	}
-	log.Info("runner registered", "steward", reg.Steward, "host", reg.Host, "harnesses", strings.Join(reg.Harnesses, ","), "pool", reg.Pool)
+	log.Info("runner registered", "steward", reg.Steward, "host", reg.Host, "harnesses", strings.Join(reg.Harnesses, ","), "pool", reg.Pool, "version", reg.Version)
+	// A skewed runner is still accepted; the warning is for the operator.
+	if release.Skewed(reg.Version, release.Version) {
+		log.Warn("runner version differs from the control node; upgrade one so they match",
+			"steward", reg.Steward, "host", reg.Host, "runner_version", reg.Version, "control_version", release.Version)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// A restarted runner registers again; keep one entry per steward and host.

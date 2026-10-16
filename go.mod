@@ -7,7 +7,10 @@ require (
 	github.com/nats-io/nats.go v1.54.0
 )
 
-require github.com/pelletier/go-toml/v2 v2.4.3
+require (
+	github.com/pelletier/go-toml/v2 v2.4.3
+	golang.org/x/mod v0.42.0
+)
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
@@ -230,7 +233,6 @@ require (
 	golang.org/x/arch v0.28.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260209203927-2842357ff358 // indirect
-	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/telemetry v0.0.0-20261010193011-f71dc92da45e // indirect
