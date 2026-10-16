@@ -22,6 +22,7 @@ Commands:
   runner      Run a runner: take your jobs from the control node and open a PR for each.
   doctor      Check that this machine is ready to run a runner.
   status      Show registered runners and queued or running jobs.
+  init        Write a repo config and a control node config in this directory.
   completion  Print a shell completion script for bash, zsh, or fish.
 
 Run 'schmeide <command> --help' for a command's flags.
@@ -42,6 +43,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return doctor.Main(args[1:], stdout, stderr)
 	case "status":
 		return control.StatusMain(args[1:], stdout, stderr)
+	case "init":
+		return initMain(args[1:], stdout, stderr)
 	case "completion":
 		return completionMain(args[1:], stdout, stderr)
 	}

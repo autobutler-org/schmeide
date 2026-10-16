@@ -213,3 +213,16 @@ func CheckPrivateKeyFileMode(path string) error {
 	}
 	return nil
 }
+
+// InitConfig is the control config that `schmeide init` writes. Every
+// required setting holds a placeholder to replace.
+const InitConfig = `# schmeide control node config. This is an operator config, not a repo file:
+# replace every "replace-me" with a real secret and do not commit the result.
+# Pass it with 'schmeide control --config .schmeide/control.conf'.
+http-addr = :8080
+webhook-secret = replace-me
+runner-tokens = replace-me:replace-me
+github-app-id = replace-me
+github-app-private-key-file = replace-me
+allowed-orgs = replace-me
+`
