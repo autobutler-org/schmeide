@@ -110,6 +110,15 @@ under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
 Step 9, merging, has shipped. Step 4, pool fallback, has shipped. See
 [Routing](#routing).
 
+Before the first job in a new work directory and origin, the runner asks once
+on its terminal. A yes is stored under the user config directory, in
+`schmeide/trust`. `SCHMEIDE_TRUST=1` lets an unattended run proceed and records
+nothing.
+
+A second job for the same repository reuses the bare clone under the work
+directory. The gate and the harness session share that repository's Go build
+cache and module cache. Removing the work directory removes the cache.
+
 For how a job fails and what is not retried, see
 [FAILURE-MODES.md](FAILURE-MODES.md).
 

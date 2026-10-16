@@ -32,6 +32,11 @@ again.
   failed attempt. So do a git error and a GitHub error before the pull request
   is open.
 
+A non-interactive run with no recorded decision for the work directory and
+origin, and without `SCHMEIDE_TRUST=1`, refuses the job before it creates a
+worktree. That refusal is a failed work outcome, so the count above includes
+it. The in-memory counter does not treat it specially.
+
 A pull request already open on a branch starting with `<issue number>_`, open
 or closed, keeps a retried job from opening a second one.
 
