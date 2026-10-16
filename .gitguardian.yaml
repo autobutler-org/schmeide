@@ -1,0 +1,9 @@
+# Credential shapes: PEM private key, GitHub token (ghp_ or github_pat_),
+# GitLab token (glpat-), AWS access key (AKIA), and JWT.
+version: 2
+
+secret:
+  show_secrets: false
+  ignored_detectors: []
+  ignored_matches: []
+  ignored_paths: []
