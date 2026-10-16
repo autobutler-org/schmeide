@@ -23,6 +23,7 @@ import (
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
+	"github.com/autobutler-org/schmeide/internal/testutil/fakegh"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -46,196 +47,7 @@ func git(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-type pull struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-	Head  string `json:"head"`
-	Base  string `json:"base"`
-	URL   string `json:"html_url"`
-	// State is "open" or "closed". Empty means open, including a pull request
-	// created through this server, which does not send a state.
-	State string `json:"state,omitempty"`
-}
-
-// reply is the pull request as GitHub returns it, where head is an object.
-func (p pull) reply() map[string]any {
-	state := p.State
-	if state == "" {
-		state = "open"
-	}
-	return map[string]any{"html_url": p.URL, "state": state, "head": map[string]string{"ref": p.Head}, "base": map[string]string{"ref": p.Base}}
-}
-
-// fakeGitHub is the part of the GitHub REST API a runner uses, for testRepo.
-type fakeGitHub struct {
-	t *testing.T
-	// onPR, when set, is called after a pull request is created.
-	onPR func()
-
-	mu       sync.Mutex
-	pulls    []pull
-	comments map[string][]string // by issue number
-	calls    []string
-	// checks is what a list of check runs returns for any head commit.
-	checks []ghCheckRun
-	// merges is how many merge calls landed, and mergeMethod is the last one.
-	merges      int
-	mergeMethod string
-	// blockedBy is the issue-dependencies blocked-by list for an issue.
-	// A missing key is an empty list.
-	blockedBy map[int][]ghIssue
-}
-
-func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {
-		f.t.Errorf("%s %s: Authorization = %q, want the job's token", r.Method, r.URL, got)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
-	path := strings.TrimPrefix(r.URL.Path, "/repos/"+testRepo)
-	reply := any(nil)
-	switch {
-	case r.Method == http.MethodGet && path == "":
-		reply = map[string]string{"default_branch": "main"}
-	case r.Method == http.MethodGet && path == "/pulls":
-		head := r.URL.Query().Get("head")
-		state := r.URL.Query().Get("state")
-		found := []map[string]any{}
-		for _, p := range f.pulls {
-			if head != "" && head != "o:"+p.Head {
-				continue
-			}
-			if !pullVisible(p.State, state) {
-				continue
-			}
-			found = append(found, p.reply())
-		}
-		reply = found
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/issues/") && strings.HasSuffix(path, "/dependencies/blocked_by"):
-		rest := strings.TrimPrefix(path, "/issues/")
-		num, tail, ok := strings.Cut(rest, "/")
-		n, err := strconv.Atoi(num)
-		if !ok || tail != "dependencies/blocked_by" || err != nil {
-			f.t.Errorf("unexpected GitHub call %s %s", r.Method, r.URL)
-			http.NotFound(w, r)
-			return
-		}
-		issues := f.blockedBy[n]
-		if issues == nil {
-			issues = []ghIssue{}
-		}
-		reply = issues
-	case r.Method == http.MethodPost && path == "/pulls":
-		var p pull
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			f.t.Error(err)
-		}
-		p.URL = fmt.Sprintf("https://github.test/o/r/pull/%d", len(f.pulls)+1)
-		f.pulls = append(f.pulls, p)
-		reply = p.reply()
-		if f.onPR != nil {
-			f.onPR()
-		}
-	case r.Method == http.MethodGet && strings.HasSuffix(path, "/comments"):
-		// Every comment here is the app's own, so each is a bot's.
-		found := []map[string]any{}
-		for _, body := range f.comments[strings.Split(path, "/")[2]] {
-			found = append(found, map[string]any{"body": body, "user": map[string]string{"type": "Bot"}})
-		}
-		reply = found
-	case r.Method == http.MethodPost && strings.HasSuffix(path, "/comments"):
-		var c struct {
-			Body string `json:"body"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			f.t.Error(err)
-		}
-		issue := strings.Split(path, "/")[2]
-		f.comments[issue] = append(f.comments[issue], c.Body)
-		reply = c
-	case r.Method == http.MethodGet && strings.HasSuffix(path, "/check-runs"):
-		runs := f.checks
-		if runs == nil {
-			runs = []ghCheckRun{}
-		}
-		reply = map[string]any{"total_count": len(runs), "check_runs": runs}
-	case r.Method == http.MethodPut && strings.HasSuffix(path, "/merge"):
-		var body struct {
-			Method string `json:"merge_method"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			f.t.Error(err)
-		}
-		f.merges++
-		f.mergeMethod = body.Method
-		reply = map[string]any{"merged": true}
-	default:
-		f.t.Errorf("unexpected GitHub call %s %s", r.Method, r.URL)
-		http.NotFound(w, r)
-		return
-	}
-	_ = json.NewEncoder(w).Encode(reply)
-}
-
-// pullVisible reports whether a pull request of pullState belongs in a list
-// whose state query is query. "all" and an empty query return every state.
-// An empty pullState is open.
-func pullVisible(pullState, query string) bool {
-	if query == "" || query == "all" {
-		return true
-	}
-	if pullState == "" {
-		pullState = "open"
-	}
-	return pullState == query
-}
-
-func (f *fakeGitHub) addBlocker(issue int, blocker ghIssue) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.blockedBy == nil {
-		f.blockedBy = map[int][]ghIssue{}
-	}
-	f.blockedBy[issue] = append(f.blockedBy[issue], blocker)
-}
-
-func (f *fakeGitHub) seedPull(p pull) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if p.URL == "" {
-		p.URL = fmt.Sprintf("https://github.test/o/r/pull/%d", len(f.pulls)+1)
-	}
-	f.pulls = append(f.pulls, p)
-}
-
-func (f *fakeGitHub) snapshot() ([]pull, map[string][]string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	comments := map[string][]string{}
-	for k, v := range f.comments {
-		comments[k] = append([]string(nil), v...)
-	}
-	return append([]pull(nil), f.pulls...), comments
-}
-
-func (f *fakeGitHub) callsSnapshot() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.calls)
-}
-
-func (f *fakeGitHub) setChecks(runs []ghCheckRun) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.checks = runs
-}
-
-func (f *fakeGitHub) mergeSnapshot() (int, string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.merges, f.mergeMethod
-}
+type pull = fakegh.Pull
 
 type statusMsg struct {
 	subject string
@@ -247,7 +59,7 @@ type statusMsg struct {
 type world struct {
 	queue    *control.Queue
 	natsURL  string
-	gh       *fakeGitHub
+	gh       *fakegh.Server
 	apiURL   string
 	gitRoot  string
 	bare     string
@@ -282,7 +94,7 @@ func newWorld(t *testing.T) *world {
 	w := &world{
 		queue:    queue,
 		natsURL:  "nats://" + addr,
-		gh:       &fakeGitHub{t: t, comments: map[string][]string{}},
+		gh:       fakegh.New(t, testRepo, testToken),
 		gitRoot:  t.TempDir(),
 		statuses: make(chan statusMsg, 64),
 	}
@@ -294,9 +106,7 @@ func newWorld(t *testing.T) *world {
 	}, log); err != nil {
 		t.Fatal(err)
 	}
-	api := httptest.NewServer(w.gh)
-	t.Cleanup(api.Close)
-	w.apiURL = api.URL
+	w.apiURL = w.gh.URL
 
 	w.bare = filepath.Join(w.gitRoot, "o", "r.git")
 	git(t, "", "init", "-q", "--bare", "-b", "main", w.bare)
@@ -643,11 +453,11 @@ func TestJobOpensPR(t *testing.T) {
 		t.Errorf("commit author = %q, want the app's bot", author)
 	}
 
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want exactly one", pulls)
 	}
-	want := pull{Title: "7: fix the thing", Body: "It was broken.\n\nCloses #7", Head: branch, Base: "main", URL: pulls[0].URL}
+	want := pull{Number: 1, State: "open", Title: "7: fix the thing", Body: "It was broken.\n\nCloses #7", Head: branch, Base: "main", URL: pulls[0].URL}
 	if pulls[0] != want {
 		t.Errorf("pull request = %+v, want %+v", pulls[0], want)
 	}
@@ -682,7 +492,7 @@ func TestLintGateMismatchCommentsWithoutFailingTheJob(t *testing.T) {
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
 		t.Fatalf("states = %s, want %s", got, want)
 	}
-	_, comments := w.gh.snapshot()
+	_, comments := w.gh.Snapshot()
 	var warned bool
 	for _, body := range comments["7"] {
 		if strings.Contains(body, "check") && strings.Contains(body, gate) {
@@ -799,7 +609,7 @@ func TestGateFailureOpensNoPR(t *testing.T) {
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working gate_failed]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
@@ -833,7 +643,7 @@ func TestGateTimeoutFailsTheJob(t *testing.T) {
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working gate_failed]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
@@ -868,7 +678,7 @@ func TestSessionTimeoutFailsTheJob(t *testing.T) {
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working failed]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
-	_, comments := w.gh.snapshot()
+	_, comments := w.gh.Snapshot()
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "session timed out") {
 		t.Errorf("issue comments = %q, want one saying the session timed out", comments["7"])
 	}
@@ -931,7 +741,7 @@ func TestRunnerOnlyTakesItsStewardsJobs(t *testing.T) {
 	if got := sessions.Load(); got != 2 {
 		t.Errorf("sessions = %d, want 2: a worker and a reviewer for alice's job only", got)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" || len(comments["8"]) != 0 {
 		t.Errorf("pulls = %+v, comments = %v; want only alice's issue 7 touched", pulls, comments)
 	}
@@ -965,7 +775,7 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			})
 			h1, _ := writes(map[string]string{"fix.txt": "x"})
 			if tt.afterPR {
-				w.gh.onPR = die
+				w.gh.OnPR(die)
 				// The dead runner never finishes its review.
 				work := h1.RunFunc
 				h1.RunFunc = func(ctx context.Context, req harness.Request) error {
@@ -1001,7 +811,7 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			if got := sessions.Load(); got != tt.wantSessions {
 				t.Errorf("second runner ran %d sessions, want %d", got, tt.wantSessions)
 			}
-			pulls, comments := w.gh.snapshot()
+			pulls, comments := w.gh.Snapshot()
 			if len(pulls) != 1 {
 				t.Errorf("pull requests = %+v, want exactly one", pulls)
 			}
@@ -1032,7 +842,7 @@ func TestFailedJobIsRetried(t *testing.T) {
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working retrying claimed working reviewing pr_opened]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want exactly one", pulls)
 	}
@@ -1060,7 +870,7 @@ func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	if got := sessions.Load(); got != defaultMaxAttempts {
 		t.Errorf("sessions = %d, want %d: the retries are bounded", got, defaultMaxAttempts)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
@@ -1101,7 +911,7 @@ func TestTokenHandBackDoesNotConsumeAttempts(t *testing.T) {
 	if got := w.await(t, "alice", 7); !slices.Equal(got, want) {
 		t.Errorf("states = %v, want %v", got, want)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want one after the retried work failure", pulls)
 	}
@@ -1157,7 +967,7 @@ func TestShutdownHandBackDoesNotConsumeAttempts(t *testing.T) {
 	if got := fmt.Sprint(states); got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want one after the retried work failure", pulls)
 	}
@@ -1240,7 +1050,7 @@ func writeVerdict(req harness.Request, body string) error {
 
 func assertNoMerge(t *testing.T, w *world) {
 	t.Helper()
-	for _, call := range w.gh.callsSnapshot() {
+	for _, call := range w.gh.Calls() {
 		if strings.Contains(strings.ToLower(call), "merge") {
 			t.Errorf("merge was attempted: %s", call)
 		}
@@ -1264,7 +1074,7 @@ const testGateConfig = "gate = \"test ! -e broken\"\n"
 func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
 	w := newWorld(t)
 	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
-	w.gh.setChecks([]ghCheckRun{
+	w.gh.SetChecks([]fakegh.CheckRun{
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "success"},
 	})
@@ -1276,21 +1086,21 @@ func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	assertSettled(t, w)
-	merges, method := w.gh.mergeSnapshot()
+	merges, method := w.gh.Merges()
 	if merges != 1 || method != "merge" {
 		t.Errorf("merges = %d method %q, want one merge commit", merges, method)
 	}
 	sha := git(t, w.bare, "rev-parse", "7_fix-the-thing")
 	sawCheck := false
-	for _, call := range w.gh.callsSnapshot() {
+	for _, call := range w.gh.Calls() {
 		if strings.Contains(call, "/commits/"+sha+"/check-runs") {
 			sawCheck = true
 		}
 	}
 	if !sawCheck {
-		t.Errorf("check runs were not read for %s: %v", sha, w.gh.callsSnapshot())
+		t.Errorf("check runs were not read for %s: %v", sha, w.gh.Calls())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the one that was merged", pulls)
 	}
@@ -1302,7 +1112,7 @@ func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
 func TestFactoryMergeWhenACheckFails(t *testing.T) {
 	w := newWorld(t)
 	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
-	w.gh.setChecks([]ghCheckRun{
+	w.gh.SetChecks([]fakegh.CheckRun{
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "failure"},
 	})
@@ -1314,16 +1124,53 @@ func TestFactoryMergeWhenACheckFails(t *testing.T) {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	assertSettled(t, w)
-	if merges, _ := w.gh.mergeSnapshot(); merges != 0 {
+	if merges, _ := w.gh.Merges(); merges != 0 {
 		t.Errorf("merges = %d, want none", merges)
 	}
 	assertNoMerge(t, w)
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
 	}
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], "failure") || !strings.Contains(comments["7"][0], pulls[0].URL) {
 		t.Errorf("issue comments = %q, want the failed check and the open pull request", comments["7"])
+	}
+}
+
+// TestFactoryMergeRefusedByGitHub has green checks but a merge GitHub
+// refuses, which must fail the job rather than report it merged.
+func TestFactoryMergeRefusedByGitHub(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		says   string
+	}{
+		{http.StatusMethodNotAllowed, "Pull Request is not mergeable"},
+		{http.StatusConflict, "Head branch was modified"},
+	} {
+		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
+			w := newWorld(t)
+			w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+			w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
+			w.gh.FailMerge(tt.status)
+			h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+			w.start(t, "alice", h)
+			w.publish(t, "alice", 7)
+
+			if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+				t.Errorf("states = %s, want %s", got, want)
+			}
+			assertSettled(t, w)
+			if merges, _ := w.gh.Merges(); merges != 0 {
+				t.Errorf("merges = %d, want none", merges)
+			}
+			pulls, comments := w.gh.Snapshot()
+			if len(pulls) != 1 || pulls[0].State != "open" {
+				t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+			}
+			if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], strconv.Itoa(tt.status)) || !strings.Contains(comments["7"][0], tt.says) {
+				t.Errorf("issue comments = %q, want a failure naming GitHub's %d", comments["7"], tt.status)
+			}
+		})
 	}
 }
 
@@ -1341,7 +1188,7 @@ func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	}
 	assertSettled(t, w)
 	assertNoMerge(t, w)
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
 	}
@@ -1365,7 +1212,7 @@ func TestMergeNopeIsAConfigError(t *testing.T) {
 	if sessions.Load() != 0 {
 		t.Errorf("sessions = %d, want none for a config error", sessions.Load())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
@@ -1489,7 +1336,7 @@ func TestReviewPassesOnFirstRound(t *testing.T) {
 	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", "7_fix-the-thing"); strings.Contains(files, "review.md") {
 		t.Errorf("the verdict file was committed: %s", files)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" {
 		t.Fatalf("pull requests = %+v, want one on the job branch", pulls)
 	}
@@ -1541,7 +1388,7 @@ func TestReviewChangesThenPassUpdatesSameBranch(t *testing.T) {
 	if tip := git(t, w.bare, "log", "-1", "--format=%s", branch); tip != "Apply review feedback for #7" {
 		t.Errorf("tip commit = %q, want the review fix", tip)
 	}
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != branch {
 		t.Errorf("pull requests = %+v, want the same branch updated, not a second pull request", pulls)
 	}
@@ -1570,7 +1417,7 @@ func TestReviewExhaustingRoundsFailsAndDoesNotMerge(t *testing.T) {
 	if reviews.Load() != int32(defaultMaxReviewRounds) || workers.Load() != int32(defaultMaxReviewRounds) {
 		t.Errorf("workers = %d, reviews = %d, want %d of each: a fix follows every rejection except the last", workers.Load(), reviews.Load(), defaultMaxReviewRounds)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the original pull request left open", pulls)
 	}
@@ -1608,7 +1455,7 @@ func TestReviewFixGateFailureStopsTheReview(t *testing.T) {
 	if workers.Load() != 2 || reviews.Load() != 1 {
 		t.Errorf("workers = %d, reviews = %d, want no review after the gate failure", workers.Load(), reviews.Load())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
 	}
@@ -1652,7 +1499,7 @@ func TestReviewerSessionFailureIsFinal(t *testing.T) {
 	if workers.Load() != 1 || reviews.Load() != 1 {
 		t.Errorf("workers = %d, reviews = %d, want no retry and no fix session", workers.Load(), reviews.Load())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
 	}
@@ -1694,7 +1541,7 @@ func TestForeignJobBranchCommitIsKept(t *testing.T) {
 	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", branch); strings.Contains(files, "fix.txt") {
 		t.Errorf("the runner's commit was pushed: %s", files)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
@@ -1815,7 +1662,7 @@ func TestUnregisteredStewardIsWorkedByAPoolRunner(t *testing.T) {
 	if got := sessions.Load(); got != 2 {
 		t.Errorf("sessions = %d, want 2", got)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "8_fix-the-thing" || len(comments["8"]) != 1 {
 		t.Errorf("pulls = %+v, comments = %v; want carol's issue worked like any other job", pulls, comments)
 	}
@@ -1840,7 +1687,7 @@ func TestRunnerWithoutPoolLeavesThePoolJob(t *testing.T) {
 	if got := sessions.Load(); got != 2 {
 		t.Errorf("sessions = %d, want 2 for alice's job only", got)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "7_fix-the-thing" || len(comments["8"]) != 0 {
 		t.Errorf("pulls = %+v, comments = %v; want only alice's issue touched", pulls, comments)
 	}
@@ -1898,7 +1745,7 @@ func TestPoolRunnersShareOneJob(t *testing.T) {
 	if got := s1.Load() + s2.Load(); got != 2 {
 		t.Errorf("sessions = %d + %d, want 2 between the two pool runners", s1.Load(), s2.Load())
 	}
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	if len(pulls) != 1 || pulls[0].Head != "9_fix-the-thing" {
 		t.Errorf("pulls = %+v, want exactly one", pulls)
 	}
@@ -1909,7 +1756,7 @@ func assertBlockedBeforeOpen(t *testing.T, w *world, issue int) {
 	blocked, opened := -1, -1
 	needle := fmt.Sprintf("GET /repos/%s/issues/%d/dependencies/blocked_by", testRepo, issue)
 	open := "POST /repos/" + testRepo + "/pulls"
-	for i, call := range w.gh.callsSnapshot() {
+	for i, call := range w.gh.Calls() {
 		if blocked < 0 && call == needle {
 			blocked = i
 		}
@@ -1918,10 +1765,10 @@ func assertBlockedBeforeOpen(t *testing.T, w *world, issue int) {
 		}
 	}
 	if blocked < 0 {
-		t.Errorf("GitHub was not asked which issues block #%d: %v", issue, w.gh.callsSnapshot())
+		t.Errorf("GitHub was not asked which issues block #%d: %v", issue, w.gh.Calls())
 	}
 	if opened >= 0 && blocked > opened {
-		t.Errorf("blocked-by was requested after the pull request was opened: %v", w.gh.callsSnapshot())
+		t.Errorf("blocked-by was requested after the pull request was opened: %v", w.gh.Calls())
 	}
 }
 
@@ -1966,7 +1813,7 @@ func TestNoDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
 		t.Fatalf("states = %v, want a pull request", states)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	got, n := pullByHead(pulls, branch)
 	if n != 1 {
 		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
@@ -1984,8 +1831,8 @@ func TestOneOpenDependencyStacksThePullRequest(t *testing.T) {
 	)
 	w := newWorld(t)
 	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
-	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
-	w.gh.seedPull(pull{Head: dep, Base: "main", State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "open"})
+	w.gh.SeedPull(pull{Head: dep, Base: "main", State: "open"})
 
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -1995,7 +1842,7 @@ func TestOneOpenDependencyStacksThePullRequest(t *testing.T) {
 		t.Fatalf("states = %v, want a pull request", states)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	got, n := pullByHead(pulls, branch)
 	if n != 1 {
 		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
@@ -2017,8 +1864,8 @@ func TestMergedDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
 	)
 	w := newWorld(t)
 	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
-	w.gh.addBlocker(7, ghIssue{Number: 3, State: "closed"})
-	w.gh.seedPull(pull{Head: dep, Base: "main", State: "closed"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "closed"})
+	w.gh.SeedPull(pull{Head: dep, Base: "main", State: "closed"})
 
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -2028,7 +1875,7 @@ func TestMergedDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
 		t.Fatalf("states = %v, want a pull request on the default branch", states)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	got, n := pullByHead(pulls, branch)
 	if n != 1 {
 		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
@@ -2044,10 +1891,10 @@ func TestTwoOpenDependenciesOpenNothing(t *testing.T) {
 	w := newWorld(t)
 	w.pushBranch(t, "3_first-part", "stacked.txt", "from-3\n")
 	w.pushBranch(t, "4_second-part", "stacked.txt", "from-4\n")
-	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
-	w.gh.addBlocker(7, ghIssue{Number: 4, State: "open"})
-	w.gh.seedPull(pull{Head: "3_first-part", Base: "main", State: "open"})
-	w.gh.seedPull(pull{Head: "4_second-part", Base: "main", State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 4, State: "open"})
+	w.gh.SeedPull(pull{Head: "3_first-part", Base: "main", State: "open"})
+	w.gh.SeedPull(pull{Head: "4_second-part", Base: "main", State: "open"})
 
 	h, sessions := writes(map[string]string{"fix.txt": "x"})
 	w.start(t, "alice", h)
@@ -2067,7 +1914,7 @@ func TestTwoOpenDependenciesOpenNothing(t *testing.T) {
 	if got := sessions.Load(); got != 0 {
 		t.Errorf("sessions = %d, want none", got)
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if _, n := pullByHead(pulls, "7_fix-the-thing"); n != 0 {
 		t.Errorf("pulls = %+v, want no pull request for the job", pulls)
 	}
@@ -2087,8 +1934,8 @@ func TestBlockerWithoutSchmeidePullRequestUsesDefaultBranch(t *testing.T) {
 	const branch = "7_fix-the-thing"
 	w := newWorld(t)
 	w.pushBranch(t, "wip", "stacked.txt", "from-wip\n")
-	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
-	w.gh.seedPull(pull{Head: "wip", Base: "main", State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "open"})
+	w.gh.SeedPull(pull{Head: "wip", Base: "main", State: "open"})
 
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -2097,7 +1944,7 @@ func TestBlockerWithoutSchmeidePullRequestUsesDefaultBranch(t *testing.T) {
 	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
 		t.Fatalf("states = %v, want a pull request on the default branch", states)
 	}
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	got, n := pullByHead(pulls, branch)
 	if n != 1 {
 		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
@@ -2116,9 +1963,9 @@ func TestOneStackableDependencyIgnoresAnUnstackableBlocker(t *testing.T) {
 	)
 	w := newWorld(t)
 	w.pushBranch(t, dep, "stacked.txt", "from-3\n")
-	w.gh.addBlocker(7, ghIssue{Number: 5, State: "open"})
-	w.gh.addBlocker(7, ghIssue{Number: 3, State: "open"})
-	w.gh.seedPull(pull{Head: dep, Base: "main", State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 5, State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "open"})
+	w.gh.SeedPull(pull{Head: dep, Base: "main", State: "open"})
 
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -2127,7 +1974,7 @@ func TestOneStackableDependencyIgnoresAnUnstackableBlocker(t *testing.T) {
 	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
 		t.Fatalf("states = %v, want a stacked pull request", states)
 	}
-	pulls, _ := w.gh.snapshot()
+	pulls, _ := w.gh.Snapshot()
 	got, n := pullByHead(pulls, branch)
 	if n != 1 {
 		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
@@ -2158,7 +2005,7 @@ func (w *world) seedJobPR(t *testing.T, fixes int) {
 		git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", msg)
 	}
 	git(t, src, "push", "-q", "origin", "HEAD:"+branch)
-	w.gh.seedPull(pull{Head: branch, Base: "main"})
+	w.gh.SeedPull(pull{Head: branch, Base: "main"})
 }
 
 // TestRedeliveryAfterOutcomeCommentPostsNothing is a job whose outcome was
@@ -2167,9 +2014,7 @@ func TestRedeliveryAfterOutcomeCommentPostsNothing(t *testing.T) {
 	w := newWorld(t)
 	w.seedJobPR(t, 0)
 	posted := markOutcome("schmeide opened a pull request for this issue: https://github.test/o/r/pull/1", StatePROpened)
-	w.gh.mu.Lock()
-	w.gh.comments["7"] = []string{posted}
-	w.gh.mu.Unlock()
+	w.gh.SetComments(7, posted)
 
 	h, sessions := writes(map[string]string{"fix.txt": "x"})
 	w.start(t, "alice", h)
@@ -2181,7 +2026,7 @@ func TestRedeliveryAfterOutcomeCommentPostsNothing(t *testing.T) {
 	if sessions.Load() != 0 {
 		t.Errorf("sessions = %d, want none", sessions.Load())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want only the first", pulls)
 	}
@@ -2213,7 +2058,7 @@ func TestRedeliveryKeepsSpentReviewRounds(t *testing.T) {
 	if reviews.Load() != 1 || workers.Load() != 0 {
 		t.Errorf("workers = %d, reviews = %d, want only the last review round", workers.Load(), reviews.Load())
 	}
-	pulls, comments := w.gh.snapshot()
+	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want only the first", pulls)
 	}
