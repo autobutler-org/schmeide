@@ -121,7 +121,9 @@ If the reviewer requests changes and --max-review-rounds (default 3) has
 rounds left, a fresh worker session applies the findings, the gate runs
 again, and the same branch is pushed so the open PR updates. A passing review
 finishes the job. The factory merges the pull request only when the repo
-config sets merge = "factory". The default is a person. Exhausting the
+config sets merge = "factory". The default is a person. Factory merge waits
+for every check run on the head commit to succeed for check_wait (default 2m),
+set next to merge, e.g. check_wait = "10m". Exhausting the
 rounds fails the job, comments on the issue, and leaves the pull request
 open. The outcome is reported to the control node and commented on the issue.
 A job the runner does not finish is handed to another runner, and a job that

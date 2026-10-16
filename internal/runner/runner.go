@@ -526,7 +526,7 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if cfg.Merge != repoconfig.MergeFactory || out.state != StatePROpened {
 		return out
 	}
-	return r.mergeWhenGreen(ctx, ws, gh, url)
+	return r.mergeWhenGreen(ctx, ws, gh, url, cfg.CheckWait)
 }
 
 // open runs the session, the gate, and the push, and opens the pull request.

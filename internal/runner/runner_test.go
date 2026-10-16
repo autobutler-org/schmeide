@@ -1194,13 +1194,11 @@ func TestFactoryMergeWhenACheckFails(t *testing.T) {
 	}
 }
 
+// The repo's check_wait bounds the poll. The default of 2m would outlast the
+// test's timeout.
 func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
-	prev := checkWait
-	checkWait = 20 * time.Millisecond
-	t.Cleanup(func() { checkWait = prev })
-
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testGateConfig+"merge = \"factory\"\ncheck_wait = \"20ms\"\n")
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
@@ -1282,6 +1280,9 @@ func TestRunnerHelpDocumentsReviewRounds(t *testing.T) {
 	}
 	if !strings.Contains(got, `merge = "factory"`) || !strings.Contains(got, "The default is a person.") {
 		t.Fatalf("help does not document factory merge:\n%s", got)
+	}
+	if !strings.Contains(got, `check_wait = "10m"`) || !strings.Contains(got, "default 2m") {
+		t.Fatalf("help does not document check_wait:\n%s", got)
 	}
 }
 

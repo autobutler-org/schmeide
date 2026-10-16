@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// checkWait is how long factory merge polls the head commit's check runs.
-// Tests shorten it.
-var checkWait = 2 * time.Minute
-
 // checkPoll is the pause between those reads.
 const checkPoll = time.Second
 
@@ -81,10 +77,10 @@ func mergeFailed(prURL string, err error) outcome {
 
 // mergeWhenGreen polls check runs on the pull request's head commit and
 // merges with a merge commit when every one has succeeded. A failed check,
-// or a wait of checkWait that does not end in success, leaves the pull
+// or a wait of the repo's check_wait that does not end in success, leaves the pull
 // request open. That failure is final: the pull request already exists, and
 // a redelivery would treat it as done.
-func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, prURL string) outcome {
+func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, prURL string, wait time.Duration) outcome {
 	sha, err := ws.Head(ctx)
 	if err != nil {
 		return mergeFailed(prURL, err)
@@ -93,7 +89,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 	if err != nil {
 		return mergeFailed(prURL, err)
 	}
-	deadline := time.Now().Add(checkWait)
+	deadline := time.Now().Add(wait)
 	detail := "the head commit has no check runs, so CI is not green"
 	ticker := time.NewTicker(checkPoll)
 	defer ticker.Stop()

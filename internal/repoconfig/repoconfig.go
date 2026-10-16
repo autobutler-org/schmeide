@@ -15,6 +15,10 @@
 //	# Absent, empty, and "human" leave the pull request for a person.
 //	# "factory" means the factory merges.
 //	merge = "human"
+//
+//	# Optional. How long factory merge waits for the head commit's check
+//	# runs to succeed. A Go duration. Absent or empty means 2m.
+//	check_wait = "10m"
 package repoconfig
 
 import (
@@ -25,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -41,6 +46,9 @@ const (
 	MergeFactory = "factory"
 )
 
+// DefaultCheckWait is the check wait when check_wait is absent or empty.
+const DefaultCheckWait = 2 * time.Minute
+
 // Config is the per-repo schmeide configuration.
 type Config struct {
 	// Gate is the command a job must pass before a PR is opened.
@@ -49,6 +57,16 @@ type Config struct {
 	// Empty and [MergeHuman] leave it for a person. [MergeFactory] means the
 	// runner merges.
 	Merge string `toml:"merge"`
+	// CheckWait is how long factory merge waits for the head commit's check
+	// runs. Parse sets it to [DefaultCheckWait] when the key is absent.
+	CheckWait time.Duration `toml:"-"`
+}
+
+// file is the TOML shape of [Config].
+type file struct {
+	Gate      string `toml:"gate"`
+	Merge     string `toml:"merge"`
+	CheckWait string `toml:"check_wait"`
 }
 
 // Load reads and validates the config in the repo rooted at repoDir.
@@ -66,10 +84,10 @@ func Load(repoDir string) (Config, error) {
 
 // Parse validates config bytes. name is used in error messages.
 func Parse(name string, data []byte) (Config, error) {
-	var cfg Config
+	var raw file
 	dec := toml.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		var strict *toml.StrictMissingError
 		if errors.As(err, &strict) {
 			keys := make([]string, 0, len(strict.Errors))
@@ -79,6 +97,14 @@ func Parse(name string, data []byte) (Config, error) {
 			return Config{}, fmt.Errorf("%s: unknown key(s) %s; remove them or fix the spelling", name, strings.Join(keys, ", "))
 		}
 		return Config{}, fmt.Errorf("%s: malformed TOML, fix the syntax: %w", name, err)
+	}
+	cfg := Config{Gate: raw.Gate, Merge: raw.Merge, CheckWait: DefaultCheckWait}
+	if s := strings.TrimSpace(raw.CheckWait); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("%s: check_wait = %q is not a positive duration; set a duration such as check_wait = \"10m\"", name, raw.CheckWait)
+		}
+		cfg.CheckWait = d
 	}
 	if strings.TrimSpace(cfg.Gate) == "" {
 		return Config{}, fmt.Errorf("%s: gate is missing or empty; set gate = \"<command>\", e.g. gate = \"make check test\"", name)
