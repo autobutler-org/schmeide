@@ -413,6 +413,23 @@ func TestGHCheck(t *testing.T) {
 	}
 }
 
+func TestLintGateCheckReportsTarget(t *testing.T) {
+	empty := t.TempDir()
+	var out bytes.Buffer
+	if !Report(t.Context(), &out, []Check{LintGateCheck(empty)}) || !strings.Contains(out.String(), "ok    lint gate: no Makefile check target or pre-commit config") {
+		t.Errorf("empty dir: output %q, want an ok check that reports nothing", out.String())
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("check: check/go\n\ttrue\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if !Report(t.Context(), &out, []Check{LintGateCheck(dir)}) || !strings.Contains(out.String(), "ok    lint gate: Makefile target `check`") {
+		t.Errorf("makefile: output %q, want an ok check that reports the check target", out.String())
+	}
+}
+
 func TestDiskCheck(t *testing.T) {
 	var out bytes.Buffer
 	if Report(t.Context(), &out, []Check{DiskCheck(t.TempDir(), math.MaxUint64)}) || !strings.Contains(out.String(), "is full") || !strings.Contains(out.String(), "free some space") {
@@ -463,7 +480,7 @@ func TestMainJSON(t *testing.T) {
 		}
 		names = append(names, r["name"]+"="+r["status"])
 	}
-	want := []string{"git=fail", "gh=fail", "disk=ok", "harness claude-code=fail", "harness grok=fail", "control node=fail"}
+	want := []string{"git=fail", "gh=fail", "disk=ok", "lint gate=ok", "harness claude-code=fail", "harness grok=fail", "control node=fail"}
 	if !slices.Equal(names, want) {
 		t.Errorf("checks = %v, want %v", names, want)
 	}

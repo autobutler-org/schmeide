@@ -19,6 +19,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
+	"github.com/autobutler-org/schmeide/internal/lintgate"
 	"github.com/autobutler-org/schmeide/internal/runner"
 )
 
@@ -60,7 +61,7 @@ func Checks(natsURL, steward, natsToken string, harnesses []harness.Harness) []C
 			return "", errors.New("git was not found on PATH; install it (https://git-scm.com/downloads) and try again")
 		}
 		return path, nil
-	}}, GHCheck(), DiskCheck(".", minFreeDisk)}
+	}}, GHCheck(), DiskCheck(".", minFreeDisk), LintGateCheck(".")}
 	for _, h := range harnesses {
 		checks = append(checks, Check{Name: "harness " + h.Name(), Group: GroupOperator, Harness: true, Run: func(ctx context.Context) (string, error) {
 			if err := h.Check(ctx); err != nil {
@@ -96,6 +97,19 @@ func GHCheck() Check {
 			return "", fmt.Errorf("gh is not logged in (%s); run 'gh auth login' and try again", firstLine(string(out), err))
 		}
 		return path + " is logged in", nil
+	}}
+}
+
+// LintGateCheck reports a Makefile target named check, and a pre-commit
+// config, in dir. Finding nothing still passes: doctor only says what is
+// there, and a missing lint gate is not a failed machine.
+func LintGateCheck(dir string) Check {
+	return Check{Name: "lint gate", Group: GroupMachine, Run: func(context.Context) (string, error) {
+		found, err := lintgate.Detect(dir)
+		if err != nil {
+			return "", fmt.Errorf("cannot read a lint gate in %s: %w; check that the directory is readable and try again", dir, err)
+		}
+		return found.Summary(), nil
 	}}
 }
 
@@ -254,9 +268,11 @@ func Usage() string {
 	fs, _, _, _, _, _, _ := doctorFlags()
 	return `schmeide doctor checks that this machine can run 'schmeide runner': git is
 installed, gh is installed and logged in, the disk is not full, at least one
-harness is installed and logged in, and the control node is reachable. Checks
-are grouped by who fixes them: the operator (logins, flags, tokens) or the
-machine (installed tools, disk). A harness that fails while another passes is
+harness is installed and logged in, and the control node is reachable. It also
+reports a Makefile target named check, and a pre-commit config, in the current
+directory. That report does not fail the check. Checks are grouped by who
+fixes them: the operator (logins, flags, tokens) or the machine (installed
+tools, disk). A harness that fails while another passes is
 reported as not selected and does not fail the check. Each failed check says
 how to fix it. The exit code is 0 when every other check and at least one
 harness pass, and 1 otherwise. On the control node, pass
