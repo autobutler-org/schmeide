@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/autobutler-org/schmeide/internal/secretscan"
 )
 
 // Workspace is one job's isolated checkout, already on the job's branch. It
@@ -149,8 +151,16 @@ func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 // an ancestor of HEAD, is updated without force. That is how a review round
 // publishes another commit on the same branch. A remote head that is not an
 // ancestor was not written by this checkout, so it is left in place and the
-// push fails.
+// push fails. Tracked files are scanned before git push. A credential-shaped
+// literal refuses the push, and git push does not run.
 func (w *worktree) Push(ctx context.Context) error {
+	found, err := secretscan.Scan(ctx, w.dir)
+	if err != nil {
+		return fmt.Errorf("scan tracked files for secrets: %w", err)
+	}
+	if len(found) > 0 {
+		return secretLiteralsError(found)
+	}
 	ref := "refs/heads/" + w.spec.branch
 	remote, err := w.remoteHead(ctx, ref)
 	if err != nil {
@@ -161,6 +171,16 @@ func (w *worktree) Push(ctx context.Context) error {
 	}
 	_, err = w.git(ctx, w.dir, "push", "-q", w.spec.url, "HEAD:"+ref)
 	return err
+}
+
+// secretLiteralsError names each file and the kind of secret. It does not
+// include the secret text.
+func secretLiteralsError(found []secretscan.Finding) error {
+	parts := make([]string, len(found))
+	for i, finding := range found {
+		parts[i] = fmt.Sprintf("%s:%d contains a %s", finding.File, finding.Line, finding.Kind)
+	}
+	return fmt.Errorf("refusing to push: %s", strings.Join(parts, "; "))
 }
 
 // remoteHead is the commit the remote branch points at, or "" when that
