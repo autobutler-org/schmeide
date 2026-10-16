@@ -34,6 +34,7 @@ import (
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/lintgate"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
+	"github.com/autobutler-org/schmeide/internal/trust"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -137,6 +138,10 @@ type Options struct {
 	// overrides a positive value when that key is set. A gate timeout is not
 	// retried.
 	GateTimeout time.Duration
+	// Confirm asks the operator a yes-or-no question before the first job in
+	// a new pair of work directory and origin URL. Nil means nobody can be
+	// asked, so an untrusted pair is refused unless SCHMEIDE_TRUST=1 is set.
+	Confirm func(question string) (bool, error)
 }
 
 // Runner pulls and works one steward's jobs.
@@ -523,6 +528,10 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	if job.Title == "" {
 		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
+	origin := strings.TrimSuffix(r.opts.GitHubURL, "/") + "/" + job.Repo + ".git"
+	if err := trust.Check(r.opts.WorkDir, origin, r.opts.Confirm); err != nil {
+		return failed(err)
+	}
 	branch := BranchName(job.Issue, job.Title)
 	// A redelivered job whose first runner died after opening the PR must not
 	// open a second one. The guard goes by the issue number, not the whole
@@ -557,7 +566,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 
 	ws, err := newWorktree(ctx, worktreeSpec{
 		workDir:  r.opts.WorkDir,
-		url:      strings.TrimSuffix(r.opts.GitHubURL, "/") + "/" + job.Repo + ".git",
+		url:      origin,
 		base:     base,
 		branch:   branch,
 		token:    token,
