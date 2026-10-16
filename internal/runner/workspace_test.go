@@ -75,6 +75,62 @@ func TestPushPublishesACleanWorktree(t *testing.T) {
 	}
 }
 
+func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
+	first, bare := newPushFixture(t)
+	planted := filepath.Join(first.repoDir, "planted")
+	if err := os.WriteFile(planted, []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// git init copies its templates back in, so a missing description shows
+	// a re-init even though init leaves the planted file alone.
+	description := filepath.Join(first.repoDir, "description")
+	if err := os.Remove(description); err != nil {
+		t.Fatal(err)
+	}
+	second, err := newWorktree(t.Context(), worktreeSpec{
+		workDir: filepath.Dir(filepath.Dir(first.repoDir)),
+		url:     bare,
+		base:    "main",
+		branch:  "job-2",
+		id:      "job-2",
+		repoID:  first.spec.repoID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	if _, err := os.Stat(planted); err != nil {
+		t.Fatalf("the bare clone was re-created: %v", err)
+	}
+	if _, err := os.Stat(description); err == nil {
+		t.Fatal("git init ran again on the existing bare clone")
+	}
+
+	out, err := second.Run(t.Context(), `echo "GOCACHE=$GOCACHE"; echo "GOMODCACHE=$GOMODCACHE"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := strings.Fields(out)
+	req := (&Runner{}).session(second.Dir(), "prompt")
+	cacheDir := filepath.Join(filepath.Dir(filepath.Dir(first.repoDir)), "cache", "1")
+	for i, name := range []string{"GOCACHE", "GOMODCACHE"} {
+		session := lastEnv(req.Env, name)
+		if gate[i] != session || !strings.HasPrefix(session, name+"="+cacheDir) {
+			t.Errorf("gate %s, session %s, want both under %s", gate[i], session, cacheDir)
+		}
+	}
+}
+
+func lastEnv(env []string, name string) string {
+	got := ""
+	for _, entry := range env {
+		if strings.HasPrefix(entry, name+"=") {
+			got = entry
+		}
+	}
+	return got
+}
+
 func newPushFixture(t *testing.T) (*worktree, string) {
 	t.Helper()
 	// Keep the machine's git config (signing, hooks, identity) out of the test.
