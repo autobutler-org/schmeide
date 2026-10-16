@@ -3,12 +3,15 @@ package doctor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +63,7 @@ func TestReportAllGood(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForAliceToken(t, queue.Conn())
+	fakeGH(t, 0)
 
 	var out bytes.Buffer
 	if !Report(t.Context(), &out, Checks("nats://"+addr, "alice", "alice-nats", []harness.Harness{&harness.Fake{}})) {
@@ -223,6 +227,7 @@ func TestReportPassesWhenOneHarnessIsReady(t *testing.T) {
 		name:    "grok",
 	}
 	ready := namedHarness{Harness: &harness.Fake{}, name: "claude-code"}
+	fakeGH(t, 0)
 	// Both orders. A report that stops at the first error cannot pass just
 	// because a later harness is ready.
 	for _, hs := range [][]harness.Harness{{missing, ready}, {ready, missing}} {
@@ -375,5 +380,117 @@ func TestMainFailsWithoutAHarness(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "fix the failed checks above") {
 		t.Errorf("stderr %q does not say what to do next", stderr.String())
+	}
+}
+
+// fakeGH puts a gh on the front of PATH that exits with code, so the gh
+// check does not depend on this machine's GitHub login.
+func fakeGH(t *testing.T, code int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho 'You are not logged into any GitHub hosts.' >&2\nexit %d\n", code)
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestGHCheck(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var out bytes.Buffer
+	if Report(t.Context(), &out, []Check{GHCheck()}) || !strings.Contains(out.String(), "FAIL  gh: gh was not found on PATH; install the GitHub CLI") {
+		t.Errorf("missing gh: output %q, want a failure that says to install it", out.String())
+	}
+	fakeGH(t, 1)
+	out.Reset()
+	if Report(t.Context(), &out, []Check{GHCheck()}) || !strings.Contains(out.String(), "You are not logged into any GitHub hosts.); run 'gh auth login'") {
+		t.Errorf("logged-out gh: output %q, want a failure that says to run gh auth login", out.String())
+	}
+	fakeGH(t, 0)
+	out.Reset()
+	if !Report(t.Context(), &out, []Check{GHCheck()}) || !strings.Contains(out.String(), "ok    gh: ") {
+		t.Errorf("logged-in gh: output %q, want ok", out.String())
+	}
+}
+
+func TestDiskCheck(t *testing.T) {
+	var out bytes.Buffer
+	if Report(t.Context(), &out, []Check{DiskCheck(t.TempDir(), math.MaxUint64)}) || !strings.Contains(out.String(), "is full") || !strings.Contains(out.String(), "free some space") {
+		t.Errorf("full disk: output %q, want a failure that says to free space", out.String())
+	}
+	out.Reset()
+	if !Report(t.Context(), &out, []Check{DiskCheck(t.TempDir(), 1)}) || !strings.Contains(out.String(), "ok    disk: ") {
+		t.Errorf("roomy disk: output %q, want ok", out.String())
+	}
+}
+
+func TestReportGroupsChecks(t *testing.T) {
+	var out bytes.Buffer
+	Report(t.Context(), &out, Checks("nats://127.0.0.1:1", "", "", []harness.Harness{&harness.Fake{}}))
+	const want = `operator:
+  ok    harness fake: installed and logged in
+  FAIL  control node: no steward to connect as; pass your GitHub login with --steward
+machine:
+`
+	if !strings.HasPrefix(out.String(), want) {
+		t.Errorf("output does not start with %q:\n%s", want, out.String())
+	}
+	for _, name := range []string{"git", "gh", "disk"} {
+		if !strings.Contains(out.String()[len(want):], " "+name+": ") {
+			t.Errorf("machine group does not list %s:\n%s", name, out.String())
+		}
+	}
+}
+
+func TestMainJSON(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SCHMEIDE_STEWARD", "")
+	t.Setenv("SCHMEIDE_GITHUB_APP_PRIVATE_KEY_FILE", "")
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code %d, want 1; stderr:\n%s", code, stderr.String())
+	}
+	var got []map[string]string
+	dec := json.NewDecoder(&stdout)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("stdout is not a JSON list of checks: %v", err)
+	}
+	var names []string
+	for _, r := range got {
+		if len(r) != 4 || r["name"] == "" || r["group"] == "" || r["status"] == "" || r["detail"] == "" {
+			t.Errorf("check %v does not have exactly name, group, status, and detail", r)
+		}
+		names = append(names, r["name"]+"="+r["status"])
+	}
+	want := []string{"git=fail", "gh=fail", "disk=ok", "harness claude-code=fail", "harness grok=fail", "control node=fail"}
+	if !slices.Equal(names, want) {
+		t.Errorf("checks = %v, want %v", names, want)
+	}
+}
+
+func TestMainFix(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SCHMEIDE_STEWARD", "")
+	key := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(key, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCHMEIDE_GITHUB_APP_PRIVATE_KEY_FILE", key)
+	var stdout, stderr bytes.Buffer
+	Main([]string{"--fix"}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "--fix: nothing was changed") {
+		t.Errorf("stdout %q does not say nothing was changed", stdout.String())
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	Main([]string{"--fix"}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "--fix: fixed github app private key.") || !strings.Contains(stdout.String(), "ok    github app private key:") {
+		t.Errorf("stdout %q does not report the key as fixed and ok", stdout.String())
+	}
+	if fi, err := os.Stat(key); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("key mode = %v (%v), want 0600", fi.Mode().Perm(), err)
 	}
 }
