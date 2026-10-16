@@ -110,6 +110,9 @@ under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
 Step 9, merging, has shipped. Step 4, pool fallback, has shipped. See
 [Routing](#routing).
 
+For how a job fails and what is not retried, see
+[FAILURE-MODES.md](FAILURE-MODES.md).
+
 ## Decisions
 
 ### Intake
