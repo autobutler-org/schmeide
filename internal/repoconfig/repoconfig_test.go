@@ -213,4 +213,32 @@ func TestUnknownKeyDoesNotClaimOnlyGateIsSupported(t *testing.T) {
 	}
 }
 
+func TestNonStringValueNamesKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		content string
+		errHas  []string
+	}{
+		{content: "gate = 5\n", errHas: []string{"gate", `gate = "make check test"`}},
+		{content: "gate = \"x\"\nmerge = true\n", errHas: []string{"merge", `merge = "human"`}},
+		{content: "gate = \"x\"\ncheck_wait = 10\n", errHas: []string{"check_wait", `check_wait = "10m"`}},
+		{content: "gate = \"x\"\ngate_timeout = 30\n", errHas: []string{"gate_timeout", `gate_timeout = "30m"`}},
+		{content: "gate = \"x\"\nsession_timeout = 1800\n", errHas: []string{"session_timeout", `session_timeout = "30m"`}},
+	}
+	for _, tc := range cases {
+		_, err := Parse(Path, []byte(tc.content))
+		if err == nil {
+			t.Fatalf("%q: expected error", tc.content)
+		}
+		for _, s := range tc.errHas {
+			if !strings.Contains(err.Error(), s) {
+				t.Errorf("%q: error %q missing %q", tc.content, err, s)
+			}
+		}
+		if strings.Contains(err.Error(), "struct field") {
+			t.Errorf("%q: error %q names a Go field, want the key", tc.content, err)
+		}
+	}
+}
+
 func ptr(s string) *string { return &s }

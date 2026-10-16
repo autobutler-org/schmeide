@@ -101,6 +101,32 @@ type file struct {
 	SessionTimeout string `toml:"session_timeout"`
 }
 
+// examples holds one valid value per key, for error messages.
+var examples = map[string]string{
+	"gate":            "make check test",
+	"merge":           MergeHuman,
+	"check_wait":      "10m",
+	"gate_timeout":    "30m",
+	"session_timeout": "30m",
+}
+
+// nonStringKey reports the first known key whose value is not a string, when
+// data is otherwise valid TOML.
+func nonStringKey(data []byte) (string, bool) {
+	var m map[string]any
+	if toml.Unmarshal(data, &m) != nil {
+		return "", false
+	}
+	for _, key := range []string{"gate", "merge", "check_wait", "gate_timeout", "session_timeout"} {
+		if v, ok := m[key]; ok {
+			if _, isString := v.(string); !isString {
+				return key, true
+			}
+		}
+	}
+	return "", false
+}
+
 // GateTimeoutOr returns the repo's gate timeout when gate_timeout is set,
 // and fallback when the key is absent or empty. A non-positive fallback
 // selects [DefaultGateTimeout], which is 30 minutes.
@@ -167,6 +193,9 @@ func Parse(name string, data []byte) (Config, error) {
 				keys = append(keys, strings.Join(e.Key(), "."))
 			}
 			return Config{}, fmt.Errorf("%s: unknown key(s) %s; remove them or fix the spelling", name, strings.Join(keys, ", "))
+		}
+		if key, ok := nonStringKey(data); ok {
+			return Config{}, fmt.Errorf("%s: %s must be a quoted string; set it like %s = %q", name, key, key, examples[key])
 		}
 		return Config{}, fmt.Errorf("%s: malformed TOML, fix the syntax: %w", name, err)
 	}
