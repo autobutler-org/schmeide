@@ -71,7 +71,7 @@ flowchart LR
 ```
 
 - **One control node binary.** `schmeide control` embeds a NATS server with
-  JetStream. The job stream is the record of which issues already have a job.
+  JetStream. A KV bucket records each issue's latest job and whether it finished.
   Runner registration and the latest status of each job are stored on the
   SCHMEIDE_STATUS JetStream stream in the queue's data directory. A restarted
   control node loads them before it accepts new messages. There is one process

@@ -36,7 +36,19 @@ const (
 	// controlUser is not a GitHub login, so no steward can share its name.
 	controlUser  = "_schmeide_control"
 	startTimeout = 10 * time.Second
+
+	// issueBucket is the JetStream KV bucket that records, per issue, the
+	// latest job and whether it has finished. Publish dedupes against it.
+	issueBucket = "SCHMEIDE_ISSUES"
 )
+
+// jobStreamMaxMsgs caps the job stream once the issue bucket has been seeded
+// from it, discarding the oldest jobs first. A runner holds a job for one
+// session: hours at most, with a heartbeat every AckWait/3 (10s by default).
+// 100,000 later jobs would have to be queued while one job is still held
+// before that job is discarded. At a few KB per job (the issue title and
+// body) that is a few hundred MB on disk at most. A var so tests can shrink it.
+var jobStreamMaxMsgs int64 = 100_000
 
 // ConsumerName is the durable JetStream consumer a steward's runners share.
 func ConsumerName(steward string) string { return "runner-" + steward }
@@ -76,8 +88,23 @@ type Queue struct {
 	nc      *nats.Conn
 	stream  jetstream.Stream
 	js      jetstream.JetStream
+	issues  jetstream.KeyValue
 	tracker *Tracker
 }
+
+// issueRecord is the issue bucket's value: the issue's latest job.
+type issueRecord struct {
+	// Subject is the job's subject (see Job.Subject).
+	Subject string `json:"subject"`
+	// State is the job's final state. Empty means the job has not finished.
+	State State `json:"state,omitempty"`
+	// After is the last status stream sequence when the job was published.
+	// Only statuses stored after it can finish this job; earlier ones belong
+	// to an earlier job for the same issue.
+	After uint64 `json:"after,omitempty"`
+}
+
+func issueKey(job Job) string { return fmt.Sprintf("%d.%d", job.RepoID, job.Issue) }
 
 // StartQueue starts the embedded NATS server and makes sure the job stream
 // exists.
@@ -126,17 +153,67 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 		q.Close()
 		return nil, fmt.Errorf("open jetstream: %w", err)
 	}
-	// Jobs are kept (limits retention) so that the stream itself is the record
-	// of which issues already have a job.
-	q.stream, err = q.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     JobStream,
-		Subjects: []string{jobSubjectPrefix + ">"},
-	})
-	if err != nil {
+	if err := q.openJobs(ctx); err != nil {
 		q.Close()
-		return nil, fmt.Errorf("create job stream: %w", err)
+		return nil, err
 	}
 	return q, nil
+}
+
+// openJobs opens the issue bucket and the job stream. The job stream used to
+// be the only record of which issues have a job, so every job it holds is
+// copied into the issue bucket before the stream is allowed to discard any.
+// A restart repeats this safely: an issue that already has a record keeps it.
+func (q *Queue) openJobs(ctx context.Context) error {
+	var err error
+	if q.issues, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: issueBucket}); err != nil {
+		return fmt.Errorf("create issue bucket: %w", err)
+	}
+	// Create the stream without a limit if it is new; leave an existing one
+	// as it is until the seed is done.
+	config := jetstream.StreamConfig{Name: JobStream, Subjects: []string{jobSubjectPrefix + ">"}}
+	if q.stream, err = q.js.Stream(ctx, JobStream); errors.Is(err, jetstream.ErrStreamNotFound) {
+		q.stream, err = q.js.CreateStream(ctx, config)
+	}
+	if err != nil {
+		return fmt.Errorf("open job stream: %w", err)
+	}
+	if err := q.seedIssues(ctx); err != nil {
+		return err
+	}
+	config.MaxMsgs = jobStreamMaxMsgs
+	if q.stream, err = q.js.UpdateStream(ctx, config); err != nil {
+		return fmt.Errorf("limit job stream: %w", err)
+	}
+	return nil
+}
+
+// seedIssues records every job in the stream whose issue has no record yet.
+// The record says the job has not finished; Track then replays the status
+// history and finishes it.
+func (q *Queue) seedIssues(ctx context.Context) error {
+	info, err := q.stream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("read job stream: %w", err)
+	}
+	for seq := info.State.FirstSeq; seq <= info.State.LastSeq && info.State.Msgs > 0; seq++ {
+		msg, err := q.stream.GetMsg(ctx, seq)
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("seed issue bucket: %w", err)
+		}
+		var job Job
+		if err := json.Unmarshal(msg.Data, &job); err != nil {
+			continue
+		}
+		data, _ := json.Marshal(issueRecord{Subject: msg.Subject})
+		if _, err := q.issues.Create(ctx, issueKey(job), data); err != nil && !errors.Is(err, jetstream.ErrKeyExists) {
+			return fmt.Errorf("seed issue bucket: %w", err)
+		}
+	}
+	return nil
 }
 
 // runnerPermissions lets a steward's runners pull and acknowledge that
@@ -178,11 +255,12 @@ func (q *Queue) Close() {
 	q.srv.WaitForShutdown()
 }
 
-// Publish stores the job unless its issue already has one, whoever the steward
-// was at the time. It reports whether a job was created. Once Track is
-// running, a steward with no registration gets the job on the pool subject.
-// Until then there is no registration record, and the job stays on the
-// steward's subject.
+// Publish stores the job unless its issue already has a job, whoever the
+// steward was at the time, that is unfinished or opened a pull request. A job
+// that ended gate_failed or failed is replaced by this one. It reports whether
+// a job was created. Once Track is running, a steward with no registration
+// gets the job on the pool subject. Until then there is no registration
+// record, and the job stays on the steward's subject.
 func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	if job.Steward == PoolName {
 		return false, fmt.Errorf("steward %q is reserved and is not a GitHub login", job.Steward)
@@ -192,13 +270,55 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	anySteward := fmt.Sprintf("%s*.%d.%d", jobSubjectPrefix, job.RepoID, job.Issue)
-	_, err = q.js.Publish(ctx, job.Subject(), data, jetstream.WithExpectLastSequenceForSubject(0, anySteward))
+	key := issueKey(job)
+	var rev uint64
+	entry, err := q.issues.Get(ctx, key)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case err != nil:
+		return false, fmt.Errorf("look up issue %s: %w", key, err)
+	default:
+		var prev issueRecord
+		if err := json.Unmarshal(entry.Value(), &prev); err != nil {
+			return false, fmt.Errorf("decode issue %s: %w", key, err)
+		}
+		if !prev.State.failure() {
+			return false, nil
+		}
+		rev = entry.Revision()
+	}
+	record := issueRecord{Subject: job.Subject()}
+	if q.tracker != nil {
+		if record.After, err = q.tracker.lastSeq(ctx); err != nil {
+			return false, err
+		}
+	}
+	recordData, _ := json.Marshal(record)
+	// Create and Update only succeed against the revision read above, so of
+	// two concurrent publishes for one issue, one creates the job.
+	if rev == 0 {
+		_, err = q.issues.Create(ctx, key, recordData)
+	} else {
+		_, err = q.issues.Update(ctx, key, recordData, rev)
+	}
 	var apiErr *jetstream.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence {
+	if errors.Is(err, jetstream.ErrKeyExists) || errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, fmt.Errorf("record issue %s: %w", key, err)
+	}
+	if _, err := q.js.Publish(ctx, job.Subject(), data); err != nil {
+		// Put the previous record back, so the issue is not stuck with a job
+		// that was never stored.
+		if rev == 0 {
+			_ = q.issues.Delete(ctx, key)
+		} else {
+			_, _ = q.issues.Put(ctx, key, entry.Value())
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // ServeTokens answers requests on a steward's token subject. The request body
