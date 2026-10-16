@@ -1,8 +1,10 @@
 package control
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -223,4 +225,79 @@ func restartQueue(t *testing.T, q *Queue, dir string) *Queue {
 	t.Helper()
 	q.Close()
 	return startQueueIn(t, dir)
+}
+
+// startQueueOverTCP starts a queue that runners, and `schmeide status`, can
+// reach at the returned NATS URL.
+func startQueueOverTCP(t *testing.T) (*Queue, string) {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	q, err := StartQueue(t.Context(), QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(q.Close)
+	return q, "nats://" + addr
+}
+
+func runStatus(t *testing.T, url string, extra ...string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	args := append([]string{"--steward", "hubot", "--nats-token", "hubot-token", "--nats-url", url}, extra...)
+	if code := StatusMain(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	return stdout.String()
+}
+
+func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
+	q, url := startQueueOverTCP(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	octocat := Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "octo-laptop"}
+	runner.publish(RegisterSubjectPrefix+"octocat", octocat)
+	queued := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	done := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", InstallationID: 1, Title: "t"}
+	runner.report(queued, StateClaimed, "")
+	runner.report(done, StatePROpened, "https://github.com/o/r/pull/3")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(done.Subject()); return ok })
+
+	text := runStatus(t, url)
+	for _, want := range []string{"octocat", "octo-laptop", "claude", queued.Subject(), string(StateClaimed)} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text output %q does not contain %q", text, want)
+		}
+	}
+	if strings.Contains(text, done.Subject()) {
+		t.Errorf("text output %q lists the finished job", text)
+	}
+
+	var got Snapshot
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := Snapshot{
+		Runners: []Registration{octocat},
+		Jobs:    []JobState{{Subject: queued.Subject(), State: StateClaimed}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--json = %+v, want %+v", got, want)
+	}
+}
+
+func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
+	q, url := startQueueOverTCP(t)
+	startTracker(t, q)
+	if got := runStatus(t, url); !strings.Contains(got, "No queued or running jobs.") {
+		t.Errorf("output = %q, want it to say there are no jobs", got)
+	}
+	if got := runStatus(t, url, "--json"); got != "{\n  \"runners\": [],\n  \"jobs\": []\n}\n" {
+		t.Errorf("--json = %q, want empty runners and jobs", got)
+	}
 }

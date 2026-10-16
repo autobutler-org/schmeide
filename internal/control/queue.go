@@ -220,6 +220,8 @@ func (q *Queue) seedIssues(ctx context.Context) error {
 // steward's jobs, report on them, and ask for their tokens. Every steward
 // may also use the one shared pool consumer and report a pool job's status.
 // A runner only pulls from that consumer when it was started with --pool.
+// Any steward may read the status stream, which is what `schmeide status`
+// shows: every runner's registration and every job's latest state.
 func runnerPermissions(steward string) *server.Permissions {
 	consumer := JobStream + "." + ConsumerName(steward)
 	pool := JobStream + "." + ConsumerName(PoolName)
@@ -237,6 +239,8 @@ func runnerPermissions(steward string) *server.Permissions {
 			StatusSubjectPrefix + steward + ".>",
 			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
+			"$JS.API.STREAM.INFO." + statusStream,
+			"$JS.API.STREAM.MSG.GET." + statusStream,
 		}},
 		Subscribe: &server.SubjectPermission{Allow: []string{InboxPrefix(steward) + ".>"}},
 	}

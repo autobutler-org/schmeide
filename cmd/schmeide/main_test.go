@@ -48,6 +48,13 @@ func TestRun(t *testing.T) {
 			wantCode: 1, wantStderr: "Check that `schmeide control` is running",
 		},
 		{name: "doctor help", args: []string{"doctor", "--help"}, wantStdout: doctor.Usage()},
+		{name: "status help", args: []string{"status", "--help"}, wantStdout: control.StatusUsage()},
+		{name: "status unknown flag", args: []string{"status", "--nope"}, wantCode: 2, wantStderr: "schmeide status --help"},
+		{name: "status missing steward", args: []string{"status"}, wantCode: 2, wantStderr: "pass your GitHub login with --steward"},
+		{
+			name: "status without a control node says what to check", args: []string{"status", "--steward", "alice", "--nats-url", noControl},
+			wantCode: 1, wantStderr: "Check that `schmeide control` is running",
+		},
 		{name: "doctor unknown flag", args: []string{"doctor", "--nope"}, wantCode: 2, wantStderr: "schmeide doctor --help"},
 	}...)
 	for _, tt := range tests {
