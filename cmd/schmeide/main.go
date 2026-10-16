@@ -25,6 +25,7 @@ Commands:
   completion  Print a shell completion script for bash, zsh, or fish.
 
 Run 'schmeide <command> --help' for a command's flags.
+See docs/GLOSSARY.md for what the terms mean.
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
