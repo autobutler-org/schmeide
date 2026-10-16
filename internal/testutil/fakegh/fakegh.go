@@ -138,6 +138,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
+	if r.Method == http.MethodPost && r.URL.Path == "/graphql" {
+		// ponytail: every GraphQL query gets one answer, a pull request on
+		// main whose branch has no merge queue.
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"repository": map[string]any{
+			"pullRequest": map[string]string{"id": "PR_1", "baseRefName": "main"},
+			"mergeQueue":  nil,
+		}}})
+		return
+	}
 	path, ok := strings.CutPrefix(r.URL.Path, "/repos/"+s.repo)
 	if !ok {
 		s.unexpected(w, r)
