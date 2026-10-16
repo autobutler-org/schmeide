@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoad(t *testing.T) {
@@ -82,6 +83,46 @@ func TestMergePolicy(t *testing.T) {
 				}
 				if cfg.Gate != "make check" || cfg.Merge != tc.want {
 					t.Fatalf("config = %+v, want gate %q and merge %q", cfg, "make check", tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, s := range tc.errHas {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q missing %q", err, s)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckWait(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		want    time.Duration
+		errHas  []string
+	}{
+		{name: "absent", content: "", want: 2 * time.Minute},
+		{name: "empty", content: "check_wait = \"\"\n", want: 2 * time.Minute},
+		{name: "ten minutes", content: "check_wait = \"10m\"\n", want: 10 * time.Minute},
+		{name: "unparseable", content: "check_wait = \"soon\"\n", errHas: []string{"check_wait", "soon", "10m"}},
+		{name: "zero", content: "check_wait = \"0s\"\n", errHas: []string{"check_wait", "10m"}},
+		{name: "negative", content: "check_wait = \"-1m\"\n", errHas: []string{"check_wait", "10m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse(Path, []byte("gate = \"make check\"\n"+tc.content))
+			if tc.errHas == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.CheckWait != tc.want {
+					t.Fatalf("check wait = %v, want %v", cfg.CheckWait, tc.want)
 				}
 				return
 			}
