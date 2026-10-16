@@ -225,10 +225,18 @@ reviewed like code. The file is `.schmeide/config.toml`. `gate` is required:
 the command that must pass before a PR is opened. `merge` is optional. Absent,
 empty, and `human` leave the pull request for a person. `factory` is the only
 other legal value, and [Merge](#merge) is what it does. Unknown keys are an
-error. The runner reads the file before the harness session, so the session
-cannot change the gate it is about to be held to, and cannot turn factory
-merge on for itself. Other settings, such as reviewer prompts, are added to
-the schema when the feature that reads them is built. A pull request
+error. `gate_timeout` and `session_timeout` are optional Go durations. Absent
+or empty keeps the runner flag: `--gate-timeout` defaults to 30 minutes and
+`--session-timeout` defaults to 2 hours. A positive value overrides that flag
+for the repo. An unparseable or non-positive value is a config error that
+names the key and gives `30m` as an example. When a deadline fires, the
+runner cancels that process group, fails the job, and comments on the issue
+that the session or the gate timed out. The comment does not include the
+command's output. The runner reads the file before the harness session, so
+the session cannot change the gate it is about to be held to, cannot turn
+factory merge on for itself, and cannot lengthen its own deadline. Other
+settings, such as reviewer prompts, are added to the schema when the feature
+that reads them is built. A pull request
 dependency is GitHub's issue-dependencies blocked-by list, not a key in
 this file. See [PR shape](#pr-shape).
 
@@ -342,7 +350,7 @@ Not in the first slice, and not shipped:
 | Decision | Outcome | Where |
 |---|---|---|
 | Name of the ready label | `schmeide:ready`. Override with `--ready-label`. | `internal/control/intake.go` (`DefaultReadyLabel`) |
-| Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `merge` is optional: absent, empty, and `human` leave the pull request for a person, and `factory` is the only other legal value. Unknown keys are an error. | `internal/repoconfig` |
+| Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `merge` is optional: absent, empty, and `human` leave the pull request for a person, and `factory` is the only other legal value. `gate_timeout` and `session_timeout` are optional Go durations. Absent or empty means the runner flag, which defaults to 30 minutes for the gate and 2 hours for a session. A positive value overrides that flag. An unparseable or non-positive value is an error that names the key and gives `30m` as an example. Unknown keys are an error. | `internal/repoconfig`, `internal/runner` |
 | Which orgs or App installations may create jobs | Required. `--allowed-orgs` (owner logins, compared case-insensitively) or `--allowed-installations` (numeric installation IDs), or both. A job is accepted when it matches either list. `schmeide control` refuses to start when both are empty, and an empty allowlist allows no job. A delivery that would create a job and matches neither list is rejected with 403. A delivery that does not describe a ready job is ignored, including one from outside the allowlist. A bad signature is rejected before that check. | `internal/control/intake.go`, `internal/control/cli.go` |
 | Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>` when the assignee has a registered runner, and on a pool subject when the assignee has none. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go`, `internal/control/queue.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |

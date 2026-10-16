@@ -138,6 +138,67 @@ func TestCheckWait(t *testing.T) {
 	}
 }
 
+func TestTimeoutSelection(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		gate    time.Duration
+		session time.Duration
+		errHas  []string
+	}{
+		{name: "30m selects 30 minutes", content: "gate_timeout = \"30m\"\nsession_timeout = \"30m\"\n", gate: 30 * time.Minute, session: 30 * time.Minute},
+		{name: "missing key selects the defaults", content: "", gate: DefaultGateTimeout, session: DefaultSessionTimeout},
+		{name: "empty selects the defaults", content: "gate_timeout = \"\"\nsession_timeout = \"\"\n", gate: DefaultGateTimeout, session: DefaultSessionTimeout},
+		{name: "blank selects the defaults", content: "gate_timeout = \"  \"\nsession_timeout = \"  \"\n", gate: DefaultGateTimeout, session: DefaultSessionTimeout},
+		{name: "unparseable gate", content: "gate_timeout = \"soon\"\n", errHas: []string{"gate_timeout", "soon", "30m"}},
+		{name: "unparseable session", content: "session_timeout = \"later\"\n", errHas: []string{"session_timeout", "later", "30m"}},
+		{name: "zero gate", content: "gate_timeout = \"0s\"\n", errHas: []string{"gate_timeout", "0s", "30m"}},
+		{name: "negative session", content: "session_timeout = \"-1m\"\n", errHas: []string{"session_timeout", "-1m", "30m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse(Path, []byte("gate = \"make check\"\n"+tc.content))
+			if tc.errHas == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.GateTimeout != tc.gate || cfg.SessionTimeout != tc.session {
+					t.Fatalf("gate %v session %v, want gate %v session %v", cfg.GateTimeout, cfg.SessionTimeout, tc.gate, tc.session)
+				}
+				if DefaultGateTimeout != 30*time.Minute || DefaultSessionTimeout != 2*time.Hour {
+					t.Fatalf("defaults are gate %v session %v, want 30m and 2h", DefaultGateTimeout, DefaultSessionTimeout)
+				}
+				// A set key overrides a runner flag. A missing key keeps the flag.
+				flag := time.Hour
+				wantGate, wantSession := tc.gate, tc.session
+				if !cfg.gateTimeoutSet {
+					wantGate = flag
+				}
+				if !cfg.sessionTimeoutSet {
+					wantSession = flag
+				}
+				if cfg.GateTimeoutOr(flag) != wantGate || cfg.SessionTimeoutOr(flag) != wantSession {
+					t.Fatalf("with a %v flag, gate %v session %v, want gate %v session %v", flag, cfg.GateTimeoutOr(flag), cfg.SessionTimeoutOr(flag), wantGate, wantSession)
+				}
+				if cfg.GateTimeoutOr(0) != tc.gate || cfg.SessionTimeoutOr(0) != tc.session {
+					t.Fatalf("with no flag, gate %v session %v, want gate %v session %v", cfg.GateTimeoutOr(0), cfg.SessionTimeoutOr(0), tc.gate, tc.session)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, s := range tc.errHas {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q missing %q", err, s)
+				}
+			}
+		})
+	}
+}
+
 func TestUnknownKeyDoesNotClaimOnlyGateIsSupported(t *testing.T) {
 	t.Parallel()
 	_, err := Parse(Path, []byte("gate = \"x\"\ngaet = \"y\"\n"))

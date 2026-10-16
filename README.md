@@ -42,7 +42,7 @@ One control node and one runner, on the same machine or not. The target reposito
 
 After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the review. Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
 
-A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3). The count is kept in memory, and a restarted runner starts the attempt count over.
+A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A harness session stops after `--session-timeout` (default 2 hours). The gate stops after `--gate-timeout` (default 30 minutes). Either deadline cancels that process group, fails the job, and comments on the issue that the session or the gate timed out, without the command's output. The repo config keys `session_timeout` and `gate_timeout` override the flags. An empty value keeps the flag. A gate timeout is not retried. A session timeout before the pull request is open counts toward `--max-attempts`. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3). The count is kept in memory, and a restarted runner starts the attempt count over.
 
 By default each harness session is started with `--permission-mode acceptEdits`, which only lets it edit files in its worktree. `--claude-args` replaces those flags for Claude Code when a session needs to run commands. It does not apply to the Grok CLI.
 
@@ -60,6 +60,14 @@ gate = "make check test"
 # Absent, empty, and "human" leave the pull request for a person.
 # "factory" means the factory merges.
 merge = "human"
+
+# Optional. How long the gate command may run. A Go duration.
+# Absent or empty keeps the runner's --gate-timeout (default 30m).
+gate_timeout = "30m"
+
+# Optional. How long one harness session may run. A Go duration.
+# Absent or empty keeps the runner's --session-timeout (default 2h).
+session_timeout = "2h"
 ```
 
 See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts, so the session cannot change the gate or turn factory merge on.

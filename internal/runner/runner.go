@@ -8,7 +8,11 @@
 // defaults to off, it also takes a job whose steward has no registered
 // runner, one job at a time, its own first. The factory merges the pull
 // request only when the repo config sets merge = "factory". The default is a
-// person.
+// person. A harness session is canceled after the session timeout (default 2
+// hours) and the gate after the gate timeout (default 30 minutes). The repo
+// config keys session_timeout and gate_timeout override those flags. A
+// timeout cancels that process group, fails the job, and comments on the
+// issue. The comment does not include the command's output.
 package runner
 
 import (
@@ -123,6 +127,15 @@ type Options struct {
 	// RetryDelay is how long a failed job waits before it is delivered
 	// again. Zero means 30 seconds.
 	RetryDelay time.Duration
+	// SessionTimeout is how long one harness session may run before its
+	// process group is canceled. Zero means 2 hours. The repo config
+	// session_timeout overrides a positive value when that key is set.
+	SessionTimeout time.Duration
+	// GateTimeout is how long the gate command may run before its process
+	// group is canceled. Zero means 30 minutes. The repo config gate_timeout
+	// overrides a positive value when that key is set. A gate timeout is not
+	// retried.
+	GateTimeout time.Duration
 }
 
 // Runner pulls and works one steward's jobs.
@@ -185,6 +198,12 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	}
 	if o.RetryDelay == 0 {
 		o.RetryDelay = defaultRetryDelay
+	}
+	if o.SessionTimeout <= 0 {
+		o.SessionTimeout = repoconfig.DefaultSessionTimeout
+	}
+	if o.GateTimeout <= 0 {
+		o.GateTimeout = repoconfig.DefaultGateTimeout
 	}
 	var err error
 	if o.WorkDir, err = filepath.Abs(o.WorkDir); err != nil {
@@ -416,6 +435,72 @@ func (r *Runner) recordWorkFailure(subject string) int {
 	return r.failures[subject]
 }
 
+// deadlines bound one job's harness sessions and its gate command.
+type deadlines struct {
+	session time.Duration
+	gate    time.Duration
+}
+
+func (r *Runner) deadlinesFor(cfg repoconfig.Config) deadlines {
+	return deadlines{
+		session: cfg.SessionTimeoutOr(r.opts.SessionTimeout),
+		gate:    cfg.GateTimeoutOr(r.opts.GateTimeout),
+	}
+}
+
+// timeoutError is a session or gate canceled at its deadline. The text is
+// what the issue comment reports, and it carries no command output.
+type timeoutError struct {
+	what string
+}
+
+func (e timeoutError) Error() string { return e.what + " timed out" }
+
+// runSession runs one harness session. The deadline is a child context, so
+// the harness's process-group kill runs when it fires and a shutdown of the
+// parent still cancels the session.
+func (r *Runner) runSession(ctx context.Context, limit time.Duration, req harness.Request) error {
+	if limit <= 0 {
+		limit = repoconfig.DefaultSessionTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	err := r.harness.Run(ctx, req)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return timeoutError{what: "the " + r.harness.Name() + " session"}
+	}
+	return err
+}
+
+// runGate runs the gate command. Workspace.Run puts it in its own process
+// group and kills that group when ctx is canceled. A timeout drops the
+// command output so a comment cannot echo it.
+func (r *Runner) runGate(ctx context.Context, ws Workspace, limit time.Duration, command string) (string, error) {
+	if limit <= 0 {
+		limit = repoconfig.DefaultGateTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	output, err := ws.Run(ctx, command)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", timeoutError{what: "the gate"}
+	}
+	return output, err
+}
+
+// finishSessionErr keeps a timeout's own text and wraps every other session
+// failure the way the runner always has.
+func finishSessionErr(kind string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var timedOut timeoutError
+	if errors.As(err, &timedOut) {
+		return err
+	}
+	return fmt.Errorf("the %s session did not finish: %w", kind, err)
+}
+
 // outcome is the final state of one attempt at a job.
 type outcome struct {
 	state  State
@@ -500,9 +585,10 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if err != nil {
 		return failed(err)
 	}
+	limits := r.deadlinesFor(cfg)
 	url, spent := prURL, 0
 	if url == "" {
-		out, ok := r.open(ctx, ws, gh, job, cfg.Gate, branch, base)
+		out, ok := r.open(ctx, ws, gh, job, cfg.Gate, branch, base, limits)
 		if !ok {
 			return out
 		}
@@ -519,7 +605,7 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 			return reviewFailed(url, err)
 		}
 	}
-	out := r.review(ctx, ws, job, cfg.Gate, url, spent)
+	out := r.review(ctx, ws, job, cfg.Gate, url, spent, limits)
 	// The merge policy was read with the gate, before the session ran, so the
 	// session cannot turn factory merge on for itself. Absent and "human"
 	// leave the pull request for a person.
@@ -531,10 +617,10 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 
 // open runs the session, the gate, and the push, and opens the pull request.
 // ok is true when out.detail is the new pull request's URL.
-func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.Job, gate, branch, base string) (out outcome, ok bool) {
+func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.Job, gate, branch, base string, limits deadlines) (out outcome, ok bool) {
 	r.report(job, StateWorking, r.harness.Name())
-	if err := r.harness.Run(ctx, r.session(ws.Dir(), brief(job, gate))); err != nil {
-		return failed(fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err)), false
+	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), brief(job, gate)))); err != nil {
+		return failed(err), false
 	}
 	title, body := prText(ws.Dir(), job.Issue, job.Title)
 	changed, err := ws.Commit(ctx, title)
@@ -544,7 +630,7 @@ func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.
 	if !changed {
 		return failed(fmt.Errorf("the %s session made no changes", r.harness.Name())), false
 	}
-	if output, err := ws.Run(ctx, gate); err != nil {
+	if output, err := r.runGate(ctx, ws, limits.gate, gate); err != nil {
 		return r.gateOutcome(job, gate, "", err, output), false
 	}
 	if err := ws.Push(ctx); err != nil {
@@ -561,6 +647,16 @@ func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.
 // opened. The gate's output stays in the runner log: the session wrote the
 // code that produced it, so it is not trusted to be safe to publish.
 func (r *Runner) gateOutcome(job control.Job, gate, prURL string, runErr error, output string) outcome {
+	var timedOut timeoutError
+	if errors.As(runErr, &timedOut) {
+		detail := timedOut.Error()
+		r.log.Warn("gate timed out", "repo", job.Repo, "issue", job.Issue)
+		comment := "schmeide did not open a pull request: " + detail + "."
+		if prURL != "" {
+			comment = "schmeide left the pull request open: " + detail + ". " + prURL
+		}
+		return outcome{state: StateGateFailed, detail: detail, comment: comment}
+	}
 	if len(output) > gateTailBytes {
 		output = "...\n" + output[len(output)-gateTailBytes:]
 	}
