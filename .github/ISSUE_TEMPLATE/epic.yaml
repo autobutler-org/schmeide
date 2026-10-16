@@ -1,0 +1,37 @@
+name: Epic
+description: Track a large goal that splits into several issues.
+title: "[Epic] "
+labels:
+  - epic
+assignees: []
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome this epic delivers, in a few sentences. Name the control node, runner, gate, or harness when the work sits in one of those.
+      placeholder: Runners report job status to the control node, and an operator can see every job from one command.
+    validations:
+      required: true
+  - type: textarea
+    id: child-issues
+    attributes:
+      label: Child issues
+      description: One issue per line, each small enough for one job and one pull request. Link existing issues and describe the ones not yet filed.
+      placeholder: |
+        - [ ] #123 Add the status endpoint
+        - [ ] Show job state in the status command
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this epic does not include, so later work is not pulled in.
+  - type: textarea
+    id: done
+    attributes:
+      label: How to tell it is done
+      description: The behavior that must be true once every child issue has merged.
+    validations:
+      required: true

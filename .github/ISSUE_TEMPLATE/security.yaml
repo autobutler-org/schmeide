@@ -1,0 +1,40 @@
+name: Security Issue
+description: Report a security weakness. Do not include a secret in this form.
+title: "[Security] "
+labels:
+  - security
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: Never paste a token, key, or password here. Describe where it appears instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What is the weakness?
+      description: What goes wrong and where. Name the control node, runner, steward, gate, or pull request flow involved.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: What an attacker or a mistake could do, and who is affected.
+    validations:
+      required: true
+  - type: dropdown
+    id: credential-leak
+    attributes:
+      label: Could a credential leak?
+      description: Tokens, keys, or GitHub App credentials, in logs, comments, or pull requests.
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps to see the weakness. Use placeholders for any secret value.

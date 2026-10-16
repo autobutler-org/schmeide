@@ -1,0 +1,26 @@
+name: Question
+description: Ask how schmeide works or how to set it up.
+title: "[Question] "
+labels:
+  - question
+assignees: []
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do you want to know? Name the control node, runner, gate, or pull request flow if the question is about one of those.
+      placeholder: How does a runner pick up a job from the control node?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: The docs you read and the steps you took, so the answer does not repeat them.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Copy and paste any log output from the control node, the runner, or the gate that relates to the question. Remove any token or credential first. This is rendered as code, so no backticks are needed.
+      render: shell

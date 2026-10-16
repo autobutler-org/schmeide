@@ -1,0 +1,33 @@
+name: Performance
+description: Report something slow or resource heavy.
+title: "[Performance] "
+labels:
+  - performance
+assignees: []
+body:
+  - type: textarea
+    id: slow
+    attributes:
+      label: What is slow?
+      description: The operation, and how slow it is compared with what you expected. Name the control node, runner, gate, or job if it applies.
+      placeholder: The gate takes ten minutes to run on a small pull request.
+    validations:
+      required: true
+  - type: textarea
+    id: measured
+    attributes:
+      label: How it was measured
+      description: The command, timings, and number of runners or jobs involved, so someone else can repeat the measurement.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Host, operating system, and schmeide version or commit.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Copy and paste any timing or log output. This is rendered as code, so no backticks are needed.
+      render: shell
