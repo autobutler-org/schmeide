@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"text/tabwriter"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -202,6 +207,10 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, da
 // record now belongs to a later job: one on another subject, or one published
 // after this status was stored.
 func (t *Tracker) finish(seq uint64, job string, state State) error {
+	if t.issues == nil {
+		// ReadStatus only reads; the control node records final states.
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
 	parts := strings.Split(job, ".")
@@ -271,4 +280,153 @@ func (t *Tracker) JobStatus(subject string) (Status, bool) {
 	defer t.mu.Unlock()
 	status, ok := t.jobs[subject]
 	return status, ok
+}
+
+// JobState is one unfinished job in a Snapshot.
+type JobState struct {
+	// Subject is the job's subject (see Job.Subject).
+	Subject string `json:"subject"`
+	State   State  `json:"state"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// Snapshot is what `schmeide status` reports. Its JSON form is stable.
+type Snapshot struct {
+	Runners []Registration `json:"runners"`
+	// Jobs are the jobs whose latest state is not final, by subject.
+	Jobs []JobState `json:"jobs"`
+}
+
+// ReadStatus replays the status stream into a Snapshot. It only reads: no
+// final state is recorded on an issue. A missing stream is an empty Snapshot.
+func ReadStatus(ctx context.Context, js jetstream.JetStream) (Snapshot, error) {
+	snap := Snapshot{Runners: []Registration{}, Jobs: []JobState{}}
+	stream, err := js.Stream(ctx, statusStream)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		return snap, nil
+	}
+	if err != nil {
+		return snap, fmt.Errorf("read status stream: %w", err)
+	}
+	t := &Tracker{jobs: map[string]Status{}}
+	if err := t.replay(ctx, stream, slog.New(slog.DiscardHandler), stream.CachedInfo().State); err != nil {
+		return snap, err
+	}
+	snap.Runners = append(snap.Runners, t.runners...)
+	for subject, status := range t.jobs {
+		if !status.State.final() {
+			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail})
+		}
+	}
+	slices.SortFunc(snap.Jobs, func(a, b JobState) int { return strings.Compare(a.Subject, b.Subject) })
+	return snap, nil
+}
+
+// WriteText writes the Snapshot as aligned columns.
+func (s Snapshot) WriteText(w io.Writer) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if len(s.Runners) == 0 {
+		fmt.Fprintln(tw, "No registered runners.")
+	} else {
+		fmt.Fprintln(tw, "RUNNER\tHOST\tHARNESSES\tPOOL")
+		for _, r := range s.Runners {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%t\n", r.Steward, r.Host, strings.Join(r.Harnesses, ","), r.Pool)
+		}
+	}
+	tw.Flush()
+	fmt.Fprintln(w)
+	if len(s.Jobs) == 0 {
+		fmt.Fprintln(w, "No queued or running jobs.")
+		return
+	}
+	fmt.Fprintln(tw, "JOB\tSTATE\tDETAIL")
+	for _, j := range s.Jobs {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", j.Subject, j.State, j.Detail)
+	}
+	tw.Flush()
+}
+
+// StatusUsage is the help text of `schmeide status`.
+func StatusUsage() string {
+	return `schmeide status shows the runners registered with the control node and the
+jobs that are queued or running, read from the control node's status stream.
+It connects to the control node's NATS as a steward, the same way a runner does.
+
+Usage:
+  schmeide status --steward <github login> [--json] [flags]
+
+Flags:
+  --steward
+        Your GitHub login. Required.
+        Env: SCHMEIDE_STEWARD
+  --nats-url
+        NATS URL of the control node, which is its --nats-addr.
+        Env: SCHMEIDE_NATS_URL (default "nats://127.0.0.1:4222")
+  --nats-token
+        This steward's NATS token: the one the control node's --runner-tokens lists for --steward.
+        Env: SCHMEIDE_NATS_TOKEN
+  --json
+        Print one JSON object with "runners" and "jobs" instead of text.
+  -h, --help
+        Show this help.
+`
+}
+
+// StatusMain runs `schmeide status` and returns its exit code.
+func StatusMain(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("schmeide status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	env := func(name, def string) string {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+		return def
+	}
+	steward := fs.String("steward", env("SCHMEIDE_STEWARD", ""), "")
+	url := fs.String("nats-url", env("SCHMEIDE_NATS_URL", "nats://127.0.0.1:4222"), "")
+	token := fs.String("nats-token", env("SCHMEIDE_NATS_TOKEN", ""), "")
+	asJSON := fs.Bool("json", false, "")
+	err := fs.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, StatusUsage())
+		return 0
+	}
+	if err == nil && fs.NArg() > 0 {
+		err = fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if err == nil && *steward == "" {
+		err = errors.New("missing --steward: pass your GitHub login with --steward or set SCHMEIDE_STEWARD")
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "schmeide status: %v\nRun 'schmeide status --help' for usage.\n", err)
+		return 2
+	}
+	nc, err := nats.Connect(*url, nats.UserInfo(*steward, *token), nats.CustomInboxPrefix(InboxPrefix(*steward)), nats.Name("schmeide status"))
+	if err != nil {
+		fmt.Fprintf(stderr, "schmeide status: cannot reach the control node's NATS at %s as %s: %v\n"+
+			"Check that `schmeide control` is running, that --nats-url points at its --nats-addr, "+
+			"and that --nats-token is the token its --runner-tokens lists for %s.\n", *url, *steward, err, *steward)
+		return 1
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		fmt.Fprintf(stderr, "schmeide status: %v\n", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	snap, err := ReadStatus(ctx, js)
+	if err != nil {
+		fmt.Fprintf(stderr, "schmeide status: %v\nCheck that --nats-url points at a `schmeide control` node.\n", err)
+		return 1
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(snap)
+		return 0
+	}
+	snap.WriteText(stdout)
+	return 0
 }
