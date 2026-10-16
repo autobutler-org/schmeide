@@ -28,6 +28,7 @@ setup: setup/gotools
 
 .PHONY: setup/gotools
 setup/gotools: ## Install go tools
+	$(GO) install golang.org/x/tools/gopls@v0.23.0
 	$(GO) install github.com/cweill/gotests/gotests@v1.6.0
 	$(GO) install github.com/josharian/impl@v1.4.0
 	$(GO) install github.com/haya14busa/goplay/cmd/goplay@v1.0.0
