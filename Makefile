@@ -14,7 +14,7 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-export GOTOOLCHAIN=go1.25.0+auto
+export GOTOOLCHAIN=go1.26.0+auto
 export GOPROXY ?= https://proxy.golang.org,direct
 GO := $(shell which go)
 
@@ -57,6 +57,16 @@ run: build ## Build and run the application
 test: ## Run tests
 	$(GO) test ./...
 
+COVER_OUT ?= ./build/coverage.out
+COVER_HTML ?= ./build/coverage.html
+
+.PHONY: test/cover
+test/cover: ## Run tests and write a coverage report under ./build
+	mkdir -p ./build
+	$(GO) test -coverprofile=$(COVER_OUT) ./...
+	$(GO) tool cover -html=$(COVER_OUT) -o $(COVER_HTML)
+	echo "Coverage report: $(COVER_HTML)"
+
 .PHONY: watch
 watch: ## Watch for changes and rebuild
 	$(GO) tool air \
@@ -87,11 +97,32 @@ upgrade/go: ## Upgrade Go dependencies
 GOLINT_ARGS ?= --verbose --config .golangci.yml
 
 .PHONY: check
-check: check/go ## Check code quality
+check: check/format check/tidy check/vet check/lint test ## Check code quality without changing files
 
-.PHONY: check/go
-check/go: ## Check Go code quality
-	$(GO) tool golangci-lint run --fix $(GOLINT_ARGS) ./...
+.PHONY: check/format
+check/format: ## Fail if any Go file needs gofmt
+	unformatted="$$(gofmt -l .)"
+	if [ -n "$$unformatted" ]; then
+		echo "These files need formatting (run \`make format\`):"
+		echo "$$unformatted"
+		exit 1
+	fi
+
+.PHONY: check/tidy
+check/tidy: ## Fail if go mod tidy would change go.mod or go.sum
+	$(GO) mod tidy -diff || { echo "go.mod/go.sum are not tidy (run \`make tidy\`)"; exit 1; }
+
+.PHONY: check/vet
+check/vet: ## Run go vet
+	$(GO) vet ./...
+
+.PHONY: check/lint
+check/lint: ## Run golangci-lint without fixing
+	$(GO) tool golangci-lint run $(GOLINT_ARGS) ./...
+
+.PHONY: check/vuln
+check/vuln: ## Scan for known vulnerabilities
+	$(GO) tool govulncheck ./...
 
 .PHONY: format
 format: format/go ## Format code
