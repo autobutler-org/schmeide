@@ -386,9 +386,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// outcomes. The JetStream delivery count is not that number: a token
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
-	// pass is final too: the pull request is already open, and a redelivery
-	// would treat that as done. A factory merge that does not land is final
-	// for the same reason.
+	// pass is final too: its rounds are spent. A factory merge that does not
+	// land is final as well.
 	if out.state == StateFailed {
 		n := r.recordWorkFailure(job.Subject())
 		if n < r.opts.MaxAttempts {
@@ -400,7 +399,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	delete(r.failures, job.Subject())
 	if out.comment != "" {
-		if err := gh.comment(ctx, job.Issue, out.comment); err != nil {
+		if err := gh.comment(ctx, job.Issue, markOutcome(out.comment, out.state)); err != nil {
 			r.log.Error("could not comment on the issue", "repo", job.Repo, "issue", job.Issue, "err", err)
 		}
 	}
@@ -440,19 +439,33 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	}
 	branch := BranchName(job.Issue, job.Title)
 	// A redelivered job whose first runner died after opening the PR must not
-	// open a second one. The first attempt's PR already links the issue, so
-	// nothing more is said there. The guard goes by the issue number, not the
-	// whole branch name, which changes when the issue is retitled. A stacked
-	// pull request matches here too, and a later review pushes the same head.
-	if url, err := gh.findPR(ctx, job.Issue); err != nil {
-		return failed(err)
-	} else if url != "" {
-		return outcome{state: StatePROpened, detail: url}
-	}
-	// Asked before the worktree exists, so a stacked job starts on the
-	// dependency's branch and the pull request opens against it.
-	base, err := gh.baseBranch(ctx, job.Issue)
+	// open a second one. The guard goes by the issue number, not the whole
+	// branch name, which changes when the issue is retitled. A stacked pull
+	// request matches here too, and a later review pushes the same head.
+	pr, found, err := gh.issuePull(ctx, job.Issue, "all")
 	if err != nil {
+		return failed(err)
+	}
+	var base string
+	if found {
+		// An outcome posted since the pull request opened means only the
+		// acknowledgment was lost. It is not posted again.
+		state, posted, err := gh.postedOutcome(ctx, job.Issue, pr.CreatedAt)
+		if err != nil {
+			return outcome{state: StateFailed, detail: err.Error(), comment: "schmeide could not finish this job and left the pull request open: " + pr.HTMLURL + "\n\n" + err.Error()}
+		}
+		if posted {
+			return outcome{state: state, detail: pr.HTMLURL}
+		}
+		// A closed pull request is someone's decision, and the first attempt's
+		// pull request already links the issue.
+		if pr.State != "open" {
+			return outcome{state: StatePROpened, detail: pr.HTMLURL}
+		}
+		branch, base = pr.Head.Ref, pr.Base.Ref
+	} else if base, err = gh.baseBranch(ctx, job.Issue); err != nil {
+		// Asked before the worktree exists, so a stacked job starts on the
+		// dependency's branch and the pull request opens against it.
 		return failed(err)
 	}
 
@@ -475,39 +488,38 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 			r.log.Warn("could not clean up the job's worktree", "repo", job.Repo, "issue", job.Issue, "err", err)
 		}
 	}()
-	return r.execute(ctx, ws, gh, job, branch, base)
+	return r.execute(ctx, ws, gh, job, branch, base, pr.HTMLURL)
 }
 
-// execute is the job itself, written against Workspace only.
-func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job control.Job, branch, base string) outcome {
+// execute is the job itself, written against Workspace only. A non-empty
+// prURL is the job's open pull request from an earlier delivery, which is
+// resumed at its review.
+func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job control.Job, branch, base, prURL string) outcome {
 	// The gate is read before the session runs, so the session cannot weaken it.
 	cfg, err := repoconfig.Load(ws.Dir())
 	if err != nil {
 		return failed(err)
 	}
-	r.report(job, StateWorking, r.harness.Name())
-	if err := r.harness.Run(ctx, r.session(ws.Dir(), brief(job, cfg.Gate))); err != nil {
-		return failed(fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err))
+	url, spent := prURL, 0
+	if url == "" {
+		out, ok := r.open(ctx, ws, gh, job, cfg.Gate, branch, base)
+		if !ok {
+			return out
+		}
+		url = out.detail
+	} else {
+		// The branch moves to the pull request's head only now, after the
+		// gate was read from the base.
+		if err := ws.Resume(ctx); err != nil {
+			return reviewFailed(url, err)
+		}
+		// ponytail: a rejection whose fix was never pushed is not counted, so
+		// a redelivery can run one round more than --max-review-rounds.
+		if spent, err = ws.Count(ctx, fixMessage(job.Issue)); err != nil {
+			return reviewFailed(url, err)
+		}
 	}
-	title, body := prText(ws.Dir(), job.Issue, job.Title)
-	changed, err := ws.Commit(ctx, title)
-	if err != nil {
-		return failed(err)
-	}
-	if !changed {
-		return failed(fmt.Errorf("the %s session made no changes", r.harness.Name()))
-	}
-	if output, err := ws.Run(ctx, cfg.Gate); err != nil {
-		return r.gateOutcome(job, cfg.Gate, "", err, output)
-	}
-	if err := ws.Push(ctx); err != nil {
-		return failed(err)
-	}
-	url, err := gh.openPR(ctx, title, body, branch, base)
-	if err != nil {
-		return failed(err)
-	}
-	out := r.review(ctx, ws, job, cfg.Gate, url)
+	out := r.review(ctx, ws, job, cfg.Gate, url, spent)
 	// The merge policy was read with the gate, before the session ran, so the
 	// session cannot turn factory merge on for itself. Absent and "human"
 	// leave the pull request for a person.
@@ -515,6 +527,34 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		return out
 	}
 	return r.mergeWhenGreen(ctx, ws, gh, url)
+}
+
+// open runs the session, the gate, and the push, and opens the pull request.
+// ok is true when out.detail is the new pull request's URL.
+func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.Job, gate, branch, base string) (out outcome, ok bool) {
+	r.report(job, StateWorking, r.harness.Name())
+	if err := r.harness.Run(ctx, r.session(ws.Dir(), brief(job, gate))); err != nil {
+		return failed(fmt.Errorf("the %s session did not finish: %w", r.harness.Name(), err)), false
+	}
+	title, body := prText(ws.Dir(), job.Issue, job.Title)
+	changed, err := ws.Commit(ctx, title)
+	if err != nil {
+		return failed(err), false
+	}
+	if !changed {
+		return failed(fmt.Errorf("the %s session made no changes", r.harness.Name())), false
+	}
+	if output, err := ws.Run(ctx, gate); err != nil {
+		return r.gateOutcome(job, gate, "", err, output), false
+	}
+	if err := ws.Push(ctx); err != nil {
+		return failed(err), false
+	}
+	url, err := gh.openPR(ctx, title, body, branch, base)
+	if err != nil {
+		return failed(err), false
+	}
+	return outcome{detail: url}, true
 }
 
 // gateOutcome reports a failed gate. prURL is empty when no pull request was

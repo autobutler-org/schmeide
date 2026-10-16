@@ -58,7 +58,11 @@ type pull struct {
 
 // reply is the pull request as GitHub returns it, where head is an object.
 func (p pull) reply() map[string]any {
-	return map[string]any{"html_url": p.URL, "head": map[string]string{"ref": p.Head}}
+	state := p.State
+	if state == "" {
+		state = "open"
+	}
+	return map[string]any{"html_url": p.URL, "state": state, "head": map[string]string{"ref": p.Head}, "base": map[string]string{"ref": p.Base}}
 }
 
 // fakeGitHub is the part of the GitHub REST API a runner uses, for testRepo.
@@ -132,6 +136,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.onPR != nil {
 			f.onPR()
 		}
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/comments"):
+		// Every comment here is the app's own, so each is a bot's.
+		found := []map[string]any{}
+		for _, body := range f.comments[strings.Split(path, "/")[2]] {
+			found = append(found, map[string]any{"body": body, "user": map[string]string{"type": "Bot"}})
+		}
+		reply = found
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/comments"):
 		var c struct {
 			Body string `json:"body"`
@@ -807,7 +818,8 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 		wantSessions int32
 	}{
 		{name: "dies mid-session", wantSessions: 2},
-		{name: "dies after opening the PR", afterPR: true, wantSessions: 0},
+		// The second runner resumes the open pull request at its review.
+		{name: "dies after opening the PR", afterPR: true, wantSessions: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -821,6 +833,15 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			h1, _ := writes(map[string]string{"fix.txt": "x"})
 			if tt.afterPR {
 				w.gh.onPR = die
+				// The dead runner never finishes its review.
+				work := h1.RunFunc
+				h1.RunFunc = func(ctx context.Context, req harness.Request) error {
+					if strings.Contains(req.Prompt, reviewLead) {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					return work(ctx, req)
+				}
 			} else {
 				h1.RunFunc = func(ctx context.Context, _ harness.Request) error {
 					die()
@@ -847,8 +868,12 @@ func TestDeadRunnersJobIsRedeliveredWithoutDuplicatePR(t *testing.T) {
 			if got := sessions.Load(); got != tt.wantSessions {
 				t.Errorf("second runner ran %d sessions, want %d", got, tt.wantSessions)
 			}
-			if pulls, _ := w.gh.snapshot(); len(pulls) != 1 {
+			pulls, comments := w.gh.snapshot()
+			if len(pulls) != 1 {
 				t.Errorf("pull requests = %+v, want exactly one", pulls)
+			}
+			if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "review passed") {
+				t.Errorf("issue comments = %q, want one outcome comment", comments["7"])
 			}
 			if got := git(t, w.bare, "show", "7_fix-the-thing:fix.txt"); got != "x" {
 				t.Errorf("pushed fix.txt = %q, want %q", got, "x")
@@ -1593,12 +1618,12 @@ func TestFindPRPagesPastTheNewest(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got, err := (github{api: srv.URL, repo: testRepo, token: testToken}).findPR(t.Context(), 7)
+	got, ok, err := (github{api: srv.URL, repo: testRepo, token: testToken}).issuePull(t.Context(), 7, "all")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
-		t.Errorf("findPR = %q, want %q", got, want)
+	if !ok || got.HTMLURL != want {
+		t.Errorf("issuePull = %q, %v, want %q", got.HTMLURL, ok, want)
 	}
 	if !slices.Equal(pages, []string{"1", "2"}) {
 		t.Errorf("pages = %v, want the first page and the next", pages)
@@ -1977,4 +2002,89 @@ func TestOneStackableDependencyIgnoresAnUnstackableBlocker(t *testing.T) {
 		t.Errorf("base = %q, want %s", got.Base, dep)
 	}
 	assertCommitParent(t, w.bare, branch, dep)
+}
+
+// seedJobPR pushes the job's branch with one work commit and then a review
+// fix commit for each of fixes, and opens its pull request against main.
+func (w *world) seedJobPR(t *testing.T, fixes int) {
+	t.Helper()
+	const branch = "7_fix-the-thing"
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "checkout", "-q", "-b", branch)
+	for i := range fixes + 1 {
+		if err := os.WriteFile(filepath.Join(src, "fix.txt"), []byte(strconv.Itoa(i)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		msg := "Fix the Thing!"
+		if i > 0 {
+			msg = fixMessage(7)
+		}
+		git(t, src, "add", "-A")
+		git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", msg)
+	}
+	git(t, src, "push", "-q", "origin", "HEAD:"+branch)
+	w.gh.seedPull(pull{Head: branch, Base: "main"})
+}
+
+// TestRedeliveryAfterOutcomeCommentPostsNothing is a job whose outcome was
+// posted but whose acknowledgment was lost.
+func TestRedeliveryAfterOutcomeCommentPostsNothing(t *testing.T) {
+	w := newWorld(t)
+	w.seedJobPR(t, 0)
+	posted := markOutcome("schmeide opened a pull request for this issue: https://github.test/o/r/pull/1", StatePROpened)
+	w.gh.mu.Lock()
+	w.gh.comments["7"] = []string{posted}
+	w.gh.mu.Unlock()
+
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed pr_opened]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	if sessions.Load() != 0 {
+		t.Errorf("sessions = %d, want none", sessions.Load())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want only the first", pulls)
+	}
+	if !slices.Equal(comments["7"], []string{posted}) {
+		t.Errorf("issue comments = %q, want only the first outcome", comments["7"])
+	}
+}
+
+// TestRedeliveryKeepsSpentReviewRounds resumes a pull request that already
+// had two rejected rounds, so only the last round is left.
+func TestRedeliveryKeepsSpentReviewRounds(t *testing.T) {
+	w := newWorld(t)
+	w.seedJobPR(t, defaultMaxReviewRounds-1)
+	var workers, reviews atomic.Int32
+	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			reviews.Add(1)
+			return writeVerdict(req, "changes\nstill wrong\n")
+		}
+		workers.Add(1)
+		return errors.New("the open pull request needs no new work session")
+	}}
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed reviewing review_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	if reviews.Load() != 1 || workers.Load() != 0 {
+		t.Errorf("workers = %d, reviews = %d, want only the last review round", workers.Load(), reviews.Load())
+	}
+	pulls, comments := w.gh.snapshot()
+	if len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want only the first", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], fmt.Sprintf("within %d rounds", defaultMaxReviewRounds)) {
+		t.Errorf("issue comments = %q, want one comment that the rounds are spent", comments["7"])
+	}
+	assertNoMerge(t, w)
 }

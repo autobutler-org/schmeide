@@ -30,6 +30,11 @@ type Workspace interface {
 	Push(ctx context.Context) error
 	// Head is the commit the branch points at.
 	Head(ctx context.Context) (string, error)
+	// Resume moves the branch to the remote branch's head, for a job whose
+	// pull request is already open.
+	Resume(ctx context.Context) error
+	// Count is how many commits after the base have subject as their subject.
+	Count(ctx context.Context, subject string) (int, error)
 	// Close removes the workspace.
 	Close() error
 }
@@ -187,6 +192,31 @@ func (w *worktree) ancestorOfHEAD(ctx context.Context, commit string) bool {
 // Head implements [Workspace].
 func (w *worktree) Head(ctx context.Context) (string, error) {
 	return w.git(ctx, w.dir, "rev-parse", "HEAD")
+}
+
+// Resume implements [Workspace].
+func (w *worktree) Resume(ctx context.Context) error {
+	ref := "refs/remotes/origin/" + w.spec.branch
+	if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+refs/heads/"+w.spec.branch+":"+ref); err != nil {
+		return err
+	}
+	_, err := w.git(ctx, w.dir, "reset", "-q", "--hard", ref)
+	return err
+}
+
+// Count implements [Workspace].
+func (w *worktree) Count(ctx context.Context, subject string) (int, error) {
+	out, err := w.git(ctx, w.dir, "log", "--format=%s", w.baseRef+"..HEAD")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == subject {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Close implements [Workspace].
