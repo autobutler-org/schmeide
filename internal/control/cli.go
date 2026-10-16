@@ -39,7 +39,7 @@ var controlSettings = []setting{
 	{name: "allowed-orgs", usage: "Comma-separated organization or user logins whose repositories may create jobs. Webhooks for anyone else are rejected with 403. This or --allowed-installations is required."},
 	{name: "allowed-installations", usage: "Comma-separated GitHub App installation IDs that may create jobs. A webhook is accepted when it matches this list or --allowed-orgs. This or --allowed-orgs is required."},
 	{name: "github-app-id", required: true, usage: "App ID of the schmeide GitHub App."},
-	{name: "github-app-private-key-file", required: true, usage: "Path of the GitHub App's private key (.pem)."},
+	{name: "github-app-private-key-file", required: true, usage: "Path of the GitHub App's private key (.pem). The file must not be readable by group or other: run 'chmod 0600' on it, or control refuses to start."},
 	{name: "github-api-url", def: DefaultGitHubAPIURL, usage: "Base URL of the GitHub REST API."},
 }
 
@@ -188,6 +188,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "schmeide control: %v\nRun 'schmeide control --help' for usage.\n", err)
 		return 2
 	}
+	if err := CheckPrivateKeyFileMode(cfg.GitHubAppPrivateKeyFile); err != nil {
+		fmt.Fprintf(stderr, "schmeide control: %v\n", err)
+		return 2
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := Run(ctx, cfg, slog.New(slog.NewTextHandler(stderr, nil))); err != nil {
@@ -195,4 +199,17 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// CheckPrivateKeyFileMode refuses a GitHub App private key file that group
+// or other may read, and says how to fix it.
+func CheckPrivateKeyFileMode(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("GitHub App private key: %w; fix --github-app-private-key-file", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o044 != 0 {
+		return fmt.Errorf("GitHub App private key %s has mode %04o, readable by group or other; run 'chmod 0600 %s' and start again", path, mode, path)
+	}
+	return nil
 }

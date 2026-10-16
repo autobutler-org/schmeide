@@ -96,3 +96,30 @@ func TestParseControl(t *testing.T) {
 		t.Errorf("err = %v, want the unknown setting named", err)
 	}
 }
+
+func TestControlRefusesReadableKeyFile(t *testing.T) {
+	for _, s := range controlSettings {
+		t.Setenv(s.env(), "")
+	}
+	key := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(key, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	args := []string{"--webhook-secret", "s", "--github-app-id", "1", "--allowed-orgs", "acme", "--runner-tokens", "octocat:t", "--github-app-private-key-file", key}
+	if code := Main(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "chmod 0600 "+key) {
+		t.Errorf("code = %d, stderr = %q, want a failure with the chmod hint", code, stderr.String())
+	}
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPrivateKeyFileMode(key); err != nil {
+		t.Errorf("0600 key: %v", err)
+	}
+	if !strings.Contains(Usage(), "chmod 0600") {
+		t.Error("usage does not document the key file mode")
+	}
+}

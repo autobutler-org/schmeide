@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -319,5 +321,29 @@ func TestReportControlNodeFailsBesideAReadyHarness(t *testing.T) {
 	const want = "FAIL  control node: no steward to connect as; pass your GitHub login with --steward"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("output %q does not contain %q", out.String(), want)
+	}
+}
+
+func TestKeyFileCheck(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(key, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if Report(t.Context(), &out, []Check{KeyFileCheck(key)}) || !strings.Contains(out.String(), "FAIL  github app private key") || !strings.Contains(out.String(), "chmod 0600 "+key) {
+		t.Errorf("0644 key: report = %q, want a failure with the chmod hint", out.String())
+	}
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if !Report(t.Context(), &out, []Check{KeyFileCheck(key)}) {
+		t.Errorf("0600 key: report = %q, want ok", out.String())
+	}
+	if !strings.Contains(Usage(), "--github-app-private-key-file") || !strings.Contains(Usage(), "chmod 0600") {
+		t.Error("usage does not mention the key file check")
 	}
 }
