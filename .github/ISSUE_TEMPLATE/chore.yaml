@@ -1,0 +1,27 @@
+name: Chore
+description: Maintenance work with no change in behavior, such as a dependency bump or cleanup.
+title: "[Chore] "
+labels:
+  - chore
+assignees: []
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should be tidied, updated, or removed. Name the control node, runner, gate, or harness when the work sits in one of those.
+      placeholder: Bump the pinned dev tool versions and drop the unused helper in the runner.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: What this unblocks or what it costs to leave as is.
+  - type: textarea
+    id: done
+    attributes:
+      label: How to tell it is done
+      description: The checks to run before the pull request is ready. Name the repo gate when it covers the change, and confirm behavior is unchanged.
+    validations:
+      required: true
