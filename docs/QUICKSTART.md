@@ -79,6 +79,21 @@ On an open issue in the repository, assign it to the steward's login (`octocat` 
 
 The webhook creates one job. The runner takes it, works on a branch named `<issue number>_<short-description>`, runs the gate from `.schmeide/config.toml`, then pushes and opens a pull request as the App. A review stage then runs. With the default `merge`, a person presses merge.
 
+## Shell completion
+
+`schmeide completion <shell>` prints a completion script to stdout.
+
+```sh
+# bash: add to ~/.bashrc
+source <(schmeide completion bash)
+
+# zsh: add to ~/.zshrc, after compinit
+source <(schmeide completion zsh)
+
+# fish
+schmeide completion fish > ~/.config/fish/completions/schmeide.fish
+```
+
 ## Troubleshooting
 
 - **Control will not start:** check the allowlist is set and the key file is mode 0600.
