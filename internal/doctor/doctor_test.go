@@ -347,3 +347,33 @@ func TestKeyFileCheck(t *testing.T) {
 		t.Error("usage does not mention the key file check")
 	}
 }
+
+func TestMainHelpAndBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"-h"}, &stdout, &stderr); code != 0 || stdout.String() != Usage() {
+		t.Errorf("-h: exit %d, stdout %q; want 0 and the usage", code, stdout.String())
+	}
+	if code := Main([]string{"--no-such-flag"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "Run 'schmeide doctor --help' for usage.") {
+		t.Errorf("bad flag: exit %d, stderr %q; want 2 and the usage hint", code, stderr.String())
+	}
+}
+
+func TestMainFailsWithoutAHarness(t *testing.T) {
+	// An empty PATH hides git and every harness. No steward means the
+	// control node check fails without dialing NATS.
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SCHMEIDE_STEWARD", "")
+	t.Setenv("SCHMEIDE_GITHUB_APP_PRIVATE_KEY_FILE", "")
+	var stdout, stderr bytes.Buffer
+	if code := Main(nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code %d, want 1; stdout:\n%s", code, stdout.String())
+	}
+	for _, h := range harness.All() {
+		if want := "FAIL  harness " + h.Name() + ":"; !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout does not contain %q:\n%s", want, stdout.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "fix the failed checks above") {
+		t.Errorf("stderr %q does not say what to do next", stderr.String())
+	}
+}

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"reflect"
 	"slices"
 	"strings"
@@ -96,5 +97,52 @@ func TestUsageDescribesTheGateEnvironment(t *testing.T) {
 	}
 	if strings.Contains(got, "gate commands see only a basic environment") {
 		t.Fatalf("Usage() says that gate commands see only a basic environment:\n%s", got)
+	}
+}
+
+func TestSplitList(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"A, B", []string{"A", " B"}},
+		{"A,B,", []string{"A", "B"}},
+		{",,A,,B", []string{"A", "B"}},
+	}
+	for _, c := range cases {
+		if got := splitList(c.in); !slices.Equal(got, c.want) {
+			t.Errorf("splitList(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMainExitCodes(t *testing.T) {
+	t.Setenv("SCHMEIDE_STEWARD", "")
+	cases := []struct {
+		name      string
+		args      []string
+		code      int
+		stdout    string
+		stderrHas string
+	}{
+		{"help", []string{"--help"}, 0, Usage(), ""},
+		{"bad flag", []string{"--no-such-flag"}, 2, "", "Run 'schmeide runner --help' for usage."},
+		{"stray argument", []string{"--steward", "me", "extra"}, 2, "", `unexpected argument "extra"`},
+		{"missing steward", nil, 2, "", "missing --steward"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Main(c.args, &stdout, &stderr); code != c.code {
+				t.Fatalf("exit code %d, want %d; stderr: %s", code, c.code, stderr.String())
+			}
+			if stdout.String() != c.stdout {
+				t.Errorf("stdout = %q, want %q", stdout.String(), c.stdout)
+			}
+			if !strings.Contains(stderr.String(), c.stderrHas) {
+				t.Errorf("stderr %q does not contain %q", stderr.String(), c.stderrHas)
+			}
+		})
 	}
 }
