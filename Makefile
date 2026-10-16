@@ -18,7 +18,7 @@ export GOTOOLCHAIN=go1.25.0+auto
 export GOPROXY ?= https://proxy.golang.org,direct
 GO := $(shell which go)
 
-MAIN ?= ./cmd/schmeide/main.go
+MAIN ?= ./cmd/schmeide
 EXE ?= ./build/schmeide
 
 ##@ Development Environment
