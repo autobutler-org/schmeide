@@ -931,3 +931,144 @@ func TestPoolJobTokenRequiresThePoolFlag(t *testing.T) {
 		t.Fatalf("pool token = %+v, want ghs_pool", got)
 	}
 }
+
+func issueRecordOf(t *testing.T, q *Queue, job Job) (issueRecord, uint64) {
+	t.Helper()
+	entry, err := q.issues.Get(t.Context(), issueKey(job))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record issueRecord
+	if err := json.Unmarshal(entry.Value(), &record); err != nil {
+		t.Fatal(err)
+	}
+	return record, entry.Revision()
+}
+
+func TestPublishRefusesAnUnfinishedOrSucceededIssue(t *testing.T) {
+	q := startQueue(t)
+	startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", Title: "t"}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	job.Pool = true // Track is running and octocat has no runner.
+	for _, state := range []State{"", StateClaimed, StateRetrying, StatePROpened} {
+		if state != "" {
+			runner.report(job, state, "")
+		}
+		eventually(t, func() bool { r, _ := issueRecordOf(t, q, job); return r.State == state || !state.final() })
+		if created, err := q.Publish(t.Context(), job); err != nil || created {
+			t.Fatalf("Publish after %q = %v, %v, want a duplicate", state, created, err)
+		}
+	}
+	if record, _ := issueRecordOf(t, q, job); record.State != StatePROpened {
+		t.Errorf("record = %+v, want %s", record, StatePROpened)
+	}
+	if got := jobs(t, q); len(got) != 1 {
+		t.Errorf("jobs = %+v, want one", got)
+	}
+}
+
+func TestPublishReplacesAFailedJob(t *testing.T) {
+	for _, final := range []State{StateFailed, StateGateFailed} {
+		t.Run(string(final), func(t *testing.T) {
+			dir := t.TempDir()
+			q, err := StartQueue(t.Context(), QueueOptions{DataDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			startTracker(t, q)
+			runner := startFakeRunner(t, q)
+			job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", Title: "t", Pool: true}
+			if created, err := q.Publish(t.Context(), job); err != nil || !created {
+				t.Fatalf("Publish = %v, %v", created, err)
+			}
+			runner.report(job, final, "boom")
+			eventually(t, func() bool { r, _ := issueRecordOf(t, q, job); return r.State == final })
+			if created, err := q.Publish(t.Context(), job); err != nil || !created {
+				t.Fatalf("Publish after %s = %v, %v, want a new job", final, created, err)
+			}
+			if created, err := q.Publish(t.Context(), job); err != nil || created {
+				t.Fatalf("third Publish = %v, %v, want a duplicate", created, err)
+			}
+			if got := jobs(t, q); len(got) != 2 {
+				t.Errorf("jobs = %+v, want the failed one and one new one", got)
+			}
+			q.Close()
+
+			// A restart replays the first job's final status. It must not
+			// finish the second job, which is on the same subject.
+			q, err = StartQueue(t.Context(), QueueOptions{DataDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			startTracker(t, q)
+			if record, _ := issueRecordOf(t, q, job); record.State != "" {
+				t.Errorf("record after restart = %+v, want the new job unfinished", record)
+			}
+			if created, err := q.Publish(t.Context(), job); err != nil || created {
+				t.Fatalf("Publish after restart = %v, %v, want a duplicate", created, err)
+			}
+		})
+	}
+}
+
+func TestIssueBucketIsSeededBeforeTheStreamIsLimited(t *testing.T) {
+	dir := t.TempDir()
+	q, err := StartQueue(t.Context(), QueueOptions{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", Title: "t"}
+	if created, err := q.Publish(t.Context(), recorded); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	// Jobs stored by a control node from before the issue bucket.
+	legacy := []Job{
+		{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", Title: "t"},
+		{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "hubot", Title: "t"},
+	}
+	for _, job := range legacy {
+		data, _ := json.Marshal(job)
+		if _, err := q.js.Publish(t.Context(), job.Subject(), data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, revision := issueRecordOf(t, q, recorded)
+	q.Close()
+
+	// A limit applied before the seed would discard the two oldest jobs
+	// before they were recorded.
+	defer func(n int64) { jobStreamMaxMsgs = n }(jobStreamMaxMsgs)
+	jobStreamMaxMsgs = 1
+	for range 2 { // A second restart seeds again and changes nothing.
+		q, err = StartQueue(t.Context(), QueueOptions{DataDir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, rev := issueRecordOf(t, q, recorded); rev != revision {
+			t.Errorf("recorded issue revision = %d, want %d", rev, revision)
+		}
+		for _, job := range legacy {
+			if record, _ := issueRecordOf(t, q, job); record.Subject != job.Subject() || record.State != "" {
+				t.Errorf("record = %+v, want %s unfinished", record, job.Subject())
+			}
+		}
+		keys, err := q.issues.Keys(t.Context())
+		if err != nil || len(keys) != 3 {
+			t.Errorf("keys = %v, %v, want three", keys, err)
+		}
+		if got := jobs(t, q); len(got) != 1 {
+			t.Errorf("jobs = %+v, want the stream limited to one", got)
+		}
+		for _, job := range append(legacy, recorded) {
+			if created, err := q.Publish(t.Context(), job); err != nil || created {
+				t.Errorf("Publish %s = %v, %v, want a duplicate", job.Subject(), created, err)
+			}
+		}
+		q.Close()
+	}
+}

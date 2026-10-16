@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -39,6 +40,15 @@ const (
 	StateFailed     State = "failed"
 )
 
+// final reports whether a job in this state is done.
+func (s State) final() bool {
+	return s == StateGateFailed || s == StatePROpened || s.failure()
+}
+
+// failure reports whether a job ended without a pull request. Its issue may
+// get a new job.
+func (s State) failure() bool { return s == StateGateFailed || s == StateFailed }
+
 // Status is the message a runner publishes when a job changes state.
 type Status struct {
 	State State `json:"state"`
@@ -61,6 +71,8 @@ type Registration struct {
 // stands. Registrations and statuses are stored on statusStream, and Track
 // loads that history before it returns.
 type Tracker struct {
+	stream  jetstream.Stream
+	issues  jetstream.KeyValue
 	mu      sync.Mutex
 	runners []Registration
 	jobs    map[string]Status
@@ -88,7 +100,7 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read status stream: %w", err)
 	}
-	t := &Tracker{jobs: map[string]Status{}}
+	t := &Tracker{stream: stream, issues: q.issues, jobs: map[string]Status{}}
 	if err := t.replay(ctx, stream, log, info.State); err != nil {
 		return nil, err
 	}
@@ -116,7 +128,7 @@ func (t *Tracker) replay(ctx context.Context, stream jetstream.Stream, log *slog
 		if err != nil {
 			return fmt.Errorf("load status history: %w", err)
 		}
-		t.observe(log, msg.Subject, msg.Data)
+		t.observe(log, msg.Sequence, msg.Subject, msg.Data)
 	}
 	return nil
 }
@@ -128,7 +140,12 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 		return fmt.Errorf("follow status stream: %w", err)
 	}
 	_, err = cons.Consume(func(msg jetstream.Msg) {
-		t.observe(log, msg.Subject(), msg.Data())
+		meta, err := msg.Metadata()
+		if err != nil {
+			log.Error("dropping a status without metadata", "subject", msg.Subject(), "err", err)
+			return
+		}
+		t.observe(log, meta.Sequence.Stream, msg.Subject(), msg.Data())
 	})
 	if err != nil {
 		return fmt.Errorf("follow status stream: %w", err)
@@ -136,12 +153,12 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 	return nil
 }
 
-func (t *Tracker) observe(log *slog.Logger, subject string, data []byte) {
+func (t *Tracker) observe(log *slog.Logger, seq uint64, subject string, data []byte) {
 	switch {
 	case strings.HasPrefix(subject, RegisterSubjectPrefix):
 		t.observeRegistration(log, subject, data)
 	case strings.HasPrefix(subject, StatusSubjectPrefix):
-		t.observeStatus(log, subject, data)
+		t.observeStatus(log, seq, subject, data)
 	}
 }
 
@@ -163,7 +180,7 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 	t.runners = append(t.runners, reg)
 }
 
-func (t *Tracker) observeStatus(log *slog.Logger, subject string, data []byte) {
+func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, data []byte) {
 	var status Status
 	if err := json.Unmarshal(data, &status); err != nil || status.State == "" {
 		log.Warn("dropping a malformed job status", "subject", subject, "err", err)
@@ -172,8 +189,50 @@ func (t *Tracker) observeStatus(log *slog.Logger, subject string, data []byte) {
 	job := jobSubjectPrefix + strings.TrimPrefix(subject, StatusSubjectPrefix)
 	log.Info("job state", "job", job, "state", string(status.State), "detail", status.Detail)
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.jobs[job] = status
+	t.mu.Unlock()
+	if status.State.final() {
+		if err := t.finish(seq, job, status.State); err != nil {
+			log.Error("could not record the job's final state", "job", job, "state", string(status.State), "err", err)
+		}
+	}
+}
+
+// finish records the final state on the job's issue record, unless the
+// record now belongs to a later job: one on another subject, or one published
+// after this status was stored.
+func (t *Tracker) finish(seq uint64, job string, state State) error {
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	parts := strings.Split(job, ".")
+	key := strings.Join(parts[len(parts)-2:], ".")
+	entry, err := t.issues.Get(ctx, key)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var record issueRecord
+	if err := json.Unmarshal(entry.Value(), &record); err != nil {
+		return err
+	}
+	if record.Subject != job || record.State != "" || seq <= record.After {
+		return nil
+	}
+	record.State = state
+	data, _ := json.Marshal(record)
+	_, err = t.issues.Update(ctx, key, data, entry.Revision())
+	return err
+}
+
+// lastSeq is the last sequence stored on the status stream.
+func (t *Tracker) lastSeq(ctx context.Context) (uint64, error) {
+	info, err := t.stream.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read status stream: %w", err)
+	}
+	return info.State.LastSeq, nil
 }
 
 // hasRunner reports whether the steward has at least one registration.
