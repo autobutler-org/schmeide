@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -151,6 +152,14 @@ Git sees only the installation-token variables. They still run as this
 machine's user, so run the runner as a user that holds nothing else worth
 taking.
 
+Before the first job in a new pair of work directory and origin URL, the
+runner asks on its terminal whether to trust that pair, and records a yes
+under the user config directory (schmeide/trust). A different origin asks
+again, even for the same directory. Without a terminal, a pair with no
+recorded yes fails the job. Set SCHMEIDE_TRUST=1 to trust every pair for
+that run without asking or recording anything, for example for an unattended
+runner.
+
 Usage:
   schmeide runner --steward <github login> [flags]
 
@@ -160,6 +169,20 @@ Every flag can also be set through its environment variable. A flag wins over
 the environment.
 
 ` + FlagUsage(fs)
+}
+
+// confirm asks a yes-or-no question on out and reads the answer from in.
+// Anything but y or yes is a no.
+func confirm(in *bufio.Reader, out io.Writer) func(string) (bool, error) {
+	return func(question string) (bool, error) {
+		fmt.Fprintf(out, "%s [y/N] ", question)
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			return false, err
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		return answer == "y" || answer == "yes", nil
+	}
 }
 
 // Main runs `schmeide runner` with the given arguments and returns its exit
@@ -181,6 +204,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	o.PassEnv = splitList(strings.ReplaceAll(*passEnv, " ", ""))
 	o.Harnesses = harnesses(*claudeArgs)
 	o.Output = stderr
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		o.Confirm = confirm(bufio.NewReader(os.Stdin), stderr)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
