@@ -137,12 +137,13 @@ not change one that already exists.
 
 ### Routing
 
-When the assignee has a registered runner, the job stays on that steward's
-subject. Several runners for one steward share one queue consumer, so each of
+When the assignee has ever registered a runner, the job stays on that
+steward's subject, even when that runner is offline: registrations are kept in
+the control node's data directory and never expire. Several runners for one steward share one queue consumer, so each of
 that steward's jobs goes to one of them.
 
-When the assignee has no registered runner, the control node publishes the
-job on a pool subject. `--pool` defaults off. A runner that sets it registers
+When the assignee has never registered a runner, the control node publishes
+the job on a pool subject. `--pool` defaults off. A runner that sets it registers
 as a pool runner. Pool runners share one consumer, work one job at a time,
 and take their own job first. The token, gate, review, and merge path are the
 same. A pool runner spends its owner's agent subscription on someone else's
@@ -171,7 +172,9 @@ requests changes, `automate.review_fix = "on"`, and a round remains, a fresh
 worker session applies the findings, the gate runs again, and the same branch
 is pushed. With `review_fix` absent or `"off"`, the first request for changes
 comments on the issue and leaves the pull request open for a person. A pass
-finishes the review. What happens next is under [Merge](#merge). Exhausting the rounds,
+finishes the review. The reviewer is the first ready harness other than the
+writer, so Grok reviews Claude Code's change when both are logged in. With one
+ready harness, that harness reviews its own change. What happens next is under [Merge](#merge). Exhausting the rounds,
 or a gate failure on a fix, comments on the issue and leaves the pull request
 open.
 
