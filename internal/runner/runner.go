@@ -829,7 +829,7 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh forge.Forge, job 
 			return r.fixCheck(ctx, ws, job, cfg.Gate, url, limits, run, tail)
 		}
 	}
-	return r.mergeWhenGreen(ctx, ws, gh, base, url, cfg.CheckWait, fix)
+	return r.mergeWhenGreen(ctx, ws, gh, job.Issue, base, url, cfg.CheckWait, fix)
 }
 
 // warnLintGate comments when the configured gate does not mention a lint

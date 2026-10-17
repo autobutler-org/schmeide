@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/autobutler-org/schmeide/internal/ciwatch"
@@ -73,8 +75,12 @@ func logTail(ctx context.Context, gh forge.Forge, run ciwatch.Run) string {
 	return ciwatch.Tail(log)
 }
 
-// checkPoll is the pause between those reads.
-const checkPoll = time.Second
+// checkPoll is the first pause between reads of check runs. Each pause
+// doubles, up to checkPollMax, so a slow CI is not read every second.
+var (
+	checkPoll    = time.Second
+	checkPollMax = 30 * time.Second
+)
 
 type checkVerdict int
 
@@ -165,14 +171,41 @@ func mergeBlocked(base string, p forge.Protection) error {
 // mergeWhenGreen polls check runs on the pull request's head commit and
 // merges with a merge commit when every one has succeeded. When the base
 // branch has a merge queue, it adds the pull request to the queue instead.
-// The first failed check runs fix once, when fix is not nil, with the end of
-// that check's log, and polling goes on at the new head within the same
-// wait. A failed check after that, or a wait of the repo's check_wait that
-// does not end in success, leaves the pull request open. That failure is
-// final: the pull request already exists, and a redelivery would treat it as
-// done. Before any of that, branch protection on base is read, and a merge
-// it makes impossible fails without waiting.
-func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forge, base, prURL string, wait time.Duration, fix ciFix) outcome {
+// Polls back off from checkPoll to checkPollMax, and the last one lands on
+// the end of the wait. The first failed check runs fix once, when fix is not
+// nil, with the end of that check's log, and polling goes on at the new head
+// within the same wait. A failed check after that, or a wait of the repo's
+// check_wait that does not end in success, leaves the pull request open.
+// That failure is final: the pull request already exists, and a redelivery
+// would treat it as done.
+//
+// A pull request stacked on another one, whose base is not the default
+// branch, merges only after the one below it: it first waits, for up to
+// check_wait, until it targets the default branch, which GitHub does when the
+// pull request below merges and its branch is deleted. Merging it into the
+// branch below would leave its change off the default branch.
+//
+// Before the check wait, branch protection on the base is read, and a merge
+// it makes impossible fails without waiting. Every failure after the checks
+// are green says so, so a pull request that looks ready names why it was not
+// merged.
+func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forge, issue int, base, prURL string, wait time.Duration, fix ciFix) outcome {
+	trunk, err := gh.DefaultBranch(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return outcome{}
+		}
+		return mergeFailed(prURL, fmt.Errorf("could not read the default branch: %w", err))
+	}
+	if base != trunk {
+		if err := waitForStack(ctx, gh, issue, base, trunk, wait); err != nil {
+			if ctx.Err() != nil {
+				return outcome{}
+			}
+			return mergeFailed(prURL, err)
+		}
+		base = trunk
+	}
 	protection, err := gh.Protection(ctx, base)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -193,8 +226,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 	}
 	deadline := time.Now().Add(wait)
 	detail := "the head commit has no check runs, so CI is not green"
-	ticker := time.NewTicker(checkPoll)
-	defer ticker.Stop()
+	delay := checkPoll
 	for {
 		if ctx.Err() != nil {
 			return outcome{}
@@ -220,14 +252,14 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 				if ctx.Err() != nil {
 					return outcome{}
 				}
-				return mergeFailed(prURL, fmt.Errorf("could not read the merge queue: %w", err))
+				return mergeFailed(prURL, fmt.Errorf("CI is green, but schmeide could not read the merge queue: %w", err))
 			}
 			if queued != "" {
 				if err := gh.EnqueuePull(ctx, queued); err != nil {
 					if ctx.Err() != nil {
 						return outcome{}
 					}
-					return mergeFailed(prURL, fmt.Errorf("could not add the pull request to the merge queue: %w", err))
+					return mergeFailed(prURL, fmt.Errorf("CI is green, but schmeide could not add the pull request to the merge queue: %w", err))
 				}
 				return enqueued(prURL)
 			}
@@ -235,7 +267,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 				if ctx.Err() != nil {
 					return outcome{}
 				}
-				return mergeFailed(prURL, fmt.Errorf("could not merge the pull request: %w", err))
+				return mergeFailed(prURL, fmt.Errorf("CI is green, but GitHub refused the merge: %w", err))
 			}
 			return merged(prURL)
 		case checksRed:
@@ -254,15 +286,80 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 			if sha, err = ws.Head(ctx); err != nil {
 				return mergeFailed(prURL, err)
 			}
+			// The fix pushed a new head: its checks start over.
+			delay = checkPoll
 			continue
 		}
 		if !time.Now().Before(deadline) {
-			return mergeFailed(prURL, errors.New(detail))
+			return mergeFailed(prURL, fmt.Errorf("%s after waiting %s (check_wait)", detail, wait))
 		}
-		select {
-		case <-ctx.Done():
+		if !sleepUntil(ctx, delay, deadline) {
 			return outcome{}
-		case <-ticker.C:
 		}
+		delay = min(2*delay, checkPollMax)
+	}
+}
+
+// waitForStack waits, backing off like the check wait, until the open pull
+// request for issue targets trunk instead of base, the branch of the pull
+// request below it. It returns why that did not happen within wait: the pull
+// request below has not merged, or it closed and this one still targets its
+// branch, which only a person can fix.
+func waitForStack(ctx context.Context, gh forge.Forge, issue int, base, trunk string, wait time.Duration) error {
+	below, err := stackedOn(base)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(wait)
+	delay := checkPoll
+	for {
+		mine, ok, err := gh.IssuePull(ctx, issue, "open")
+		if err != nil {
+			return fmt.Errorf("could not read the pull request for issue #%d: %w", issue, err)
+		}
+		if !ok {
+			return fmt.Errorf("the pull request for issue #%d is no longer open", issue)
+		}
+		if mine.Base.Ref == trunk {
+			return nil
+		}
+		parent, ok, err := gh.IssuePull(ctx, below, "all")
+		if err != nil {
+			return fmt.Errorf("could not read the pull request for issue #%d, which this one is stacked on: %w", below, err)
+		}
+		if !ok || parent.State != "open" {
+			return fmt.Errorf("the pull request is stacked on %s, whose pull request for issue #%d is no longer open, but it still targets %s and not %s, so schmeide did not merge it; a person can retarget it to %s", mine.Base.Ref, below, mine.Base.Ref, trunk, trunk)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("the pull request is stacked on %s, which has not merged into %s after waiting %s (check_wait); schmeide merges a stack bottom first, so it did not merge this one", parent.HTMLURL, trunk, wait)
+		}
+		if !sleepUntil(ctx, delay, deadline) {
+			return ctx.Err()
+		}
+		delay = min(2*delay, checkPollMax)
+	}
+}
+
+// stackedOn is the issue whose branch base is: schmeide names a job's branch
+// "<issue>_<slug>".
+func stackedOn(base string) (int, error) {
+	n, _, ok := strings.Cut(base, "_")
+	issue, err := strconv.Atoi(n)
+	if !ok || err != nil || issue < 1 {
+		return 0, fmt.Errorf("the pull request targets %s, which is neither the default branch nor a schmeide branch, so schmeide did not merge it", base)
+	}
+	return issue, nil
+}
+
+// sleepUntil sleeps for delay, cut short at deadline so the last poll lands
+// on it. It returns false when ctx ends first.
+func sleepUntil(ctx context.Context, delay time.Duration, deadline time.Time) bool {
+	t := time.NewTimer(max(min(delay, time.Until(deadline)), 0))
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
