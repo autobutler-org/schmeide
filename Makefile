@@ -69,6 +69,10 @@ test/e2e: ## Build the binary and run the end-to-end journeys (build tag e2e)
 COVER_OUT ?= ./build/coverage.out
 COVER_HTML ?= ./build/coverage.html
 
+.PHONY: bench
+bench: ## Run the control benchmarks
+	$(GO) test -bench . -benchmem ./internal/control
+
 .PHONY: test/cover
 test/cover: ## Run tests and write a coverage report under ./build
 	mkdir -p ./build
