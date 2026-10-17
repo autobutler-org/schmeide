@@ -1,6 +1,7 @@
 // Package fakegh is a stateful fake of the GitHub REST endpoints the runner
 // calls for one repository: the repository, pulls, issue comments, check
-// runs and their Actions job logs, blocked-by dependencies, and merge. List
+// runs and their Actions job logs, blocked-by dependencies, branch
+// protection, and merge. List
 // endpoints honor per_page and page. Merge can be told to fail the way
 // GitHub does.
 package fakegh
@@ -77,6 +78,8 @@ type Server struct {
 	// mergeStatus, when set, is the error status every merge call returns.
 	mergeStatus int
 	blockedBy   map[int][]Issue
+	// approvals is the required approving review count by protected branch.
+	approvals map[string]int
 }
 
 // New starts a fake for repo ("owner/name") that accepts only token. It is
@@ -200,6 +203,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, page(r, s.blockedBy[n]))
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/branches/") && strings.HasSuffix(path, "/protection"):
+		branch := strings.TrimSuffix(strings.TrimPrefix(path, "/branches/"), "/protection")
+		n, ok := s.approvals[branch]
+		if !ok {
+			writeError(w, http.StatusNotFound, "Branch not protected", "https://docs.github.com/rest/branches/branch-protection#get-branch-protection")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"required_pull_request_reviews": map[string]int{"required_approving_review_count": n}})
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "commits" && parts[2] == "check-runs":
 		writeJSON(w, http.StatusOK, map[string]any{"total_count": len(s.checks), "check_runs": page(r, s.checks)})
 	case r.Method == http.MethodGet && len(parts) == 4 && parts[0] == "actions" && parts[1] == "jobs" && parts[3] == "logs":
@@ -329,6 +340,17 @@ func (s *Server) AddBlocker(issue int, blocker Issue) {
 		s.blockedBy = map[int][]Issue{}
 	}
 	s.blockedBy[issue] = append(s.blockedBy[issue], blocker)
+}
+
+// Protect makes branch protected, requiring approvals approving reviews.
+// An unprotected branch answers 404, as GitHub does.
+func (s *Server) Protect(branch string, approvals int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.approvals == nil {
+		s.approvals = map[string]int{}
+	}
+	s.approvals[branch] = approvals
 }
 
 // SeedPull stores p as if it had been opened, and returns it numbered.

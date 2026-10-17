@@ -127,6 +127,16 @@ func TestContract(t *testing.T) {
 		t.Errorf("GET check-runs page 2 = %d %v", code, runs)
 	}
 
+	if code, _ := call(t, s, http.MethodGet, "/branches/main/protection", ""); code != http.StatusNotFound {
+		t.Errorf("GET unprotected branch = %d, want 404", code)
+	}
+	s.Protect("release/1", 2)
+	code, got = call(t, s, http.MethodGet, "/branches/release/1/protection", "")
+	reviews := hasKeys(t, "protection", got, "required_pull_request_reviews")["required_pull_request_reviews"]
+	if code != http.StatusOK || hasKeys(t, "reviews", reviews, "required_approving_review_count")["required_approving_review_count"] != 2.0 {
+		t.Errorf("GET protection = %d %v", code, got)
+	}
+
 	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusConflict, http.StatusUnprocessableEntity} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			s.FailMerge(status)
