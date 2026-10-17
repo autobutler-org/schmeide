@@ -363,6 +363,18 @@ func TestMainHelpAndBadFlag(t *testing.T) {
 	}
 }
 
+func TestMainRejectsUnparsableEnv(t *testing.T) {
+	t.Setenv("SCHMEIDE_JSON", "maybe")
+	var stdout, stderr bytes.Buffer
+	if code := Main(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("exit code %d, want 2; stderr: %s", code, stderr.String())
+	}
+	const want = "schmeide doctor: SCHMEIDE_JSON is \"maybe\", which is not a boolean; set it to true or false, unset it, or pass --json\nRun 'schmeide doctor --help' for usage.\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
 func TestMainFailsWithoutAHarness(t *testing.T) {
 	// An empty PATH hides git and every harness. No steward means the
 	// control node check fails without dialing NATS.

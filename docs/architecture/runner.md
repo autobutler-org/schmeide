@@ -6,7 +6,7 @@ request, then reviews it and, when the repo asks, merges it. It works one job at
 
 | Package or file | Owns |
 | --- | --- |
-| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
+| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`; a variable that does not parse for its flag is a usage error), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
 | `internal/runner/runner.go` | `Options`, `Connect`, `New`, `register`, `Run`, `next`, `handle` (delivery, heartbeat, retries, ack), `work`, `execute`, `open`, `brief`, `prText`, `BranchName`, `gateOutcome`, the stage record (`mark`, `recordedStage`) |
 | `internal/runner/workspace.go` | `Workspace` interface and the git `worktree` implementation: `newWorktree`, `Commit`, `Run` (the gate), `Push`, `Resume`, `Count`, `Restack`, `BaseMerged`, `Close` |
 | `internal/runner/review.go` | `review`, `reviewOnce`, `reviewer` (harness choice for review), `applyFindings`, `readVerdict`, `session` (every harness `Request`), `promptWithMap` |
