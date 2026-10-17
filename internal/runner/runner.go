@@ -165,6 +165,9 @@ type Runner struct {
 	// attempts is restored from the status stream for the current job. Only
 	// handle writes it, and Run works one job at a time.
 	attempts int
+	// failures is the same-process fallback when the status stream is absent
+	// or temporarily unreadable.
+	failures map[string]int
 	// progress receives a signal whenever report publishes a state for the
 	// current job. Only one handle runs at a time.
 	progress chan struct{}
@@ -272,7 +275,7 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runner{opts: o, log: log, nc: nc}
+	r := &Runner{opts: o, log: log, nc: nc, failures: map[string]int{}}
 	if err := r.register(ctx, js); err != nil {
 		nc.Close()
 		return nil, err
@@ -425,12 +428,13 @@ func statusSubject(job control.Job) string {
 // recordedAttempts returns the failed-work count on the latest persisted
 // status for job. Statuses from older runners have no count and decode as zero.
 func (r *Runner) recordedAttempts(ctx context.Context, job control.Job) int {
+	fallback := r.failures[job.Subject()]
 	if r.statuses == nil {
-		return 0
+		return fallback
 	}
 	msg, err := r.statuses.GetLastMsgForSubject(ctx, statusSubject(job))
 	if errors.Is(err, jetstream.ErrMsgNotFound) {
-		return 0
+		return fallback
 	}
 	var status Status
 	if err == nil {
@@ -438,9 +442,9 @@ func (r *Runner) recordedAttempts(ctx context.Context, job control.Job) int {
 	}
 	if err != nil {
 		r.log.Warn("could not restore the job's attempt count", "repo", job.Repo, "issue", job.Issue, "err", err)
-		return 0
+		return fallback
 	}
-	return max(status.Attempts, 0)
+	return max(status.Attempts, fallback)
 }
 
 func stageKey(job control.Job) string {
@@ -582,6 +586,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// land is final as well.
 	if out.state == StateFailed {
 		r.attempts++
+		r.failures[job.Subject()] = r.attempts
 		n := r.attempts
 		if n < r.opts.MaxAttempts {
 			r.report(job, StateRetrying, fmt.Sprintf("attempt %d of %d failed: %s", n, r.opts.MaxAttempts, out.detail))
@@ -593,6 +598,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 			}
 		}
 	}
+	delete(r.failures, job.Subject())
 	if out.comment != "" {
 		if err := gh.Comment(ctx, job.Issue, markOutcome(out.comment, out.state)); err != nil {
 			r.log.Error("could not comment on the issue", "repo", job.Repo, "issue", job.Issue, "err", err)
