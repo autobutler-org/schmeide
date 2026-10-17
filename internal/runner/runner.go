@@ -6,9 +6,10 @@
 // worktree and the new pull request use that branch as their base. It uses a
 // harness that is already logged in on this machine. With --pool, which
 // defaults to off, it also takes a job whose steward has no registered
-// runner, one job at a time, its own first. The factory merges the pull
-// request only when the repo config sets merge = "factory". The default is a
-// person. A harness session is canceled after the session timeout (default 2
+// runner, one job at a time, its own first. The writer gets review fix
+// rounds only when the repo config sets automate.review_fix = "on", and the
+// factory merges the pull request only when it sets automate.merge = "on".
+// The default for both is a person. A harness session is canceled after the session timeout (default 2
 // hours) and the gate after the gate timeout (default 30 minutes). The repo
 // config keys session_timeout and gate_timeout override those flags. A
 // timeout cancels that process group, fails the job, and comments on the
@@ -815,11 +816,11 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh forge.Forge, job 
 		spent = max(spent, r.stage.Round-1)
 	}
 	r.stage.Round = spent
-	out := r.review(ctx, ws, job, cfg.Gate, url, spent, limits)
-	// The merge policy was read with the gate, before the session ran, so the
-	// session cannot turn factory merge on for itself. Absent and "human"
-	// leave the pull request for a person.
-	if cfg.Merge != repoconfig.MergeFactory || out.state != StatePROpened {
+	out := r.review(ctx, ws, job, cfg.Gate, url, spent, cfg.Automate.ReviewFix, limits)
+	// The automate switches were read with the gate, before the session ran,
+	// so the session cannot turn factory merge on for itself. Off leaves the
+	// pull request for a person.
+	if !cfg.Automate.Merge || out.state != StatePROpened {
 		return out
 	}
 	// One fix round for a failed check, when a review round is left for it.

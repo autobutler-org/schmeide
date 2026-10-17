@@ -33,8 +33,8 @@ In scope:
 - **Issue to PR.** Agents take an issue and produce a pull request. This is
   what the first slice does.
 - **Review and merge.** An AI review stage, and merging once the gates pass.
-  Both are built. Absent, empty, and `human` leave the pull request for a
-  person. `factory` merges only when the repo config says so.
+  Both are built. The factory merges, and the writer fixes review findings,
+  only when the repo config's `[automate]` table turns that switch on.
 
 Out of scope for now: planning and intake (turning ideas into issues,
 prioritizing, assigning) and keeping repo settings consistent across the org.
@@ -102,8 +102,8 @@ flowchart LR
 | 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job. | Done |
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
-| 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes or the round limit is reached. | Done |
-| 9 | After review passes, absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. | Done |
+| 8 | An AI reviewer checks the PR. With `automate.review_fix = "on"`, the worker fixes what the reviewer finds until the review passes or the round limit is reached. Off, a request for changes leaves the PR open for a person. | Done |
+| 9 | After review passes, `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` merges with a merge commit only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. | Done |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
@@ -163,17 +163,19 @@ runs in the job's existing worktree, so the checkout and toolchain are already
 in place. The reviewer writes its verdict to `.schmeide/review.md`. The runner
 reads that file and removes it before any later commit. The runner allows up
 to `--max-review-rounds` reviewer sessions (default 3). When the reviewer
-requests changes and a round remains, a fresh worker session applies the
-findings, the gate runs again, and the same branch is pushed. A pass finishes
-the review. What happens next is under [Merge](#merge). Exhausting the rounds,
+requests changes, `automate.review_fix = "on"`, and a round remains, a fresh
+worker session applies the findings, the gate runs again, and the same branch
+is pushed. With `review_fix` absent or `"off"`, the first request for changes
+comments on the issue and leaves the pull request open for a person. A pass
+finishes the review. What happens next is under [Merge](#merge). Exhausting the rounds,
 or a gate failure on a fix, comments on the issue and leaves the pull request
 open.
 
 ### Merge
 
 Each repo chooses in `.schmeide/config.toml` who merges a pull request after
-review has passed. The `merge` key is optional. Absent, empty, and `human`
-leave the pull request for a person. `factory` merges with a merge commit
+review has passed. The `automate.merge` switch is optional. Absent, empty, and
+`"off"` leave the pull request for a person. `"on"` merges with a merge commit
 after review only when every check run on the head has succeeded within
 `check_wait`, an optional Go duration in the same config file (default two
 minutes). No check runs is not green. When the base branch has a merge queue,
@@ -206,7 +208,7 @@ runner gives the session the end of that check's log, runs the gate, pushes the
 same branch, and keeps polling on the new head inside the same wait. There is
 no second fix round. If the check is still red, or the wait ends without
 success, the runner comments on the issue and leaves the pull request open.
-That failure is final and is not retried. The runner reads `merge` with the gate, before the harness
+That failure is final and is not retried. The runner reads `[automate]` with the gate, before the harness
 session, so the session cannot turn factory merge on for itself
 (`internal/repoconfig`, `internal/runner/merge.go`).
 
@@ -275,10 +277,11 @@ runner.
 
 Each repo the factory works on carries its own schmeide config, checked in and
 reviewed like code. The file is `.schmeide/config.toml`. `gate` is required:
-the command that must pass before a PR is opened. `merge` is optional. Absent,
-empty, and `human` leave the pull request for a person. `factory` is the only
-other legal value, and [Merge](#merge) is what it does. Unknown keys are an
-error. `gate_timeout` and `session_timeout` are optional Go durations. Absent
+the command that must pass before a PR is opened. The `[automate]` table is
+optional and holds `"on"`/`"off"` switches that default to off: `merge`, which
+[Merge](#merge) describes, `review_fix`, which [Review](#review) describes,
+and `create_issues`, which is accepted ahead of the feature and read by
+nothing yet. Unknown keys are an error. `gate_timeout` and `session_timeout` are optional Go durations. Absent
 or empty keeps the runner flag: `--gate-timeout` defaults to 30 minutes and
 `--session-timeout` defaults to 2 hours. A positive value overrides that flag
 for the repo. An unparseable or non-positive value is a config error that
@@ -414,14 +417,14 @@ Not in the first slice, and not shipped:
 | Decision | Outcome | Where |
 |---|---|---|
 | Name of the ready label | `schmeide:ready`. Override with `--ready-label`. | `internal/control/intake.go` (`DefaultReadyLabel`) |
-| Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `merge` is optional: absent, empty, and `human` leave the pull request for a person, and `factory` is the only other legal value. `gate_timeout` and `session_timeout` are optional Go durations. Absent or empty means the runner flag, which defaults to 30 minutes for the gate and 2 hours for a session. A positive value overrides that flag. An unparseable or non-positive value is an error that names the key and gives `30m` as an example. Unknown keys are an error. | `internal/repoconfig`, `internal/runner` |
+| Path and format of the per-repo config file | `.schmeide/config.toml`. `gate` is required and must be a non-empty command. `[automate]` is optional: its `merge`, `review_fix`, and `create_issues` switches are `"on"` or `"off"`, and absent, empty, and blank mean `"off"`. `gate_timeout` and `session_timeout` are optional Go durations. Absent or empty means the runner flag, which defaults to 30 minutes for the gate and 2 hours for a session. A positive value overrides that flag. An unparseable or non-positive value is an error that names the key and gives `30m` as an example. Unknown keys are an error. | `internal/repoconfig`, `internal/runner` |
 | Which orgs or App installations may create jobs | Required. `--allowed-orgs` (owner logins, compared case-insensitively) or `--allowed-installations` (numeric installation IDs), or both. A job is accepted when it matches either list. `schmeide control` refuses to start when both are empty, and an empty allowlist allows no job. A delivery that would create a job and matches neither list is rejected with 403. A delivery that does not describe a ready job is ignored, including one from outside the allowlist. A bad signature is rejected before that check. | `internal/control/intake.go`, `internal/control/cli.go` |
 | Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>` when the assignee has a registered runner, and on a pool subject when the assignee has none. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go`, `internal/control/queue.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
-| Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
+| Merge default (#32, #197) | `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers have to be one linear stack, and the top of it is the base (#94); blockers that are not one chain fail the job, and the runner comments that they are not one linear stack and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |

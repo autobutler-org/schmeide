@@ -49,7 +49,7 @@ func redLint(id int64) []fakegh.CheckRun {
 
 func TestCIFixRoundThenMerge(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig)
 	w.gh.SetChecks(redLint(42))
 	w.gh.SetLog(42, "SETUP-LINE\n"+strings.Repeat("noise\n", 2000)+"lint: main.go:3: unused variable x\n")
 	h, fixes, prompt := ciFixHarness(0, func() {
@@ -85,7 +85,7 @@ func TestCIFixRoundThenMerge(t *testing.T) {
 
 func TestCIFixRoundRunsOnce(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig)
 	w.gh.SetChecks(redLint(42))
 	w.gh.SetLog(42, "lint failed\n")
 	h, fixes, _ := ciFixHarness(0, func() {})
@@ -113,7 +113,7 @@ func TestCIFixRoundRunsOnce(t *testing.T) {
 // no round is left for a CI fix.
 func TestCIFixSkippedWhenRoundsSpent(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig+"review_fix = \"on\"\n")
 	w.gh.SetChecks(redLint(42))
 	w.gh.SetLog(42, "lint failed\n")
 	h, fixes, _ := ciFixHarness(defaultMaxReviewRounds-1, func() {})

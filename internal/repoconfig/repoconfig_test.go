@@ -58,20 +58,31 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-func TestMergePolicy(t *testing.T) {
+func TestAutomate(t *testing.T) {
 	t.Parallel()
+	const gate = "gate = \"make check\"\n"
 	cases := []struct {
 		name    string
 		content string
-		want    string
+		want    Automate
 		errHas  []string
 	}{
-		{name: "absent", content: "gate = \"make check\"\n", want: ""},
-		{name: "empty", content: "gate = \"make check\"\nmerge = \"\"\n", want: ""},
-		{name: "blank", content: "gate = \"make check\"\nmerge = \"  \"\n", want: ""},
-		{name: "human", content: "gate = \"make check\"\nmerge = \"human\"\n", want: MergeHuman},
-		{name: "factory", content: "gate = \"make check\"\nmerge = \"factory\"\n", want: MergeFactory},
-		{name: "nope", content: "gate = \"make check\"\nmerge = \"nope\"\n", errHas: []string{"nope", MergeFactory, MergeHuman}},
+		{name: "absent table", content: gate},
+		{name: "empty table", content: gate + "[automate]\n"},
+		{name: "all on", content: gate + "[automate]\nmerge = \"on\"\nreview_fix = \"on\"\ncreate_issues = \"on\"\n", want: Automate{Merge: true, ReviewFix: true, CreateIssues: true}},
+		{name: "all off", content: gate + "[automate]\nmerge = \"off\"\nreview_fix = \"off\"\ncreate_issues = \"off\"\n"},
+		{name: "merge only", content: gate + "[automate]\nmerge = \"on\"\n", want: Automate{Merge: true}},
+		{name: "review_fix only", content: gate + "[automate]\nreview_fix = \"on\"\n", want: Automate{ReviewFix: true}},
+		{name: "create_issues only", content: gate + "[automate]\ncreate_issues = \"on\"\n", want: Automate{CreateIssues: true}},
+		{name: "empty", content: gate + "[automate]\nmerge = \"\"\n"},
+		{name: "blank", content: gate + "[automate]\nreview_fix = \"  \"\n"},
+		{name: "dotted key", content: gate + "automate.merge = \"on\"\n", want: Automate{Merge: true}},
+		{name: "yes", content: gate + "[automate]\nmerge = \"yes\"\n", errHas: []string{Path, `automate.merge = "yes" is not a legal value; set automate.merge = "on" or automate.merge = "off"`}},
+		{name: "case sensitive", content: gate + "[automate]\nreview_fix = \"On\"\n", errHas: []string{Path, `automate.review_fix = "On" is not a legal value`}},
+		{name: "create_issues checked", content: gate + "[automate]\ncreate_issues = \"true\"\n", errHas: []string{`automate.create_issues = "true" is not a legal value`}},
+		{name: "unknown key", content: gate + "[automate]\nmerg = \"on\"\n", errHas: []string{Path, "unknown key", "automate.merg"}},
+		{name: "top-level merge", content: gate + "merge = \"factory\"\n", errHas: []string{Path + `: merge moved into [automate]; set it as [automate] merge = "on"`}},
+		{name: "top-level merge human", content: gate + "merge = \"human\"\n", errHas: []string{"merge moved into [automate]"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,8 +92,8 @@ func TestMergePolicy(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				if cfg.Gate != "make check" || cfg.Merge != tc.want {
-					t.Fatalf("config = %+v, want gate %q and merge %q", cfg, "make check", tc.want)
+				if cfg.Gate != "make check" || cfg.Automate != tc.want {
+					t.Fatalf("config = %+v, want gate %q and automate %+v", cfg, "make check", tc.want)
 				}
 				return
 			}
@@ -220,7 +231,10 @@ func TestNonStringValueNamesKey(t *testing.T) {
 		errHas  []string
 	}{
 		{content: "gate = 5\n", errHas: []string{"gate", `gate = "make check test"`}},
-		{content: "gate = \"x\"\nmerge = true\n", errHas: []string{"merge", `merge = "human"`}},
+		{content: "gate = \"x\"\n[automate]\nmerge = true\n", errHas: []string{"automate.merge", `automate.merge = "on"`}},
+		{content: "gate = \"x\"\n[automate]\nreview_fix = 1\n", errHas: []string{"automate.review_fix", `automate.review_fix = "on"`}},
+		{content: "gate = \"x\"\n[automate]\ncreate_issues = false\n", errHas: []string{"automate.create_issues", `automate.create_issues = "on"`}},
+		{content: "gate = \"x\"\nautomate = \"on\"\n", errHas: []string{"automate must be a table", `[automate] merge = "on"`}},
 		{content: "gate = \"x\"\ncheck_wait = 10\n", errHas: []string{"check_wait", `check_wait = "10m"`}},
 		{content: "gate = \"x\"\ngate_timeout = 30\n", errHas: []string{"gate_timeout", `gate_timeout = "30m"`}},
 		{content: "gate = \"x\"\nsession_timeout = 1800\n", errHas: []string{"session_timeout", `session_timeout = "30m"`}},

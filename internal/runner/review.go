@@ -130,6 +130,16 @@ func roundsExhausted(rounds int, prURL string) outcome {
 	}
 }
 
+// changesLeftOpen is a rejection when automate.review_fix is off. The writer
+// gets no fix round, so the pull request waits for a person.
+func changesLeftOpen(prURL string) outcome {
+	return outcome{
+		state:   StateReviewFailed,
+		detail:  "the review requested changes and automate.review_fix is off",
+		comment: "schmeide left the pull request open for a person because the review requested changes and automate.review_fix is off: " + prURL,
+	}
+}
+
 // fixMessage is the subject of a commit that applies review findings. The
 // commits with it on the branch are the rounds already spent.
 func fixMessage(issue int) string {
@@ -139,8 +149,9 @@ func fixMessage(issue int) string {
 // review runs reviewer sessions in the job's existing worktree until one
 // passes or the round limit is hit. spent rounds already ran on this pull
 // request before a redelivery. A pass returns an opened pull request. The
-// caller merges only when the repo config says to.
-func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string, spent int, limits deadlines) outcome {
+// caller merges only when the repo config says to. Without fix, the first
+// rejection is the result.
+func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate, prURL string, spent int, fix bool, limits deadlines) outcome {
 	rounds := r.opts.MaxReviewRounds
 	if rounds <= 0 {
 		rounds = defaultMaxReviewRounds
@@ -153,6 +164,9 @@ func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate
 		}
 		if verdict == verdictPass {
 			return passedReview(prURL)
+		}
+		if !fix {
+			return changesLeftOpen(prURL)
 		}
 		// The last rejection is the result. Another fix would not be reviewed.
 		if round == rounds {

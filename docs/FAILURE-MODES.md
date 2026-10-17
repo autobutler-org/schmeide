@@ -111,9 +111,9 @@ A runner works one job at a time. There is no concurrency setting.
 
 After review passes:
 
-- With `merge` absent, empty, or `human`, the runner leaves the pull request
+- With `automate.merge` absent, empty, or `"off"`, the runner leaves the pull request
   open. A person merges it.
-- With `merge = "factory"`, the runner waits for the head commit's check runs
+- With `automate.merge = "on"`, the runner waits for the head commit's check runs
   to succeed, then merges with a merge commit. The wait is `check_wait` from the
   repo config, default two minutes, read with backoff from one second up to
   30 seconds. No check runs is not green. A stacked pull request first waits

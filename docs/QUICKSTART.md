@@ -39,12 +39,15 @@ The target repository needs `.schmeide/config.toml` on its default branch:
 # Required. The command a job must pass before a pull request is opened.
 gate = "make check test"
 
-# Optional. Absent, empty, and "human" leave the pull request for a person.
-# "factory" lets the factory merge after review and green checks.
-merge = "human"
+# Optional. Every switch defaults to "off".
+[automate]
+# "on" lets the factory merge after review and green checks.
+merge = "off"
+# "on" gives the writer fix rounds for review findings.
+review_fix = "off"
 ```
 
-A missing `merge` setting leaves the pull request for a person to merge. `gate` is required, and unknown keys are an error. Every key is listed in [config.md](config.md).
+A missing `[automate]` table leaves the pull request for a person to merge, and a review that requests changes for a person to fix. `gate` is required, and unknown keys are an error. Every key is listed in [config.md](config.md).
 
 ## 3. Start the control node
 

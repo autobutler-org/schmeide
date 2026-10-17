@@ -15,10 +15,14 @@ A file that sets every key:
 
 ```toml
 gate = "make check test"
-merge = "factory"
 check_wait = "10m"
 gate_timeout = "30m"
 session_timeout = "2h"
+
+[automate]
+merge = "on"
+review_fix = "on"
+create_issues = "off"
 ```
 
 ## Keys
@@ -26,10 +30,12 @@ session_timeout = "2h"
 | Key | Required | Default when absent or empty | Example |
 | --- | --- | --- | --- |
 | `gate` | yes | none; the file is rejected | `gate = "make check test"` |
-| `merge` | no | a person merges (same as `"human"`) | `merge = "factory"` |
 | `check_wait` | no | `2m` | `check_wait = "10m"` |
 | `gate_timeout` | no | the runner's `--gate-timeout`, which defaults to `30m` | `gate_timeout = "30m"` |
 | `session_timeout` | no | the runner's `--session-timeout`, which defaults to `2h` | `session_timeout = "2h"` |
+| `automate.merge` | no | `"off"`: a person merges | `[automate] merge = "on"` |
+| `automate.review_fix` | no | `"off"`: no fix rounds for review findings | `[automate] review_fix = "on"` |
+| `automate.create_issues` | no | `"off"`; nothing reads it yet | `[automate] create_issues = "off"` |
 
 ### gate
 
@@ -41,47 +47,12 @@ or blank value is an error.
 gate = "make check test"
 ```
 
-### merge
-
-Who merges a pull request after review has passed and CI is green.
-
-- `"human"` leaves the pull request for a person.
-- `"factory"` has the runner merge it once every check run on the head commit
-  has succeeded (see `check_wait`). Before the wait, the job fails if the
-  base branch's protection, when the runner can read it, requires one or more
-  approving reviews: the runner cannot supply that review, the pull request
-  stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
-  does not fail the job. Any other read failure fails the job, and the pull
-  request stays open. Required status checks are not this failure.
-  - The first red check runs one writer fix round when a review round
-    remains. It counts against `--max-review-rounds`. There is no second fix
-    round. A check that is still red, or a wait that ends without success,
-    leaves the pull request open.
-  - When the base branch has a merge queue, green checks add the pull request
-    to the queue instead of merging it. The job is reported queued.
-  - A pull request stacked on another schmeide pull request merges bottom
-    first. Before the check wait it waits, for up to `check_wait`, for the pull
-    request below to merge, rebasing onto that branch as it moves. Once it
-    merged, the runner retargets this pull request to the default branch, if
-    GitHub has not, and rebases it onto the default branch. A bottom that has
-    not merged by then, one that closed without merging, or a rebase that
-    conflicts leaves the pull request open, and the comment says which.
-  - A failure after the checks are green starts with "CI is green, but", so a
-    pull request that looks ready says why it was not merged.
-
-Absent, empty, and blank values mean `"human"`. Any other value is an error,
-and values are case-sensitive: `"Factory"` is rejected.
-
-```toml
-merge = "factory"
-```
-
 ### check_wait
 
 How long a factory merge waits for the head commit's check runs to succeed,
 including the fix round's new head.
 A Go duration such as `90s`, `10m`, or `1h30m`; it must be positive. Absent
-or empty means `2m`. The key only matters when `merge = "factory"`. The runner
+or empty means `2m`. The key only matters when `automate.merge = "on"`. The runner
 reads the check runs after one second, then backs off, doubling the pause up to
 30 seconds, and reads them once more at the end of the wait. If the wait ends
 without success, the pull request stays open, and the comment names the check
@@ -113,6 +84,91 @@ toward the runner's `--max-attempts`.
 session_timeout = "2h"
 ```
 
+## [automate]
+
+The `[automate]` table holds switches for what the factory does without a
+person. Every switch is `"on"` or `"off"`. Absent, empty, and blank values mean
+`"off"`, so a repo with no `[automate]` table leaves every step after review to
+a person. Any other value is an error, and values are case-sensitive: `"On"`
+and `"yes"` are rejected. An unknown key inside the table is an error too.
+
+```toml
+[automate]
+merge = "on"
+review_fix = "on"
+create_issues = "off"
+```
+
+The runner reads the table with the gate, before the harness session, so the
+session cannot turn a switch on for itself. The top-level `merge` key is gone:
+a file that still sets it is rejected and told to move it into `[automate]`.
+
+### automate.merge
+
+Whether the runner merges a pull request after review has passed and CI is
+green.
+
+- `"off"` leaves the pull request for a person.
+- `"on"` has the runner merge it once every check run on the head commit
+  has succeeded (see `check_wait`). Before the wait, the job fails if the
+  base branch's protection, when the runner can read it, requires one or more
+  approving reviews: the runner cannot supply that review, the pull request
+  stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
+  does not fail the job. Any other read failure fails the job, and the pull
+  request stays open. Required status checks are not this failure.
+  - The first red check runs one writer fix round when a review round
+    remains. It counts against `--max-review-rounds`. There is no second fix
+    round. A check that is still red, or a wait that ends without success,
+    leaves the pull request open.
+  - When the base branch has a merge queue, green checks add the pull request
+    to the queue instead of merging it. The job is reported queued.
+  - A pull request stacked on another schmeide pull request merges bottom
+    first. Before the check wait it waits, for up to `check_wait`, for the pull
+    request below to merge, rebasing onto that branch as it moves. Once it
+    merged, the runner retargets this pull request to the default branch, if
+    GitHub has not, and rebases it onto the default branch. A bottom that has
+    not merged by then, one that closed without merging, or a rebase that
+    conflicts leaves the pull request open, and the comment says which.
+  - A failure after the checks are green starts with "CI is green, but", so a
+    pull request that looks ready says why it was not merged.
+
+```toml
+[automate]
+merge = "on"
+```
+
+### automate.review_fix
+
+Whether the writer gets fix rounds for review findings.
+
+- `"on"`: when the reviewer requests changes and a round of
+  `--max-review-rounds` remains, a fresh worker session applies the findings,
+  the gate runs again, and the same branch is pushed so the open pull request
+  updates. Exhausting the rounds leaves the pull request open.
+- `"off"`: the reviewer still runs once and its result is reported. A pass
+  finishes the review as usual. A request for changes gets no fix round: the
+  job fails, the comment says the review requested changes and
+  `automate.review_fix` is off, and the pull request stays open for a person.
+
+Factory merge still happens only after review passes, so with `merge = "on"`
+and `review_fix = "off"` a rejected pull request is not merged. The CI fix
+round under `automate.merge` is not a review fix and still runs.
+
+```toml
+[automate]
+review_fix = "on"
+```
+
+### automate.create_issues
+
+Accepted ahead of the feature. schmeide does not create issues yet, and
+nothing reads this switch. It is validated like the other switches.
+
+```toml
+[automate]
+create_issues = "off"
+```
+
 ## Runner flags
 
 Runner flags set delivery and execution deadlines for every repo that runner
@@ -130,8 +186,8 @@ absent or empty, the flag applies. For example, a runner started with
 `--gate-timeout 1h` uses 1 hour for a repo with no `gate_timeout`, and 30
 minutes for a repo with `gate_timeout = "30m"`.
 
-`gate`, `merge`, and `check_wait` have no runner or control flag. They come
-from the repo config alone.
+`gate`, `check_wait`, and the `[automate]` switches have no runner or control
+flag. They come from the repo config alone.
 
 `ack-wait` is the JetStream lease for a claimed job. A runner must stay
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
@@ -146,7 +202,9 @@ shows a valid example. For example:
 ```text
 .schmeide/config.toml: check_wait = "soon" is not a positive duration; set a duration such as check_wait = "10m"
 .schmeide/config.toml: gate_timeout = "0s" is not a positive duration; set a duration such as gate_timeout = "30m"
-.schmeide/config.toml: merge = "Factory" is not a legal value; set merge = "factory" or merge = "human"
+.schmeide/config.toml: automate.merge = "yes" is not a legal value; set automate.merge = "on" or automate.merge = "off"
 .schmeide/config.toml: check_wait must be a quoted string; set it like check_wait = "10m"
+.schmeide/config.toml: automate.review_fix must be a quoted string; set it like automate.review_fix = "on"
 .schmeide/config.toml: unknown key(s) gaet; remove them or fix the spelling
+.schmeide/config.toml: merge moved into [automate]; set it as [automate] merge = "on"
 ```
