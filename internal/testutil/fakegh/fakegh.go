@@ -1,7 +1,8 @@
 // Package fakegh is a stateful fake of the GitHub REST endpoints the runner
 // calls for one repository: the repository, pulls, issue comments, check
-// runs, blocked-by dependencies, and merge. List endpoints honor per_page and
-// page. Merge can be told to fail the way GitHub does.
+// runs and their Actions job logs, blocked-by dependencies, and merge. List
+// endpoints honor per_page and page. Merge can be told to fail the way
+// GitHub does.
 package fakegh
 
 import (
@@ -32,6 +33,8 @@ type Pull struct {
 
 // CheckRun is one check run on a commit.
 type CheckRun struct {
+	// ID is also the Actions job ID whose log SetLog sets.
+	ID         int64  `json:"id,omitempty"`
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
@@ -67,6 +70,7 @@ type Server struct {
 	comments map[string][]string // by issue number
 	calls    []string
 	checks   []CheckRun
+	logs     map[int64]string // by job ID
 	// merges is how many merge calls landed, and mergeMethod is the last one.
 	merges      int
 	mergeMethod string
@@ -198,6 +202,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, page(r, s.blockedBy[n]))
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "commits" && parts[2] == "check-runs":
 		writeJSON(w, http.StatusOK, map[string]any{"total_count": len(s.checks), "check_runs": page(r, s.checks)})
+	case r.Method == http.MethodGet && len(parts) == 4 && parts[0] == "actions" && parts[1] == "jobs" && parts[3] == "logs":
+		id, err := strconv.ParseInt(parts[2], 10, 64)
+		log, ok := s.logs[id]
+		if err != nil || !ok {
+			writeError(w, http.StatusNotFound, "Not Found", "https://docs.github.com/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(log))
 	default:
 		s.unexpected(w, r)
 	}
@@ -337,6 +350,16 @@ func (s *Server) SetChecks(runs []CheckRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checks = slices.Clone(runs)
+}
+
+// SetLog sets the log of Actions job id. A job without one is not found.
+func (s *Server) SetLog(id int64, log string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logs == nil {
+		s.logs = map[int64]string{}
+	}
+	s.logs[id] = log
 }
 
 // Snapshot returns the pull requests and the comments by issue number.

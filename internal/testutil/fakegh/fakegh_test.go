@@ -160,3 +160,31 @@ func TestContract(t *testing.T) {
 		t.Errorf("merged pull = %+v, want closed and merged", pulls[0])
 	}
 }
+
+func TestJobLogs(t *testing.T) {
+	s := New(t, repo, token)
+	s.SetLog(42, "step 1\nFAIL\n")
+	get := func(id string) (int, string) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.URL+"/repos/"+repo+"/actions/jobs/"+id+"/logs", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(data)
+	}
+	if code, body := get("42"); code != http.StatusOK || body != "step 1\nFAIL\n" {
+		t.Errorf("GET job 42 logs = %d %q, want the log", code, body)
+	}
+	if code, _ := get("43"); code != http.StatusNotFound {
+		t.Errorf("GET job 43 logs = %d, want 404 for a job without a log", code)
+	}
+}
