@@ -24,6 +24,18 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GH ?= gh
 LDFLAGS := -X github.com/autobutler-org/schmeide/internal/release.Version=$(VERSION)
 
+# Runs go test with $(1) as its arguments and, on failure, repeats what failed
+# at the end, where a gate that keeps only the last lines still shows it.
+define go_test
+	log="$$(mktemp)"
+	trap 'rm -f "$$log"' EXIT
+	if $(GO) test $(1) 2>&1 | tee "$$log"; then exit 0; fi
+	echo
+	echo "make $@ FAILED:"
+	bash scripts/test-summary.sh "$$log"
+	exit 1
+endef
+
 ##@ Development Environment
 
 .PHONY: setup
@@ -62,7 +74,21 @@ run: build ## Build and run the application
 
 .PHONY: test
 test: ## Run tests
-	$(GO) test ./...
+	$(call go_test,./...)
+
+.PHONY: test/race
+test/race: ## Run tests with the race detector (PKGS="./internal/control" to pick some, COVERPROFILE=f to write coverage)
+	# The control node and runner share state across goroutines (NATS
+	# subscriptions, the status store, pool runners on one job), so a race
+	# here is a real bug.
+	$(call go_test,-race -covermode=atomic $(if $(COVERPROFILE),-coverprofile=$(COVERPROFILE)) $(or $(PKGS),./...))
+
+.PHONY: test/scripts
+test/scripts: ## Test the shell scripts under scripts/
+	for t in scripts/*_test.sh; do
+		echo "== $$t"
+		bash "$$t"
+	done
 
 .PHONY: test/e2e
 test/e2e: ## Build the binary and run the end-to-end journeys (build tag e2e)
@@ -130,7 +156,7 @@ upgrade/go: ## Upgrade Go dependencies
 GOLINT_ARGS ?= --verbose --config .golangci.yml
 
 .PHONY: check
-check: check/format check/tidy check/vet check/lint test ## Check code quality without changing files
+check: check/format check/tidy check/vet check/lint test test/scripts ## Check code quality without changing files
 
 .PHONY: check/format
 check/format: ## Fail if any Go file needs gofmt
@@ -154,7 +180,11 @@ check/lint: ## Run golangci-lint without fixing
 	$(GO) tool golangci-lint run $(GOLINT_ARGS) ./...
 
 .PHONY: check/vuln
-check/vuln: ## Scan for known vulnerabilities
+check/vuln: export GOTOOLCHAIN = local
+check/vuln: ## Fail on reachable known vulnerabilities (needs network, so not part of make check)
+	# Scans with the go on PATH rather than go.mod's toolchain, so the result
+	# reflects the patched Go that CI installs. Pinning an old go makes every
+	# standard library fix since then show up as reachable.
 	$(GO) tool govulncheck ./...
 
 .PHONY: format
@@ -168,7 +198,7 @@ format/go: ## Format Go code
 
 .PHONY: help
 help: ## Display this help
-	awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+	awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_/-]+:.*?##/ { printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 env-%: ## Check if env var is defined
 	if [ -z "$($*)" ]; then \
