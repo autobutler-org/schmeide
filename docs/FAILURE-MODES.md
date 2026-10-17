@@ -115,7 +115,11 @@ After review passes:
   open. A person merges it.
 - With `merge = "factory"`, the runner waits for the head commit's check runs
   to succeed, then merges with a merge commit. The wait is `check_wait` from the
-  repo config, default two minutes. No check runs is not green.
+  repo config, default two minutes, read with backoff from one second up to
+  30 seconds. No check runs is not green. A stacked pull request first waits
+  for the one below it to merge and GitHub to retarget it to the default
+  branch; a bottom that does not merge in time, or closes unmerged, leaves it
+  open with a comment saying which.
 - Before the wait, the runner reads branch protection on the base branch. If
   it can read it and the branch requires one or more approving reviews, the
   job fails, the comment names that requirement, the pull request stays open,
