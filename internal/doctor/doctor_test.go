@@ -446,6 +446,7 @@ func TestReportGroupsChecks(t *testing.T) {
 	Report(t.Context(), &out, Checks("nats://127.0.0.1:1", "", "", []harness.Harness{&harness.Fake{}}))
 	const want = `operator:
   ok    harness fake: installed and logged in
+  ok    permission floor: a session may edit its worktree and is not handed flags that skip permission checks; the runner refuses those in --claude-args and --grok-args unless --allow-dangerous-harness-args is given (see docs/permissions.md)
   FAIL  control node: no steward to connect as; pass your GitHub login with --steward
 machine:
 `
@@ -480,7 +481,7 @@ func TestMainJSON(t *testing.T) {
 		}
 		names = append(names, r["name"]+"="+r["status"])
 	}
-	want := []string{"git=fail", "gh=fail", "disk=ok", "lint gate=ok", "harness claude-code=fail", "harness grok=fail", "control node=fail"}
+	want := []string{"git=fail", "gh=fail", "disk=ok", "lint gate=ok", "harness claude-code=fail", "harness grok=fail", "permission floor=ok", "control node=fail"}
 	if !slices.Equal(names, want) {
 		t.Errorf("checks = %v, want %v", names, want)
 	}

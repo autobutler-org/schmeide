@@ -63,7 +63,27 @@ func FlagUsage(fs *flag.FlagSet) string {
 	return b.String()
 }
 
-func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
+// harnessFlags are the runner flags that shape each harness session.
+type harnessFlags struct {
+	claudeArgs, grokArgs string
+	allowDangerous       bool
+}
+
+// check refuses session flags that widen the permission floor, unless
+// --allow-dangerous-harness-args was given.
+func (h *harnessFlags) check() error {
+	if h.allowDangerous {
+		return nil
+	}
+	for _, f := range []struct{ name, value string }{{"claude-args", h.claudeArgs}, {"grok-args", h.grokArgs}} {
+		if arg := harness.WideningArg(strings.Fields(f.value)); arg != "" {
+			return fmt.Errorf("--%s contains %q, which lets a session skip its permission checks; remove it, or pass --allow-dangerous-harness-args to accept that (see docs/permissions.md)", f.name, arg)
+		}
+	}
+	return nil
+}
+
+func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFlags) {
 	o = &Options{}
 	fs = flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
 	fs.StringVar(&o.Steward, "steward", "", "Your GitHub login. The runner only takes jobs for issues assigned to this login. Required.")
@@ -80,8 +100,11 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv, claudeArgs *string) {
 	fs.DurationVar(&o.SessionTimeout, "session-timeout", repoconfig.DefaultSessionTimeout, "How long one harness session may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config session_timeout overrides this when it is set. An empty config value keeps this flag. The default is 2h.")
 	fs.DurationVar(&o.GateTimeout, "gate-timeout", repoconfig.DefaultGateTimeout, "How long the gate command may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config gate_timeout overrides this when it is set. An empty config value keeps this flag. A gate timeout is not retried. The default is 30m.")
 	passEnv = fs.String("pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
-	claudeArgs = fs.String("claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests.")
-	return fs, o, passEnv, claudeArgs
+	h = &harnessFlags{}
+	fs.StringVar(&h.claudeArgs, "claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
+	fs.StringVar(&h.grokArgs, "grok-args", "--permission-mode acceptEdits", "Flags for each Grok session. The default only lets a session edit files in its worktree. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
+	fs.BoolVar(&h.allowDangerous, "allow-dangerous-harness-args", false, "Accept --claude-args and --grok-args that skip permission checks: --dangerously-skip-permissions, or a --permission-mode other than acceptEdits. The default is off.")
+	return fs, o, passEnv, h
 }
 
 // splitList splits a comma-separated flag value, dropping empty entries.
@@ -89,19 +112,19 @@ func splitList(value string) []string {
 	return slices.DeleteFunc(strings.Split(value, ","), func(name string) bool { return name == "" })
 }
 
-// harnesses returns harness.All in that order. claudeArgs applies only to the
-// Claude Code harness; every other harness keeps the defaults All gave it.
-// An empty claudeArgs means no extra Claude flags, the same as --claude-args
-// set to empty: Fields returns nil, which is what the runner stores today.
-func harnesses(claudeArgs string) []harness.Harness {
+// harnesses returns harness.All in that order, with claudeArgs on the Claude
+// Code harness and grokArgs on the Grok harness. Any other harness keeps the
+// defaults All gave it. An empty value stores nil Args, which is the
+// harness's own default.
+func harnesses(claudeArgs, grokArgs string) []harness.Harness {
 	list := harness.All()
-	args := strings.Fields(claudeArgs)
 	for _, h := range list {
-		cc, ok := h.(*harness.ClaudeCode)
-		if !ok {
-			continue
+		switch h := h.(type) {
+		case *harness.ClaudeCode:
+			h.Args = strings.Fields(claudeArgs)
+		case *harness.Grok:
+			h.Args = strings.Fields(grokArgs)
 		}
-		cc.Args = args
 	}
 	return list
 }
@@ -144,6 +167,13 @@ output. The repo config may override either flag with session_timeout and
 gate_timeout, which are Go durations such as 30m. An empty value keeps the
 flag. A gate timeout is not retried. A session timeout before the pull
 request is open counts toward --max-attempts.
+
+The permission floor is the same for Claude Code and Grok: a session may edit
+files in its worktree, and it is not handed flags that skip permission
+checks. The runner refuses to start when --claude-args or --grok-args
+contains --dangerously-skip-permissions or a --permission-mode other than
+acceptEdits, unless --allow-dangerous-harness-args is given. See
+docs/permissions.md.
 
 A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_,
 and --pass-env, and does not see the runner's SCHMEIDE_* settings unless a
@@ -188,7 +218,7 @@ func confirm(in *bufio.Reader, out io.Writer) func(string) (bool, error) {
 // Main runs `schmeide runner` with the given arguments and returns its exit
 // code.
 func Main(args []string, stdout, stderr io.Writer) int {
-	fs, o, passEnv, claudeArgs := runnerFlags()
+	fs, o, passEnv, h := runnerFlags()
 	err := ParseFlags(fs, args)
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, Usage())
@@ -197,12 +227,15 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if err == nil && o.Steward == "" {
 		err = errors.New("missing --steward: pass your GitHub login with --steward or set SCHMEIDE_STEWARD")
 	}
+	if err == nil {
+		err = h.check()
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "schmeide runner: %v\nRun 'schmeide runner --help' for usage.\n", err)
 		return 2
 	}
 	o.PassEnv = splitList(strings.ReplaceAll(*passEnv, " ", ""))
-	o.Harnesses = harnesses(*claudeArgs)
+	o.Harnesses = harnesses(h.claudeArgs, h.grokArgs)
 	o.Output = stderr
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		o.Confirm = confirm(bufio.NewReader(os.Stdin), stderr)
