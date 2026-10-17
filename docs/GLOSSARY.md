@@ -11,7 +11,7 @@ pull request on a branch starting with `<issue number>_` make the top of their
 stack the base for the new pull request. Otherwise the base is the repository
 default branch. Two or more such blockers have to form one linear stack, each
 pull request based on the one below it; blockers side by side (a diamond) fail
-the job.
+the job finally.
 
 ## restack
 

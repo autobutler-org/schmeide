@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 // open blockers' pull requests have to be one linear stack, and the new pull
 // request stacks on its top: the one whose chain of bases down to the
 // default branch holds every other one. Blockers that do not form one chain,
-// such as two stacked side by side, are refused.
+// such as two stacked side by side, are refused with errNotOneStack.
 func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) {
 	base, err := gh.DefaultBranch(ctx)
 	if err != nil {
@@ -60,8 +61,12 @@ func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) 
 			return top, nil
 		}
 	}
-	return "", fmt.Errorf("the open dependencies' pull requests (%s) are not one linear stack, and schmeide stacks only on a single chain of blockers", strings.Join(heads, ", "))
+	return "", fmt.Errorf("the open dependencies' pull requests (%s) are not one linear stack, and %w", strings.Join(heads, ", "), errNotOneStack)
 }
+
+// errNotOneStack is open blockers whose pull requests do not form one chain.
+// A retry does not change them, so the job fails finally.
+var errNotOneStack = errors.New("schmeide stacks only on a single chain of blockers")
 
 // stackBelow is the set of schmeide branches under head: its pull request's
 // base, that branch's base, and so on down to trunk.
