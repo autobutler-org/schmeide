@@ -80,8 +80,8 @@ func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, true)
 	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
 	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
-	if out.state != StateMerged || !strings.Contains(out.comment, "merge queue") {
-		t.Fatalf("outcome = %+v, want merged with a merge queue comment", out)
+	if out.state != StateQueued || !strings.Contains(out.comment, "merge queue") {
+		t.Fatalf("outcome = %+v, want queued with a merge queue comment", out)
 	}
 	got := strings.Join(calls(), "\n")
 	if !strings.Contains(got, "graphql enqueue PR_9") || !strings.Contains(got, "graphql mergeQueue main") {

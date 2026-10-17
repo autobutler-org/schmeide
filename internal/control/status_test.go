@@ -301,3 +301,31 @@ func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
 		t.Errorf("--json = %q, want empty runners and jobs", got)
 	}
 }
+
+func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
+	q, url := startQueueOverTCP(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	job := func(issue int) Job {
+		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "octocat", InstallationID: 1, Title: "t"}
+	}
+	states := []State{StateWorking, StateReviewing, StateMerged, StateMergeFailed, StateReviewFailed, StateQueued}
+	for i, state := range states {
+		runner.report(job(i+1), state, "")
+	}
+	last := job(len(states)).Subject()
+	eventually(t, func() bool { _, ok := tracker.JobStatus(last); return ok })
+
+	var got Snapshot
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []JobState{
+		{Subject: job(1).Subject(), State: StateWorking},
+		{Subject: job(2).Subject(), State: StateReviewing},
+	}
+	if !reflect.DeepEqual(got.Jobs, want) {
+		t.Errorf("jobs = %+v, want only the working and reviewing jobs", got.Jobs)
+	}
+}

@@ -365,7 +365,7 @@ func (w *world) awaitSubject(t *testing.T, subject string, issue int) []State {
 				continue
 			}
 			states = append(states, s.State)
-			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed || s.State == StateReviewFailed || s.State == StateMerged || s.State == StateMergeFailed {
+			if s.State == StateGateFailed || s.State == StatePROpened || s.State == StateFailed || s.State == StateReviewFailed || s.State == StateMerged || s.State == StateQueued || s.State == StateMergeFailed {
 				return states
 			}
 		case <-timeout:
