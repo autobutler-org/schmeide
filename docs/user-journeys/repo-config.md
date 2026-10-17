@@ -6,14 +6,14 @@ reference is [../config.md](../config.md). Implemented in
 `internal/repoconfig`; the runner reads it in `internal/runner/runner.go`
 (`execute`).
 
-Every config error below reaches the issue the same way: the attempt fails,
-is retried up to the runner's `--max-attempts` (default 3, 30 seconds apart),
-and then the issue gets the comment "schmeide could not finish this job and did
-not open a pull request:" followed by the error. The error starts with the
+Every config error below reaches the issue the same way: the job fails
+finally on its first attempt and is not retried, and the issue gets one comment
+"schmeide could not finish this job and did not open a pull request:" followed
+by the error. The error starts with the
 config file's path inside the job's worktree, for example
 `<work dir>/worktrees/<repo id>-<issue>/.schmeide/config.toml:`. Below, that
-prefix is written `<file>:`. A fix pushed to the base branch before the next
-attempt is picked up, because each attempt fetches the base again.
+prefix is written `<file>:`. After a fix is pushed to the base branch, remove
+and add the ready label again to make a new job.
 
 ---
 
@@ -58,15 +58,17 @@ attempt is picked up, because each attempt fetches the base again.
 **Expected result:**
 
 - No harness session runs and no pull request opens.
-- After the last attempt, the issue gets "schmeide could not finish this job
-  and did not open a pull request:" with "`<file>`: config file not found;
-  create it with a gate command, e.g. gate = "make check test"".
+- The job reports `claimed` then `failed`, and is not retried.
+- The issue gets one comment: "schmeide could not finish this job and did not
+  open a pull request:" with "`<file>`: config file not found; create it with a
+  gate command, e.g. gate = "make check test"".
 
 **Notes:**
 
-- A missing file is retried like any failed attempt. It is not final on the
-  first try.
-- Covered by `TestLoad`.
+- A retry reads the same base branch, so a missing file is final on the first
+  attempt.
+- Covered by `TestMissingConfigIsFinal` (`internal/runner`) and `TestLoad`
+  (`internal/repoconfig`).
 
 ---
 
@@ -81,7 +83,7 @@ attempt is picked up, because each attempt fetches the base again.
 
 **Expected result:**
 
-- After the last attempt, the issue comment names "`<file>`: gate is missing or
+- The issue comment names "`<file>`: gate is missing or
   empty; set gate = "<command>", e.g. gate = "make check test"".
 
 **Notes:**

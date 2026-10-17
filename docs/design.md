@@ -238,9 +238,9 @@ the base. Two or more such open blockers have to be one linear stack: the
 base is the top, the one whose chain of pull request bases down to the
 default branch holds every other one, whatever order GitHub lists them in.
 Blockers that are not one chain, such as two pull requests side by side on
-the default branch (a diamond), fail the job. The runner comments on the
-issue that they are not one linear stack and does not open a pull request
-(`internal/runner/github.go`, `internal/runner/runner.go`). Restacking when
+the default branch (a diamond), fail the job finally. The runner comments on
+the issue that they are not one linear stack, does not open a pull request,
+and does not retry (`internal/runner/github.go`, `internal/runner/runner.go`). Restacking when
 the base moves or the bottom merges is under the factory merge above.
 
 ### Harnesses
@@ -386,7 +386,8 @@ Follow-ups that landed with the slice:
   does not consume an attempt. A restarted runner restores the attempt count.
   A job whose stage record names an open pull request resumes at review
   and does not open a second one. A job with no pull request starts over. The wait before the next try is 30 seconds and has no flag. A gate
-  failure is final. A pull request on a branch named `<issue number>_*`
+  failure is final. So are a missing or invalid `.schmeide/config.toml` and
+  open blockers side by side (#212): a retry cannot change them. A pull request on a branch named `<issue number>_*`
   suppresses a second PR.
 - **#103.** A runner sends a JetStream `InProgress` heartbeat every third of
   `--ack-wait` (default 5 minutes), so a dead runner's unacknowledged job is
