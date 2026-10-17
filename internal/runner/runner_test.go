@@ -70,6 +70,8 @@ type world struct {
 	mint func(context.Context, control.Job) (control.Token, error)
 	// maxAttempts is the runner's --max-attempts. Zero keeps the default.
 	maxAttempts int
+	// ackWait and stuckAfter override the runner's delivery lease settings.
+	ackWait, stuckAfter time.Duration
 }
 
 func newWorld(t *testing.T) *world {
@@ -183,6 +185,10 @@ func (w *world) runner(t *testing.T, steward string, h harness.Harness) (*Runner
 func (w *world) runnerWith(t *testing.T, steward string, h harness.Harness, pool bool) (*Runner, string) {
 	t.Helper()
 	workDir := t.TempDir()
+	ackWait := w.ackWait
+	if ackWait == 0 {
+		ackWait = time.Second
+	}
 	r, err := New(t.Context(), Options{
 		NATSURL:      w.natsURL,
 		NATSToken:    testRunnerTokens[steward],
@@ -194,7 +200,8 @@ func (w *world) runnerWith(t *testing.T, steward string, h harness.Harness, pool
 		GitName:      "schmeide[bot]",
 		GitEmail:     "schmeide[bot]@example.test",
 		Harnesses:    []harness.Harness{h},
-		AckWait:      time.Second,
+		AckWait:      ackWait,
+		StuckAfter:   w.stuckAfter,
 		RetryDelay:   10 * time.Millisecond,
 		MaxAttempts:  w.maxAttempts,
 	}, slog.New(slog.DiscardHandler))
@@ -876,6 +883,93 @@ func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	}
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "the model was overloaded") {
 		t.Errorf("issue comments = %q, want one reporting the final failure", comments["7"])
+	}
+}
+
+func TestAttemptCountSurvivesRunnerRestart(t *testing.T) {
+	w := newWorld(t)
+	w.track(t)
+	w.maxAttempts = 2
+	var sessions atomic.Int32
+	h := &harness.Fake{RunFunc: func(context.Context, harness.Request) error {
+		sessions.Add(1)
+		return errors.New("the model was overloaded")
+	}}
+
+	first, _ := w.runner(t, "alice", h)
+	w.waitRegistered(t, "alice", false)
+	w.publish(t, "alice", 7)
+	first.handle(t.Context(), nextJob(t, first))
+	states := w.take(t, nil, 3)
+	if got, want := fmt.Sprint(states), "[claimed working retrying]"; got != want {
+		t.Fatalf("first runner states = %s, want %s", got, want)
+	}
+	first.Close()
+
+	second, _ := w.runner(t, "alice", h)
+	second.handle(t.Context(), nextJob(t, second))
+	states = w.take(t, states, 6)
+	if got, want := fmt.Sprint(states), "[claimed working retrying claimed working failed]"; got != want {
+		t.Errorf("states after restart = %s, want %s", got, want)
+	}
+	if got := sessions.Load(); got != 2 {
+		t.Errorf("sessions = %d, want 2: the first runner's failed attempt must survive its restart", got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, ok := w.tracker.JobStatus(stewardSubject("alice", 7))
+		if ok && status.Attempts == 2 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	status, ok := w.tracker.JobStatus(stewardSubject("alice", 7))
+	t.Errorf("persisted status = %+v, %v; want 2 attempts", status, ok)
+}
+
+func TestStuckJobRecovery(t *testing.T) {
+	w := newWorld(t)
+	w.stuckAfter = time.Second
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	hung := &harness.Fake{RunFunc: func(ctx context.Context, _ harness.Request) error {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		return ctx.Err()
+	}}
+	first, _ := w.runner(t, "alice", hung)
+	w.publish(t, "alice", 7)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		first.handle(t.Context(), nextJob(t, first))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stuck runner never started the work")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stuck runner's work was not canceled")
+	}
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stuck runner did not hand the job back")
+	}
+	first.Close()
+
+	h, sessions := writes(map[string]string{"fix.txt": "x"})
+	second, _ := w.runner(t, "alice", h)
+	second.handle(t.Context(), nextJob(t, second))
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("recovery runner states = %v, want a PR", states)
+	}
+	if got := sessions.Load(); got != 2 {
+		t.Errorf("recovery runner sessions = %d, want worker and reviewer", got)
 	}
 }
 

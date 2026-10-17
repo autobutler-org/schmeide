@@ -96,6 +96,8 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFla
 	fs.StringVar(&o.GitName, "git-name", "schmeide[bot]", "Author name for the commits a job makes: the GitHub App's bot user.")
 	fs.StringVar(&o.GitEmail, "git-email", "schmeide[bot]@users.noreply.github.com", "Author email for the commits a job makes.")
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job's work may fail before that failure is final and reported on the issue. Handing the job back because a token could not be minted, or because the runner is shutting down, does not count. A gate failure is never retried.")
+	fs.DurationVar(&o.AckWait, "ack-wait", defaultAckWait, "How long JetStream waits without an InProgress heartbeat before redelivering a job. The runner sends a heartbeat every third of this duration. A Go duration, for example 5m.")
+	fs.DurationVar(&o.StuckAfter, "stuck-after", defaultStuckAfter, "How long a job may go without a state change before the runner cancels its work and Naks it for another runner. A Go duration, for example 3h.")
 	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets merge = \"factory\". The default is a person.")
 	fs.DurationVar(&o.SessionTimeout, "session-timeout", repoconfig.DefaultSessionTimeout, "How long one harness session may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config session_timeout overrides this when it is set. An empty config value keeps this flag. The default is 2h.")
 	fs.DurationVar(&o.GateTimeout, "gate-timeout", repoconfig.DefaultGateTimeout, "How long the gate command may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config gate_timeout overrides this when it is set. An empty config value keeps this flag. A gate timeout is not retried. The default is 30m.")
@@ -155,9 +157,16 @@ rounds fails the job, comments on the issue, and leaves the pull request
 open. The outcome is reported to the control node and commented on the issue.
 A job the runner does not finish is handed to another runner, and a job that
 fails before the pull request is open is tried again up to --max-attempts
-times. Handing a job back because a token could not be minted, or because the
-runner is shutting down, does not count as one of those tries. A gate failure
-is never retried.
+times. That count is stored with job status and survives runner restarts.
+Handing a job back because a token could not be minted, because the runner is
+shutting down, or because --stuck-after (default 3h) found no state change does
+not count as one of those tries. A gate failure is never retried.
+
+JetStream redelivers a job when it receives no InProgress heartbeat for
+--ack-wait (default 5m). While it works, the runner must stay connected so it
+can send a heartbeat every third of that duration. The separate --stuck-after
+watchdog prevents those heartbeats from keeping a job with no state change
+forever: it cancels the work and Naks the delivery for another runner.
 
 A harness session is canceled after --session-timeout (default 2h). The gate
 command is canceled after --gate-timeout (default 30m). Canceling either one

@@ -48,7 +48,7 @@ const (
 
 // jobStreamMaxMsgs caps the job stream once the issue bucket has been seeded
 // from it, discarding the oldest jobs first. A runner holds a job for one
-// session: hours at most, with a heartbeat every AckWait/3 (10s by default).
+// session: hours at most, with a heartbeat every AckWait/3 (1m40s by default).
 // 100,000 later jobs would have to be queued while one job is still held
 // before that job is discarded. At a few KB per job (the issue title and
 // body) that is a few hundred MB on disk at most. A var so tests can shrink it.
@@ -249,8 +249,8 @@ func runnerPermissions(steward string) *server.Permissions {
 			StatusSubjectPrefix + steward + ".>",
 			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
-			"$JS.API.STREAM.INFO." + statusStream,
-			"$JS.API.STREAM.MSG.GET." + statusStream,
+			"$JS.API.STREAM.INFO." + StatusStream,
+			"$JS.API.STREAM.MSG.GET." + StatusStream,
 			"$JS.API.STREAM.INFO.KV_" + StageBucket,
 			stages + steward + ".>",
 			stages + PoolName + ".>",

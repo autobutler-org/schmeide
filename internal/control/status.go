@@ -27,9 +27,10 @@ const (
 	// the subject its Status messages are published on.
 	StatusSubjectPrefix = "schmeide.status."
 
-	// statusStream keeps runner registrations and job statuses in the queue's
-	// data directory. It is the history a restarted control node loads.
-	statusStream = "SCHMEIDE_STATUS"
+	// StatusStream keeps runner registrations and job statuses in the queue's
+	// data directory. It is the history a restarted control node or runner
+	// loads.
+	StatusStream = "SCHMEIDE_STATUS"
 )
 
 // State is where a job stands. Gate failed, PR opened, failed, review failed,
@@ -72,6 +73,9 @@ type Status struct {
 	// Detail is the PR URL for StatePROpened and the reason for the failure
 	// states.
 	Detail string `json:"detail,omitempty"`
+	// Attempts is the number of failed work outcomes so far. It is omitted
+	// for zero so statuses written by older runners remain compatible.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // Registration is the message a runner publishes when it starts.
@@ -87,7 +91,7 @@ type Registration struct {
 }
 
 // Tracker records what runners report: who registered and where each job
-// stands. Registrations and statuses are stored on statusStream, and Track
+// stands. Registrations and statuses are stored on StatusStream, and Track
 // loads that history before it returns.
 type Tracker struct {
 	stream  jetstream.Stream
@@ -106,7 +110,7 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	// The same subjects runners already publish. JetStream stores each
 	// message because the stream listens on them; publishers stay unchanged.
 	stream, err := q.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name: statusStream,
+		Name: StatusStream,
 		Subjects: []string{
 			RegisterSubjectPrefix + "*",
 			StatusSubjectPrefix + "*.*.*",
@@ -320,7 +324,7 @@ type Snapshot struct {
 // final state is recorded on an issue. A missing stream is an empty Snapshot.
 func ReadStatus(ctx context.Context, js jetstream.JetStream) (Snapshot, error) {
 	snap := Snapshot{Runners: []Registration{}, Jobs: []JobState{}}
-	stream, err := js.Stream(ctx, statusStream)
+	stream, err := js.Stream(ctx, StatusStream)
 	if errors.Is(err, jetstream.ErrStreamNotFound) {
 		return snap, nil
 	}
