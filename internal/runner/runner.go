@@ -566,7 +566,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
 	}
-	gh := forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}
+	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}}
 	out := r.work(workCtx, gh, job, token)
 	if errors.Is(context.Cause(workCtx), errJobStuck) {
 		return

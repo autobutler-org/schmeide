@@ -183,12 +183,18 @@ doubling to 30 seconds, and once more at the end of the wait.
 
 A factory merge of a stacked pull request, one whose base is another schmeide
 pull request's branch, goes bottom first. Before the check wait, the runner
-waits up to `check_wait` for the pull request to target the default branch,
-which GitHub does when the one below merges and its branch is deleted. Merging
-into the branch below would leave the change off the default branch. A bottom
-that does not merge in time, or one that closes while this pull request still
-targets its branch, fails the job, and the comment says which; a person can
-retarget the pull request. A failure after the checks are green says "CI is
+waits up to `check_wait` for the one below to merge. Merging into the branch
+below would leave the change off the default branch. While the one below is
+open, each poll restacks: the branch is rebased onto the branch below, so the
+stack follows a base that moved, and force-pushed with a lease. Once the one
+below has merged, which the runner tells by the base it last built on being in
+the default branch, it retargets the pull request to the default branch, unless
+GitHub already did on deleting the merged branch, and rebases it onto the
+default branch. The check wait then runs on the rebased head. A bottom that
+does not merge in time, one that closes without merging, or a rebase that
+conflicts fails the job, and the comment says which; a person can retarget or
+rebase the pull request. Retargeting uses the pulls API's base update from the
+runner's own GitHub adapter (`internal/runner/github.go`). A failure after the checks are green says "CI is
 green, but" and why, so a pull request that looks ready names why it was not
 merged.
 
@@ -222,9 +228,14 @@ head branch starts with `<issue number>_` means the base is the repository
 default branch. The prefix is that blocker's issue number. A blocker that
 is not open, and an open blocker with no such pull request, do not count.
 Exactly one such open blocker selects that pull request's head branch as
-the base. Two or more such open blockers fail the job. The runner comments
-on the issue that only one open dependency is supported and does not open a
-pull request (`internal/runner/github.go`, `internal/runner/runner.go`).
+the base. Two or more such open blockers have to be one linear stack: the
+base is the top, the one whose chain of pull request bases down to the
+default branch holds every other one, whatever order GitHub lists them in.
+Blockers that are not one chain, such as two pull requests side by side on
+the default branch (a diamond), fail the job. The runner comments on the
+issue that they are not one linear stack and does not open a pull request
+(`internal/runner/github.go`, `internal/runner/runner.go`). Restacking when
+the base moves or the bottom merges is under the factory merge above.
 
 ### Harnesses
 
@@ -410,8 +421,8 @@ Not in the first slice, and not shipped:
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
-| Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge and GitHub to retarget it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
-| Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers fail the job. The runner comments on the issue that only one open dependency is supported and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
+| Merge default (#32) | Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
+| Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers have to be one linear stack, and the top of it is the base (#94); blockers that are not one chain fail the job, and the runner comments that they are not one linear stack and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |
 

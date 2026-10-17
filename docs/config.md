@@ -60,11 +60,12 @@ Who merges a pull request after review has passed and CI is green.
   - When the base branch has a merge queue, green checks add the pull request
     to the queue instead of merging it. The job is reported queued.
   - A pull request stacked on another schmeide pull request merges bottom
-    first. Before the check wait it waits, for up to `check_wait`, until it
-    targets the default branch, which GitHub does when the pull request below
-    merges and its branch is deleted. A bottom that has not merged by then, or
-    one that closed while this pull request still targets its branch, leaves
-    the pull request open, and the comment says which.
+    first. Before the check wait it waits, for up to `check_wait`, for the pull
+    request below to merge, rebasing onto that branch as it moves. Once it
+    merged, the runner retargets this pull request to the default branch, if
+    GitHub has not, and rebases it onto the default branch. A bottom that has
+    not merged by then, one that closed without merging, or a rebase that
+    conflicts leaves the pull request open, and the comment says which.
   - A failure after the checks are green starts with "CI is green, but", so a
     pull request that looks ready says why it was not merged.
 

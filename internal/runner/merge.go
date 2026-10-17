@@ -181,9 +181,10 @@ func mergeBlocked(base string, p forge.Protection) error {
 //
 // A pull request stacked on another one, whose base is not the default
 // branch, merges only after the one below it: it first waits, for up to
-// check_wait, until it targets the default branch, which GitHub does when the
-// pull request below merges and its branch is deleted. Merging it into the
-// branch below would leave its change off the default branch.
+// check_wait, until the one below merges, restacking as that branch moves,
+// and is then retargeted to the default branch and rebased onto it; see
+// [waitForStack]. Merging it into the branch below would leave its change off
+// the default branch.
 //
 // Before the check wait, branch protection on the base is read, and a merge
 // it makes impossible fails without waiting. Every failure after the checks
@@ -198,7 +199,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 		return mergeFailed(prURL, fmt.Errorf("could not read the default branch: %w", err))
 	}
 	if base != trunk {
-		if err := waitForStack(ctx, gh, issue, base, trunk, wait); err != nil {
+		if err := waitForStack(ctx, ws, gh, issue, trunk, wait); err != nil {
 			if ctx.Err() != nil {
 				return outcome{}
 			}
@@ -301,15 +302,15 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 }
 
 // waitForStack waits, backing off like the check wait, until the open pull
-// request for issue targets trunk instead of base, the branch of the pull
-// request below it. It returns why that did not happen within wait: the pull
-// request below has not merged, or it closed and this one still targets its
-// branch, which only a person can fix.
-func waitForStack(ctx context.Context, gh forge.Forge, issue int, base, trunk string, wait time.Duration) error {
-	below, err := stackedOn(base)
-	if err != nil {
-		return err
-	}
+// request for issue targets trunk instead of the branch of the pull request
+// below it, and restacks it on the way. While the pull request below
+// is open, each poll rebases onto that branch, so the stack follows a base
+// that moved. Once the pull request below merged, this one is retargeted to
+// trunk, when GitHub did not already do that on deleting the merged branch,
+// and rebased onto trunk. It returns why that did not happen within wait:
+// the pull request below has not merged, it closed without merging, which
+// only a person can sort out, or the restack failed.
+func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, trunk string, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	delay := checkPoll
 	for {
@@ -321,14 +322,33 @@ func waitForStack(ctx context.Context, gh forge.Forge, issue int, base, trunk st
 			return fmt.Errorf("the pull request for issue #%d is no longer open", issue)
 		}
 		if mine.Base.Ref == trunk {
-			return nil
+			return restack(ctx, ws, trunk)
+		}
+		base := mine.Base.Ref
+		below, err := stackedOn(base)
+		if err != nil {
+			return err
 		}
 		parent, ok, err := gh.IssuePull(ctx, below, "all")
 		if err != nil {
 			return fmt.Errorf("could not read the pull request for issue #%d, which this one is stacked on: %w", below, err)
 		}
-		if !ok || parent.State != "open" {
-			return fmt.Errorf("the pull request is stacked on %s, whose pull request for issue #%d is no longer open, but it still targets %s and not %s, so schmeide did not merge it; a person can retarget it to %s", mine.Base.Ref, below, mine.Base.Ref, trunk, trunk)
+		if ok && parent.State == "open" {
+			if err := restack(ctx, ws, base); err != nil {
+				return err
+			}
+		} else {
+			merged, err := ws.BaseMerged(ctx, trunk)
+			if err != nil {
+				return fmt.Errorf("could not tell whether %s merged into %s: %w", base, trunk, err)
+			}
+			if !merged {
+				return fmt.Errorf("the pull request is stacked on %s, whose pull request for issue #%d closed without merging into %s, so schmeide did not merge it; a person can retarget it to %s", base, below, trunk, trunk)
+			}
+			if err := retarget(ctx, gh, mine.HTMLURL, trunk); err != nil {
+				return err
+			}
+			return restack(ctx, ws, trunk)
 		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("the pull request is stacked on %s, which has not merged into %s after waiting %s (check_wait); schmeide merges a stack bottom first, so it did not merge this one", parent.HTMLURL, trunk, wait)
@@ -338,6 +358,36 @@ func waitForStack(ctx context.Context, gh forge.Forge, issue int, base, trunk st
 		}
 		delay = min(2*delay, checkPollMax)
 	}
+}
+
+// restack rebases the branch onto the remote branch onto, and says so when
+// that fails.
+func restack(ctx context.Context, ws Workspace, onto string) error {
+	if _, err := ws.Restack(ctx, onto); err != nil {
+		return fmt.Errorf("could not restack the pull request onto %s: %w", onto, err)
+	}
+	return nil
+}
+
+// retargeter is a forge that can change a pull request's base branch.
+type retargeter interface {
+	RetargetPull(ctx context.Context, number int, base string) error
+}
+
+// retarget points the pull request at prURL at base.
+func retarget(ctx context.Context, gh forge.Forge, prURL, base string) error {
+	rt, ok := gh.(retargeter)
+	if !ok {
+		return fmt.Errorf("the pull request below merged, but schmeide cannot retarget %s to %s on this forge; a person can retarget it", prURL, base)
+	}
+	number, err := pullNumber(prURL)
+	if err != nil {
+		return err
+	}
+	if err := rt.RetargetPull(ctx, number, base); err != nil {
+		return fmt.Errorf("the pull request below merged, but schmeide could not retarget %s to %s: %w", prURL, base, err)
+	}
+	return nil
 }
 
 // stackedOn is the issue whose branch base is: schmeide names a job's branch

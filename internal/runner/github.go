@@ -1,13 +1,18 @@
 package runner
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/forge"
 )
@@ -16,8 +21,11 @@ import (
 // and the branch its worktree is created from. It is the repository default
 // branch when no open blocker has an open schmeide pull request: there is no
 // blocker, every blocker is already merged, or a blocker has no open pull
-// request whose branch starts with that issue's "<number>_". Exactly one
-// such pull request selects its branch. More than one is refused.
+// request whose branch starts with that issue's "<number>_". Otherwise the
+// open blockers' pull requests have to be one linear stack, and the new pull
+// request stacks on its top: the one whose chain of bases down to the
+// default branch holds every other one. Blockers that do not form one chain,
+// such as two stacked side by side, are refused.
 func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) {
 	base, err := gh.DefaultBranch(ctx)
 	if err != nil {
@@ -27,7 +35,7 @@ func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	stacked := ""
+	var heads []string
 	for _, blocker := range blockers {
 		if blocker.State != "open" {
 			continue
@@ -36,18 +44,76 @@ func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) 
 		if err != nil {
 			return "", err
 		}
-		if !ok {
-			continue
+		if ok {
+			heads = append(heads, pr.Head.Ref)
 		}
-		if stacked != "" {
-			return "", errors.New("only one open dependency is supported")
+	}
+	if len(heads) == 0 {
+		return base, nil
+	}
+	for _, top := range heads {
+		below, err := stackBelow(ctx, gh, top, base)
+		if err != nil {
+			return "", err
 		}
-		stacked = pr.Head.Ref
+		if !slices.ContainsFunc(heads, func(h string) bool { return h != top && !below[h] }) {
+			return top, nil
+		}
 	}
-	if stacked != "" {
-		return stacked, nil
+	return "", fmt.Errorf("the open dependencies' pull requests (%s) are not one linear stack, and schmeide stacks only on a single chain of blockers", strings.Join(heads, ", "))
+}
+
+// stackBelow is the set of schmeide branches under head: its pull request's
+// base, that branch's base, and so on down to trunk.
+func stackBelow(ctx context.Context, gh forge.Forge, head, trunk string) (map[string]bool, error) {
+	below := map[string]bool{}
+	for {
+		issue, err := stackedOn(head)
+		if err != nil {
+			return below, nil
+		}
+		pr, ok, err := gh.IssuePull(ctx, issue, "open")
+		if err != nil {
+			return nil, err
+		}
+		if !ok || pr.Base.Ref == trunk || below[pr.Base.Ref] {
+			return below, nil
+		}
+		head = pr.Base.Ref
+		below[head] = true
 	}
-	return base, nil
+}
+
+// github is the GitHub forge plus what the runner needs that forge.GitHub
+// does not have yet: retargeting a pull request.
+type github struct{ forge.GitHub }
+
+// RetargetPull implements [retargeter].
+func (g github) RetargetPull(ctx context.Context, number int, base string) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	body, err := json.Marshal(map[string]string{"base": base})
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/pulls/%d", g.Repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, strings.TrimSuffix(g.API, "/")+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("github PATCH %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("github PATCH %s: %s: %s", path, resp.Status, data)
+	}
+	return nil
 }
 
 // outcomeMarker tags the issue comment that carries a job's outcome, followed

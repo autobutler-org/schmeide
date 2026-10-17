@@ -1947,7 +1947,49 @@ func TestMergedDependencyOpensAgainstTheDefaultBranch(t *testing.T) {
 	assertNoBlob(t, w.bare, branch, "stacked.txt")
 }
 
-func TestTwoOpenDependenciesOpenNothing(t *testing.T) {
+func TestLinearChainOfDependenciesStacksOnTheTop(t *testing.T) {
+	const (
+		bottom = "3_first-part"
+		top    = "4_second-part"
+		branch = "7_fix-the-thing"
+	)
+	w := newWorld(t)
+	w.pushBranch(t, bottom, "stacked.txt", "from-3\n")
+	src := t.TempDir()
+	git(t, src, "clone", "-q", "-b", bottom, w.bare, ".")
+	git(t, src, "checkout", "-q", "-b", top)
+	if err := os.WriteFile(filepath.Join(src, "second.txt"), []byte("from-4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", top)
+	git(t, src, "push", "-q", "origin", "HEAD:"+top)
+	// The top of the chain is listed first, so the order of blockers does
+	// not decide which one is the top.
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 4, State: "open"})
+	w.gh.AddBlocker(7, fakegh.Issue{Number: 3, State: "open"})
+	w.gh.SeedPull(pull{Head: bottom, Base: "main", State: "open"})
+	w.gh.SeedPull(pull{Head: top, Base: bottom, State: "open"})
+
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if states := w.await(t, "alice", 7); states[len(states)-1] != StatePROpened {
+		t.Fatalf("states = %v, want a pull request stacked on the chain", states)
+	}
+	pulls, _ := w.gh.Snapshot()
+	got, n := pullByHead(pulls, branch)
+	if n != 1 {
+		t.Fatalf("pulls = %+v, want one %s", pulls, branch)
+	}
+	if got.Base != top {
+		t.Errorf("base = %q, want the top of the chain, %s", got.Base, top)
+	}
+	assertCommitParent(t, w.bare, branch, top)
+}
+
+func TestTwoSideBySideDependenciesOpenNothing(t *testing.T) {
 	w := newWorld(t)
 	w.pushBranch(t, "3_first-part", "stacked.txt", "from-3\n")
 	w.pushBranch(t, "4_second-part", "stacked.txt", "from-4\n")
@@ -1985,8 +2027,8 @@ func TestTwoOpenDependenciesOpenNothing(t *testing.T) {
 	if len(comments["7"]) == 1 {
 		comment = comments["7"][0]
 	}
-	if !strings.Contains(comment, "only one open dependency is supported") || !strings.Contains(comment, "did not open a pull request") {
-		t.Errorf("issue comments = %q, want one that says only one open dependency is supported and that no pull request was opened", comments["7"])
+	if !strings.Contains(comment, "not one linear stack") || !strings.Contains(comment, "did not open a pull request") {
+		t.Errorf("issue comments = %q, want one that says the dependencies are not one linear stack and that no pull request was opened", comments["7"])
 	}
 }
 
