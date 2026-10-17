@@ -69,6 +69,10 @@ type Config struct {
 	WebhookRate string
 	// DeliveryTTL is how long an X-Github-Delivery id is remembered.
 	DeliveryTTL string
+	// NATSTLSCertFile and NATSTLSKeyFile are the PEM certificate and key the
+	// NATS listener serves. Both or neither are set.
+	NATSTLSCertFile string
+	NATSTLSKeyFile  string
 }
 
 // Handler is the webhook endpoint. It caps the body, rate-limits requests,
@@ -168,7 +172,17 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	minter := TokenMinter{AppID: cfg.GitHubAppID, Key: key, APIURL: cfg.GitHubAPIURL}
 
-	queue, err := StartQueue(ctx, QueueOptions{Addr: cfg.NATSAddr, RunnerTokens: runnerTokens, DataDir: cfg.DataDir})
+	natsTLS := cfg.NATSTLSCertFile != ""
+	if !natsTLS && listensBeyondLoopback(cfg.NATSAddr) {
+		log.Warn("NATS listens beyond loopback without TLS; runner tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file", "nats", cfg.NATSAddr)
+	}
+	queue, err := StartQueue(ctx, QueueOptions{
+		Addr:         cfg.NATSAddr,
+		RunnerTokens: runnerTokens,
+		DataDir:      cfg.DataDir,
+		TLSCertFile:  cfg.NATSTLSCertFile,
+		TLSKeyFile:   cfg.NATSTLSKeyFile,
+	})
 	if err != nil {
 		return err
 	}
@@ -195,7 +209,7 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	log.Info("control node started",
 		"webhook", "http://"+listener.Addr().String()+"/webhook",
 		"listener", "plain HTTP; must sit behind a TLS-terminating proxy",
-		"nats", cfg.NATSAddr, "ready_label", cfg.ReadyLabel)
+		"nats", cfg.NATSAddr, "nats_tls", natsTLS, "ready_label", cfg.ReadyLabel)
 
 	failed := make(chan error, 1)
 	go func() { failed <- srv.Serve(listener) }()

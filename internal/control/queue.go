@@ -84,6 +84,11 @@ type QueueOptions struct {
 	RunnerTokens map[string]string
 	// DataDir is where JetStream keeps its files.
 	DataDir string
+	// TLSCertFile and TLSKeyFile are the PEM certificate and key the network
+	// listener serves. Both set means runners must connect over TLS. Neither
+	// means plain TCP. The in-process connection never uses TLS.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // Queue is the embedded NATS server with the JetStream job stream.
@@ -137,6 +142,13 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 			return nil, fmt.Errorf("nats address %q has a non-numeric port: %w", o.Addr, err)
 		}
 		opts.Host, opts.Port = host, port
+	}
+	if o.TLSCertFile != "" || o.TLSKeyFile != "" {
+		tlsConfig, err := natsTLSConfig(o.TLSCertFile, o.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		opts.TLSConfig = tlsConfig
 	}
 	srv, err := server.NewServer(opts)
 	if err != nil {
