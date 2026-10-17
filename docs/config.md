@@ -47,7 +47,11 @@ Who merges a pull request after review has passed and CI is green.
 
 - `"human"` leaves the pull request for a person.
 - `"factory"` has the runner merge it once every check run on the head commit
-  has succeeded (see `check_wait`).
+  has succeeded (see `check_wait`). Before the wait, the job fails if the
+  base branch's protection, when the runner can read it, requires one or more
+  approving reviews: the runner cannot supply that review, the pull request
+  stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
+  does not fail the job, and required status checks are not this failure.
 
 Absent, empty, and blank values mean `"human"`. Any other value is an error,
 and values are case-sensitive: `"Factory"` is rejected.
