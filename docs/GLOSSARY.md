@@ -15,8 +15,9 @@ default branch. Two or more such blockers fail the job.
 
 An optional key in `.schmeide/config.toml` that sets how long a factory merge
 waits for every check run on the pull request head to succeed. It is a Go
-duration and defaults to two minutes. An unparseable or non-positive value is
-a config error. It only matters when `merge = "factory"`.
+duration and defaults to two minutes. The wait covers the fix round's new head.
+An unparseable or non-positive value is a config error. It only matters when
+`merge = "factory"`.
 
 ## control node
 
@@ -27,10 +28,21 @@ installation token for each job a runner asks for.
 ## factory merge
 
 The `merge = "factory"` setting in `.schmeide/config.toml`. After review passes,
-the runner merges the pull request with a merge commit, but only when every
-check run on the head has succeeded within the `check_wait` window. No check
-runs does not count as green. Absent, empty, and `human` leave the merge to a
-person.
+the runner waits `check_wait` for every check run on the head to succeed. The
+first red check runs one fix round when a review round remains, then polling
+continues on the new head inside the same wait. There is no second fix round.
+A check that is still red, or a wait that ends without success, leaves the pull
+request open. Green checks merge the pull request with a merge commit, or, when
+the base branch has a merge queue, add it to the queue and the job is reported
+queued. If branch protection can be read and requires approving reviews, the
+job fails before the wait and nothing is merged or enqueued. A 404 or 403 on
+that read does not fail the job. No check runs does not count as green. Absent,
+empty, and `human` leave the merge to a person.
+
+## fix round
+
+The one writer session a factory merge runs when the first check in the wait is
+red and a review round remains.
 
 ## gate
 
@@ -57,6 +69,11 @@ The fallback queue for a job whose assignee has no registered runner. A runner
 started with `--pool` (off by default) also takes pool jobs. Pool runners work
 one job at a time and take their own steward's job first.
 
+## queued
+
+The finished job state when a factory merge added the pull request to the base
+branch's merge queue. It is not merged yet. Status does not keep listing it.
+
 ## ready label
 
 The label that marks an assigned issue as ready for the factory. It is
@@ -75,8 +92,10 @@ The longest one harness session may run. The `session_timeout` config key
 overrides the runner's `--session-timeout` flag, which defaults to two hours.
 When it fires, the runner cancels the session, fails the job, and comments on
 the issue. A timeout before the pull request is open counts toward
-`--max-attempts`, and that count is kept in memory, so a restarted runner starts
-over.
+`--max-attempts`, and that count is kept in memory, so a restarted runner's
+count starts over. After a restart, a job whose stage record names an open pull
+request resumes at review and does not open a second pull request. A job with
+no pull request starts over.
 
 ## steward
 
