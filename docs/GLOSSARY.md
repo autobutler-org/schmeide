@@ -28,7 +28,7 @@ An optional key in `.schmeide/config.toml` that sets how long a factory merge
 waits for every check run on the pull request head to succeed. It is a Go
 duration and defaults to two minutes. The wait covers the fix round's new head.
 An unparseable or non-positive value is a config error. It only matters when
-`merge = "factory"`.
+`automate.merge = "on"`.
 
 ## control node
 
@@ -38,7 +38,7 @@ installation token for each job a runner asks for.
 
 ## factory merge
 
-The `merge = "factory"` setting in `.schmeide/config.toml`. After review passes,
+The `automate.merge = "on"` setting in `.schmeide/config.toml`. After review passes,
 the runner waits `check_wait` for every check run on the head to succeed. The
 first red check runs one fix round when a review round remains, then polling
 continues on the new head inside the same wait. There is no second fix round.
@@ -48,7 +48,7 @@ the base branch has a merge queue, add it to the queue and the job is reported
 queued. If branch protection can be read and requires approving reviews, the
 job fails before the wait and nothing is merged or enqueued. A 404 or 403 on
 that read does not fail the job. No check runs does not count as green. Absent,
-empty, and `human` leave the merge to a person.
+empty, and `"off"` leave the merge to a person.
 
 ## fix round
 

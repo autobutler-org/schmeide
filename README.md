@@ -7,7 +7,7 @@ New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull requ
 ## Commands
 
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
-- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. With `--pool`, which defaults off, it registers as a pool runner and can take a job whose assignee has no registered runner. It still works one job at a time and takes its own job first. The factory merges that pull request only when the repo config sets `merge = "factory"`. The default is a person. Before the first job in a new pair of work directory and origin, it asks once on its terminal. A yes is stored under the user config directory, in `schmeide/trust`. A different origin asks again. `SCHMEIDE_TRUST=1` lets an unattended runner proceed for that run and records nothing. A non-interactive run with no recorded decision and without that variable refuses the job.
+- `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. With `--pool`, which defaults off, it registers as a pool runner and can take a job whose assignee has no registered runner. It still works one job at a time and takes its own job first. The factory merges that pull request only when the repo config sets `automate.merge = "on"`. The default is a person. Before the first job in a new pair of work directory and origin, it asks once on its terminal. A yes is stored under the user config directory, in `schmeide/trust`. A different origin asks again. `SCHMEIDE_TRUST=1` lets an unattended runner proceed for that run and records nothing. A non-interactive run with no recorded decision and without that variable refuses the job.
 - `schmeide doctor` checks that this machine can run a runner.
 - `schmeide status` shows registered runners and queued or running jobs.
 - `schmeide init` writes a repo config and a control node config in this directory.
@@ -49,7 +49,7 @@ One control node and one runner, on the same machine or not. The target reposito
 
 3. On an open issue in an allowed repository, assign it to that login and add the label `schmeide:ready` (the `--ready-label` default). An `assigned` or `labeled` delivery creates one job and stores the issue title and body from that delivery. The runner checks out a git worktree on a branch named `<issue number>_<short-description>`, runs a fresh harness session from that stored text, runs the repo's gate, then pushes the branch and opens a pull request as the GitHub App. Claude Code runs that session when it is usable.
 
-After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the review. Absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, it adds the pull request to the queue instead, and the job is reported queued. Before a factory merge, the runner reads branch protection on the base branch. If it can read it and the branch requires one or more approving reviews, the job fails, the comment names that requirement, the pull request stays open, and nothing is merged or enqueued, because the runner cannot supply that review. A 404 or a 403 on the read does not fail the job: the merge is attempted and GitHub still enforces its rules. If the read fails for any other reason, the job fails, the comment says schmeide could not read branch protection, and the pull request stays open. A canceled wait is not that case. Required status checks are not this failure. No check runs is not green. The first failed check runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. A request for changes, when a round remains, runs a fresh worker session, the gate, and a push of the same branch. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
+After the gate passes and the pull request is open, the runner runs up to `--max-review-rounds` reviewer sessions (default 3) in that worktree. Each round is a fresh reviewer session. The reviewer writes `.schmeide/review.md` there. The runner reads that file and removes it before any later commit. A pass finishes the review. With `automate.merge` absent or `"off"`, the pull request is left for a person. `"on"` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, it adds the pull request to the queue instead, and the job is reported queued. Before a factory merge, the runner reads branch protection on the base branch. If it can read it and the branch requires one or more approving reviews, the job fails, the comment names that requirement, the pull request stays open, and nothing is merged or enqueued, because the runner cannot supply that review. A 404 or a 403 on the read does not fail the job: the merge is attempted and GitHub still enforces its rules. If the read fails for any other reason, the job fails, the comment says schmeide could not read branch protection, and the pull request stays open. A canceled wait is not that case. Required status checks are not this failure. No check runs is not green. The first failed check runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. A request for changes, when `automate.review_fix = "on"` and a round remains, runs a fresh worker session, the gate, and a push of the same branch. With `review_fix` absent or `"off"`, a request for changes gets no fix round, comments on the issue, and leaves the pull request open for a person. Exhausting the rounds, or a gate failure on a fix, comments on the issue and leaves the pull request open.
 
 A gate failure is commented on the issue without the command's output, and it is not retried. The output stays in the runner's log. A harness session stops after `--session-timeout` (default 2 hours). The gate stops after `--gate-timeout` (default 30 minutes). Either deadline cancels that process group, fails the job, and comments on the issue that the session or the gate timed out, without the command's output. The repo config keys `session_timeout` and `gate_timeout` override the flags. An empty value keeps the flag. A gate timeout is not retried. A session timeout before the pull request is open counts toward `--max-attempts`. A failure before the pull request is open, other than a gate failure, is tried up to `--max-attempts` (default 3). The count is stored with the job status, and a restarted runner restores it. A job whose stage record names an open pull request resumes at review and does not open a second pull request. A job with no pull request starts over. `--ack-wait` (default 5 minutes) is the heartbeat lease, and `--stuck-after` (default 3 hours) drops work that reports no state change; see [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) for the detail.
 
@@ -59,16 +59,11 @@ A harness session's environment is `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `
 
 ## Repo config
 
-A target repo carries its config at `.schmeide/config.toml`. Unknown keys are an error. `gate` is required. `merge` is optional.
+A target repo carries its config at `.schmeide/config.toml`. Unknown keys are an error. `gate` is required. The `[automate]` switches are optional and default to off.
 
 ```toml
 # Required. Command a job must pass before a PR is opened.
 gate = "make check test"
-
-# Optional. Who merges after review has passed and CI is green.
-# Absent, empty, and "human" leave the pull request for a person.
-# "factory" means the factory merges.
-merge = "human"
 
 # Optional. How long the gate command may run. A Go duration.
 # Absent or empty keeps the runner's --gate-timeout (default 30m).
@@ -77,6 +72,16 @@ gate_timeout = "30m"
 # Optional. How long one harness session may run. A Go duration.
 # Absent or empty keeps the runner's --session-timeout (default 2h).
 session_timeout = "2h"
+
+# Optional. What the factory does without a person. Each switch is "on" or
+# "off". Absent, empty, and blank mean "off".
+[automate]
+# "on" merges after review has passed and CI is green.
+merge = "off"
+# "on" gives the writer fix rounds for review findings.
+review_fix = "off"
+# Accepted ahead of the feature. Nothing reads it yet.
+create_issues = "off"
 ```
 
 The full key list is in [docs/config.md](docs/config.md). See `internal/repoconfig` for the loader. The runner reads this file before the harness session starts, so the session cannot change the gate or turn factory merge on.

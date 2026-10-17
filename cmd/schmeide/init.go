@@ -19,7 +19,8 @@ control node config) in the current directory. Refuses to overwrite either.
 `
 
 const initRepoConfig = `# schmeide repo config. See docs/config.md for every key.
-# merge, check_wait, gate_timeout, and session_timeout are unset: defaults apply.
+# check_wait, gate_timeout, session_timeout, and [automate] are unset: defaults
+# apply, and every [automate] switch is off.
 
 # Shell command a job must pass before a PR is opened.
 gate = "make check test"

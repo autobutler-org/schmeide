@@ -98,7 +98,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFla
 	fs.IntVar(&o.MaxAttempts, "max-attempts", defaultMaxAttempts, "How many times a job's work may fail before that failure is final and reported on the issue. Handing the job back because a token could not be minted, or because the runner is shutting down, does not count. A gate failure is never retried.")
 	fs.DurationVar(&o.AckWait, "ack-wait", defaultAckWait, "How long JetStream waits without an InProgress heartbeat before redelivering a job. The runner sends a heartbeat every third of this duration. A Go duration, for example 5m.")
 	fs.DurationVar(&o.StuckAfter, "stuck-after", defaultStuckAfter, "How long a job may go without a state change before the runner cancels its work and Naks it for another runner. A Go duration, for example 3h.")
-	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets merge = \"factory\". The default is a person.")
+	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes, the repo config sets automate.review_fix = \"on\", and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. With review_fix off, the first request for changes leaves the pull request open for a person. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets automate.merge = \"on\". The default is a person.")
 	fs.DurationVar(&o.SessionTimeout, "session-timeout", repoconfig.DefaultSessionTimeout, "How long one harness session may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config session_timeout overrides this when it is set. An empty config value keeps this flag. The default is 2h.")
 	fs.DurationVar(&o.GateTimeout, "gate-timeout", repoconfig.DefaultGateTimeout, "How long the gate command may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config gate_timeout overrides this when it is set. An empty config value keeps this flag. A gate timeout is not retried. The default is 30m.")
 	passEnv = fs.String("pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
@@ -146,13 +146,16 @@ with a brief built from the issue as it stood when it became a job, runs the
 gate command from the repo's .schmeide/config.toml, and then pushes the branch
 and opens a PR as the schmeide GitHub App. Once that gate has passed and the
 PR is open, a fresh reviewer session checks the change in the same worktree.
-If the reviewer requests changes and --max-review-rounds (default 3) has
-rounds left, a fresh worker session applies the findings, the gate runs
-again, and the same branch is pushed so the open PR updates. A passing review
+If the reviewer requests changes, the repo config sets
+automate.review_fix = "on", and --max-review-rounds (default 3) has rounds
+left, a fresh worker session applies the findings, the gate runs again, and
+the same branch is pushed so the open PR updates. With review_fix off, the
+first request for changes leaves the PR open for a person. A passing review
 finishes the job. The factory merges the pull request only when the repo
-config sets merge = "factory". The default is a person. Factory merge waits
-for every check run on the head commit to succeed for check_wait (default 2m),
-set next to merge, e.g. check_wait = "10m", reading them with backoff. A
+config sets automate.merge = "on". The default is a person. Factory merge
+waits for every check run on the head commit to succeed for check_wait
+(default 2m), a top-level key, e.g. check_wait = "10m", reading them with
+backoff. A
 stacked pull request merges only after the one below it. Exhausting the
 rounds fails the job, comments on the issue, and leaves the pull request
 open. The outcome is reported to the control node and commented on the issue.

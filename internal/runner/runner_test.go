@@ -1165,9 +1165,15 @@ func assertSettled(t *testing.T, w *world) {
 
 const testGateConfig = "gate = \"test ! -e broken\"\n"
 
+// testMergeConfig turns factory merge on and leaves review fixes off.
+const testMergeConfig = testGateConfig + "[automate]\nmerge = \"on\"\n"
+
+// testReviewFixConfig turns review fix rounds on and leaves merge off.
+const testReviewFixConfig = testGateConfig + "[automate]\nreview_fix = \"on\"\n"
+
 func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig)
 	w.gh.SetChecks([]fakegh.CheckRun{
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "success"},
@@ -1205,7 +1211,7 @@ func TestFactoryMergeWhenChecksSucceed(t *testing.T) {
 
 func TestFactoryMergeWhenACheckFails(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig)
 	w.gh.SetChecks([]fakegh.CheckRun{
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "failure"},
@@ -1233,7 +1239,7 @@ func TestFactoryMergeWhenACheckFails(t *testing.T) {
 
 func TestFactoryMergeRefusedByRequiredReviews(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.pushConfig(t, testMergeConfig)
 	w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
 	w.gh.Protect("main", 1)
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
@@ -1266,7 +1272,7 @@ func TestFactoryMergeRefusedByGitHub(t *testing.T) {
 	} {
 		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
 			w := newWorld(t)
-			w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+			w.pushConfig(t, testMergeConfig)
 			w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
 			w.gh.FailMerge(tt.status)
 			h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
@@ -1295,7 +1301,7 @@ func TestFactoryMergeRefusedByGitHub(t *testing.T) {
 // test's timeout.
 func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	w := newWorld(t)
-	w.pushConfig(t, testGateConfig+"merge = \"factory\"\ncheck_wait = \"20ms\"\n")
+	w.pushConfig(t, testGateConfig+"check_wait = \"20ms\"\n[automate]\nmerge = \"on\"\n")
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
@@ -1314,10 +1320,10 @@ func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	}
 }
 
-func TestMergeNopeIsAConfigError(t *testing.T) {
+func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	w := newWorld(t)
 	w.maxAttempts = 1
-	w.pushConfig(t, testGateConfig+"merge = \"nope\"\n")
+	w.pushConfig(t, testGateConfig+"[automate]\nmerge = \"nope\"\n")
 	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
@@ -1334,8 +1340,8 @@ func TestMergeNopeIsAConfigError(t *testing.T) {
 		t.Errorf("pull requests = %+v, want none", pulls)
 	}
 	assertNoMerge(t, w)
-	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], "factory") || !strings.Contains(comments["7"][0], "human") || !strings.Contains(comments["7"][0], "did not open a pull request") {
-		t.Errorf("issue comments = %q, want a config error that names factory and human", comments["7"])
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], `automate.merge = "on"`) || !strings.Contains(comments["7"][0], `automate.merge = "off"`) || !strings.Contains(comments["7"][0], "did not open a pull request") {
+		t.Errorf("issue comments = %q, want a config error that names on and off", comments["7"])
 	}
 }
 
@@ -1369,13 +1375,13 @@ func TestJudgeChecks(t *testing.T) {
 
 func TestRunnerHelpDocumentsReviewRounds(t *testing.T) {
 	got := Usage()
-	if !strings.Contains(got, "--max-review-rounds") || !strings.Contains(got, `default "3"`) || !strings.Contains(got, "leaves the pull request open") {
+	if !strings.Contains(got, "--max-review-rounds") || !strings.Contains(got, `default "3"`) || !strings.Contains(got, "leaves the pull request open") || !strings.Contains(got, `automate.review_fix = "on"`) {
 		t.Fatalf("help does not document the review round limit:\n%s", got)
 	}
 	if strings.Contains(got, "never merges") || strings.Contains(got, "does not merge") {
 		t.Fatalf("help still says the job does not merge:\n%s", got)
 	}
-	if !strings.Contains(got, `merge = "factory"`) || !strings.Contains(got, "The default is a person.") {
+	if !strings.Contains(got, `automate.merge = "on"`) || !strings.Contains(got, "The default is a person.") {
 		t.Fatalf("help does not document factory merge:\n%s", got)
 	}
 	if !strings.Contains(got, `check_wait = "10m"`) || !strings.Contains(got, "default 2m") {
@@ -1465,6 +1471,7 @@ func TestReviewPassesOnFirstRound(t *testing.T) {
 
 func TestReviewChangesThenPassUpdatesSameBranch(t *testing.T) {
 	w := newWorld(t)
+	w.pushConfig(t, testReviewFixConfig)
 	const findings = "set fix.txt to reviewed"
 	var workers, reviews atomic.Int32
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
@@ -1514,6 +1521,7 @@ func TestReviewChangesThenPassUpdatesSameBranch(t *testing.T) {
 
 func TestReviewExhaustingRoundsFailsAndDoesNotMerge(t *testing.T) {
 	w := newWorld(t)
+	w.pushConfig(t, testReviewFixConfig)
 	var workers, reviews atomic.Int32
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
 		if strings.Contains(req.Prompt, reviewLead) {
@@ -1549,6 +1557,7 @@ func TestReviewExhaustingRoundsFailsAndDoesNotMerge(t *testing.T) {
 
 func TestReviewFixGateFailureStopsTheReview(t *testing.T) {
 	w := newWorld(t)
+	w.pushConfig(t, testReviewFixConfig)
 	var workers, reviews atomic.Int32
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
 		if strings.Contains(req.Prompt, reviewLead) {
@@ -1591,6 +1600,71 @@ func TestReviewFixGateFailureStopsTheReview(t *testing.T) {
 	}
 	if files := git(t, w.bare, "ls-tree", "-r", "--name-only", "7_fix-the-thing"); strings.Contains(files, "broken") {
 		t.Errorf("the failing fix was pushed: %s", files)
+	}
+	assertNoMerge(t, w)
+}
+
+// rejectingHarness writes fix.txt in every worker session and requests
+// changes in every review.
+func rejectingHarness() (*harness.Fake, *atomic.Int32, *atomic.Int32) {
+	var workers, reviews atomic.Int32
+	return &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
+		if strings.Contains(req.Prompt, reviewLead) {
+			reviews.Add(1)
+			return writeVerdict(req, "changes\nstill wrong\n")
+		}
+		n := workers.Add(1)
+		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte(fmt.Sprintf("attempt %d\n", n)), 0o600)
+	}}, &workers, &reviews
+}
+
+// TestReviewFixOffLeavesARejectedPullRequestOpen has no [automate] table, so
+// a review that requests changes gets no fix round.
+func TestReviewFixOffLeavesARejectedPullRequestOpen(t *testing.T) {
+	w := newWorld(t)
+	h, workers, reviews := rejectingHarness()
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing review_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if workers.Load() != 1 || reviews.Load() != 1 {
+		t.Errorf("workers = %d, reviews = %d, want one worker, one review, and no fix round", workers.Load(), reviews.Load())
+	}
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 1 || pulls[0].State != "open" {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "requested changes") || !strings.Contains(comments["7"][0], "automate.review_fix") || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want one that the review requested changes and review_fix is off", comments["7"])
+	}
+	if got := git(t, w.bare, "rev-list", "--count", "main..7_fix-the-thing"); got != "1" {
+		t.Errorf("commits on the job branch = %s, want only the first", got)
+	}
+	assertNoMerge(t, w)
+}
+
+// TestReviewFixOffWithMergeOnDoesNotMergeARejection is factory merge without
+// review fixes: merge still waits for a passing review.
+func TestReviewFixOffWithMergeOnDoesNotMergeARejection(t *testing.T) {
+	w := newWorld(t)
+	w.pushConfig(t, testMergeConfig)
+	w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
+	h, workers, reviews := rejectingHarness()
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing review_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	if workers.Load() != 1 || reviews.Load() != 1 {
+		t.Errorf("workers = %d, reviews = %d, want no fix round", workers.Load(), reviews.Load())
+	}
+	if pulls, _ := w.gh.Snapshot(); len(pulls) != 1 || pulls[0].State != "open" {
+		t.Errorf("pull requests = %+v, want the pull request left open", pulls)
 	}
 	assertNoMerge(t, w)
 }
@@ -2141,6 +2215,7 @@ func TestRedeliveryAfterOutcomeCommentPostsNothing(t *testing.T) {
 // had two rejected rounds, so only the last round is left.
 func TestRedeliveryKeepsSpentReviewRounds(t *testing.T) {
 	w := newWorld(t)
+	w.pushConfig(t, testReviewFixConfig)
 	w.seedJobPR(t, defaultMaxReviewRounds-1)
 	var workers, reviews atomic.Int32
 	h := &harness.Fake{RunFunc: func(_ context.Context, req harness.Request) error {
