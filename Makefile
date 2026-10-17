@@ -20,6 +20,9 @@ GO := $(shell which go)
 
 MAIN ?= ./cmd/schmeide
 EXE ?= ./build/schmeide
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GH ?= gh
+LDFLAGS := -X github.com/autobutler-org/schmeide/internal/release.Version=$(VERSION)
 
 ##@ Development Environment
 
@@ -41,7 +44,7 @@ build: build/go ## Build codebase
 .PHONY: build/go
 build/go: ## Build Go codebase
 	mkdir -p ./build
-	$(GO) build -o $(EXE) $(MAIN)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(EXE) $(MAIN)
 
 .PHONY: clean
 clean: ## Clean build space
@@ -73,6 +76,22 @@ watch: ## Watch for changes and rebuild
 		--build.cmd "$(MAKE) build" \
 		--build.entrypoint "$(EXE)" \
 		--build.exclude_dir ".github,build,docs"
+
+##@ Release
+
+.PHONY: changelog
+changelog: ## Write CHANGELOG.md from merged pull requests (needs gh logged in)
+	if ! command -v $(GH) >/dev/null || ! $(GH) auth status >/dev/null 2>&1; then
+		echo "make changelog needs the GitHub CLI: install gh (https://cli.github.com), then run \`gh auth login\`"
+		exit 1
+	fi
+	{
+		echo "# Changelog"
+		echo
+		$(GH) pr list --state merged --limit 1000 --json number,title,mergedAt \
+			--jq 'sort_by(.mergedAt) | reverse | .[] | "- \(.title) (#\(.number), \(.mergedAt[:10]))"'
+	} > CHANGELOG.md
+	echo "Wrote CHANGELOG.md"
 
 ##@ Dependencies
 

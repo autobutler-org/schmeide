@@ -11,7 +11,7 @@ const bashCompletion = `# bash completion for schmeide
 _schmeide() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "control runner doctor status init completion -h --help" -- "$cur"))
+    COMPREPLY=($(compgen -W "control runner doctor status init completion version -h --help" -- "$cur"))
   elif [ "${COMP_WORDS[1]}" = completion ]; then
     COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
   else
@@ -30,6 +30,7 @@ _schmeide() {
     'doctor:check that this machine is ready to run a runner'
     'status:show registered runners and jobs'
     'completion:print a shell completion script'
+    'version:print the version'
   )
   if (( CURRENT == 2 )); then
     _describe 'command' cmds
@@ -49,6 +50,7 @@ complete -c schmeide -n __fish_use_subcommand -a runner -d 'Run a runner'
 complete -c schmeide -n __fish_use_subcommand -a doctor -d 'Check that this machine is ready'
 complete -c schmeide -n __fish_use_subcommand -a status -d 'Show runners and jobs'
 complete -c schmeide -n __fish_use_subcommand -a completion -d 'Print a shell completion script'
+complete -c schmeide -n __fish_use_subcommand -a version -d 'Print the version'
 complete -c schmeide -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 complete -c schmeide -s h -l help -d 'Show help'
 `

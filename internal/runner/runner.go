@@ -33,6 +33,7 @@ import (
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/lintgate"
+	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
 	"github.com/autobutler-org/schmeide/internal/trust"
 	"github.com/nats-io/nats.go"
@@ -92,6 +93,8 @@ type Options struct {
 	NATSToken string
 	// Steward is the GitHub login whose jobs this runner takes.
 	Steward string
+	// Version is sent in the registration. Empty means release.Version.
+	Version string
 	// Pool lets this runner take a job whose steward has no registered
 	// runner. The default is false. The runner still works one job at a
 	// time and takes its own steward's job first.
@@ -193,6 +196,9 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	if o.Steward == "" || o.Steward == control.PoolName || strings.ContainsAny(o.Steward, ".*>/\\ \t\r\n") {
 		return nil, fmt.Errorf("steward %q is not a GitHub login; pass your login with --steward", o.Steward)
 	}
+	if o.Version == "" {
+		o.Version = release.Version
+	}
 	if o.AckWait == 0 {
 		o.AckWait = defaultAckWait
 	}
@@ -277,7 +283,7 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	}
 	host, _ := os.Hostname()
 	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{
-		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool,
+		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool, Version: r.opts.Version,
 	})
 	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

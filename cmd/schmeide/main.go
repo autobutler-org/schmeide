@@ -24,6 +24,7 @@ Commands:
   status      Show registered runners and queued or running jobs.
   init        Write a repo config and a control node config in this directory.
   completion  Print a shell completion script for bash, zsh, or fish.
+  version     Print the version stamped into this binary.
 
 Run 'schmeide <command> --help' for a command's flags.
 See docs/GLOSSARY.md for what the terms mean.
@@ -47,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return initMain(args[1:], stdout, stderr)
 	case "completion":
 		return completionMain(args[1:], stdout, stderr)
+	case "version":
+		return versionMain(args[1:], stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "schmeide: unknown argument %q\nRun 'schmeide --help' for usage.\n", args[0])
 	return 2
