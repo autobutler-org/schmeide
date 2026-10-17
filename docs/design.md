@@ -103,7 +103,7 @@ flowchart LR
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
 | 8 | An AI reviewer checks the PR. The worker fixes what the reviewer finds until the review passes or the round limit is reached. | Done |
-| 9 | After review passes, absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit only when every check run on the head has succeeded within two minutes. No check runs is not green. A failed check or a wait that ends without success comments on the issue, leaves the pull request open, and is not retried. | Done |
+| 9 | After review passes, absent, empty, and `human` leave the pull request for a person. `factory` merges with a merge commit only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported merged once it is queued. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. | Done |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
@@ -174,10 +174,19 @@ open.
 Each repo chooses in `.schmeide/config.toml` who merges a pull request after
 review has passed. The `merge` key is optional. Absent, empty, and `human`
 leave the pull request for a person. `factory` merges with a merge commit
-after review only when every check run on the head has succeeded within two
-minutes. No check runs is not green. A failed check or a wait that ends
-without success comments on the issue, leaves the pull request open, and is
-not retried. The runner reads `merge` with the gate, before the harness
+after review only when every check run on the head has succeeded within
+`check_wait`, an optional Go duration in the same config file (default two
+minutes). No check runs is not green. When the base branch has a merge queue,
+green checks add the pull request to the queue instead of merging it, and the
+job is reported merged once it is queued.
+
+The first failed check during the wait runs one writer fix round, when a
+review round remains. The round counts against `--max-review-rounds`. The
+runner gives the session the end of that check's log, runs the gate, pushes the
+same branch, and keeps polling on the new head inside the same wait. There is
+no second fix round. If the check is still red, or the wait ends without
+success, the runner comments on the issue and leaves the pull request open.
+That failure is final and is not retried. The runner reads `merge` with the gate, before the harness
 session, so the session cannot turn factory merge on for itself
 (`internal/repoconfig`, `internal/runner/merge.go`).
 
@@ -343,7 +352,8 @@ Follow-ups that landed with the slice:
   to `--max-attempts` (default 3). The runner counts those work failures
   itself, and a token hand-back or a shutdown does not consume an attempt. The
   count is kept in memory, and a restarted runner starts the attempt count
-  over. The wait before the next try is 30 seconds and has no flag. A gate
+  over. A job whose stage record names an open pull request resumes at review
+  and does not open a second one. A job with no pull request starts over. The wait before the next try is 30 seconds and has no flag. A gate
   failure is final. A pull request on a branch named `<issue number>_*`
   suppresses a second PR.
 - **#16.** Webhooks are limited to an allowlist of orgs or App installations.

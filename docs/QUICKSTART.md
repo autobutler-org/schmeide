@@ -9,7 +9,7 @@ The schmeide GitHub App is already installed on autobutler-org. This guide is fo
 - A GitHub org you can add an App to, and a repository in it.
 - A public HTTPS URL that reaches this machine. The webhook listener is plain HTTP, so put a TLS-terminating proxy in front of it.
 - `git` on `PATH`, and one harness (Claude Code or the Grok CLI) installed and logged in. schmeide does not handle agent API keys.
-- A built `schmeide` binary (`make build` gives `./build/schmeide`).
+- A built `schmeide` binary (`make build` gives `./build/schmeide`). To install the binary instead, see the Install section of the [README](../README.md) (`make install`, or `go install` of a tag).
 
 ## 1. Create the GitHub App
 
