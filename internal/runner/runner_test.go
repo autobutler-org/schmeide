@@ -1325,9 +1325,10 @@ func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	}
 }
 
+// TestAutomateMergeNopeIsAConfigError keeps the default --max-attempts: a
+// config error is final on the first attempt.
 func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	w := newWorld(t)
-	w.maxAttempts = 1
 	w.pushConfig(t, testGateConfig+"[automate]\nmerge = \"nope\"\n")
 	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -1347,6 +1348,33 @@ func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	assertNoMerge(t, w)
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], `automate.merge = "on"`) || !strings.Contains(comments["7"][0], `automate.merge = "off"`) || !strings.Contains(comments["7"][0], "did not open a pull request") {
 		t.Errorf("issue comments = %q, want a config error that names on and off", comments["7"])
+	}
+}
+
+func TestMissingConfigIsFinal(t *testing.T) {
+	w := newWorld(t)
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "rm", "-q", ".schmeide/config.toml")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "drop config")
+	git(t, src, "push", "-q", "origin", "HEAD:main")
+	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Errorf("states = %s, want %s: a missing config is not retried", got, want)
+	}
+	assertSettled(t, w)
+	if sessions.Load() != 0 {
+		t.Errorf("sessions = %d, want none for a missing config", sessions.Load())
+	}
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], ".schmeide/config.toml: config file not found") || !strings.Contains(comments["7"][0], "did not open a pull request") {
+		t.Errorf("issue comments = %q, want one that says the config file is missing", comments["7"])
 	}
 }
 
@@ -2081,15 +2109,8 @@ func TestTwoSideBySideDependenciesOpenNothing(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	states := w.await(t, "alice", 7)
-	if states[len(states)-1] != StateFailed {
-		t.Fatalf("states = %v, want the job failed", states)
-	}
-	for _, state := range states {
-		if state == StateWorking || state == StatePROpened {
-			t.Errorf("job went ahead: %v", states)
-			break
-		}
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Fatalf("states = %s, want %s: side-by-side dependencies are not retried", got, want)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
 	if got := sessions.Load(); got != 0 {

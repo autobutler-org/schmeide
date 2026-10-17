@@ -584,8 +584,9 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
 	// pass is final too: its rounds are spent. A factory merge that does not
-	// land is final as well.
-	if out.state == StateFailed {
+	// land is final as well. So is a failure marked final, such as a missing
+	// or invalid repo config, which a retry cannot change.
+	if out.state == StateFailed && !out.final {
 		r.attempts++
 		r.failures[job.Subject()] = r.attempts
 		n := r.attempts
@@ -690,6 +691,8 @@ type outcome struct {
 	detail string
 	// comment is posted on the issue. Empty posts nothing.
 	comment string
+	// final keeps a StateFailed outcome from being retried.
+	final bool
 }
 
 func failed(err error) outcome {
@@ -698,6 +701,13 @@ func failed(err error) outcome {
 		detail:  err.Error(),
 		comment: "schmeide could not finish this job and did not open a pull request:\n\n" + err.Error(),
 	}
+}
+
+// finalFailed is a failure that a retry cannot change, so it is not retried.
+func finalFailed(err error) outcome {
+	out := failed(err)
+	out.final = true
+	return out
 }
 
 // work takes the job as far as it goes on this attempt.
@@ -752,6 +762,9 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 	} else if base, err = baseBranch(ctx, gh, job.Issue); err != nil {
 		// Asked before the worktree exists, so a stacked job starts on the
 		// dependency's branch and the pull request opens against it.
+		if errors.Is(err, errNotOneStack) {
+			return finalFailed(err)
+		}
 		return failed(err)
 	}
 
@@ -787,7 +800,9 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh forge.Forge, job 
 	// The gate is read before the session runs, so the session cannot weaken it.
 	cfg, err := repoconfig.Load(ws.Dir())
 	if err != nil {
-		return failed(err)
+		// The config is read from the base branch, which a retry does not
+		// change.
+		return finalFailed(err)
 	}
 	// The gate string is the one just read. Detection runs here, before the
 	// session, and not during git commit or git push.

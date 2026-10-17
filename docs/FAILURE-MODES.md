@@ -39,6 +39,14 @@ When the control node creates a job it stores a `pending` status for it, so
   the job back at once for another runner.
 - A gate failure is final. It is the session's own result, so it is not
   retried.
+- A missing or invalid `.schmeide/config.toml` is final. The runner reads it
+  from the base branch before any session, and a retry reads the same file.
+  The comment names the error from `internal/repoconfig`. Push a fixed config
+  and add the ready label again to make a new job.
+- Open blockers side by side, whose pull requests are not one linear stack,
+  are final. The blocked-by list does not change between attempts. The
+  comment says "are not one linear stack, and schmeide stacks only on a single
+  chain of blockers".
 - A review that is not passed after the allowed rounds is final. A fix whose
   gate fails is a gate failure and is final too.
 - A factory merge that does not land is final. The pull request already

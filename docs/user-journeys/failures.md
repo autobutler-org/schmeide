@@ -42,11 +42,11 @@ fails once (for example an API outage), then works.
 **Notes:**
 
 - Failures that count as an attempt: a session that fails, times out, or makes
-  no changes; a config error (JN-CFG-002); a trust refusal (JN-SETUP-022); a
-  secret scan refusal (JN-FAIL-007); a git or GitHub error before the pull
-  request is open; a non-linear stack of blockers (JN-PR-019).
-- Not retried, final at once: a gate failure or gate timeout, any review
-  failure, any factory merge failure.
+  no changes; a trust refusal (JN-SETUP-022); a secret scan refusal
+  (JN-FAIL-007); a git or GitHub error before the pull request is open.
+- Not retried, final at once: a missing or invalid repo config (JN-CFG-002),
+  open blockers side by side (JN-PR-019), a gate failure or gate timeout, any
+  review failure, any factory merge failure.
 - Not counted at all: a token hand-back (JN-FAIL-015), a shutdown hand-back
   (JN-FAIL-016), a stuck-job hand-back (JN-FAIL-014).
 - The 30-second wait has no flag.
