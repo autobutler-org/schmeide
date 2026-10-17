@@ -348,10 +348,10 @@ There are two requirements wherever it runs:
   /webhook` on `--http-addr`. The listener is HTTP.
 - Runners must be able to reach the control node's NATS address.
 
-For quark, the control node will be hosted through the `iac` repo. That is a
-suggested deployment pattern and belongs in deployment docs, not in the design
-of the tool. A control node without a public address needs a tunnel for
-webhooks.
+How to run a control node, with one reference pattern, is in
+[DEPLOYMENT.md](DEPLOYMENT.md). Any host-specific setup belongs there or in the
+operator's own infrastructure, not in the design of the tool. A control node
+without a public address needs a tunnel for webhooks.
 
 `schmeide version` prints the version the Makefile baked in; an unstamped build
 prints `dev`. When a runner registers, the control node compares versions. If
