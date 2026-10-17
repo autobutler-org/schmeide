@@ -17,14 +17,18 @@ import (
 // stubWorkspace is a Workspace over a plain directory whose gate passes.
 type stubWorkspace struct{ dir string }
 
-func (s stubWorkspace) Dir() string                                { return s.dir }
-func (stubWorkspace) Commit(context.Context, string) (bool, error) { return true, nil }
-func (stubWorkspace) Run(context.Context, string) (string, error)  { return "", nil }
-func (stubWorkspace) Push(context.Context) error                   { return nil }
-func (stubWorkspace) Head(context.Context) (string, error)         { return "", nil }
-func (stubWorkspace) Resume(context.Context) error                 { return nil }
-func (stubWorkspace) Count(context.Context, string) (int, error)   { return 0, nil }
-func (stubWorkspace) Close() error                                 { return nil }
+func (s stubWorkspace) Dir() string                                 { return s.dir }
+func (stubWorkspace) Commit(context.Context, string) (bool, error)  { return true, nil }
+func (stubWorkspace) Run(context.Context, string) (string, error)   { return "", nil }
+func (stubWorkspace) Push(context.Context) error                    { return nil }
+func (stubWorkspace) Head(context.Context) (string, error)          { return "", nil }
+func (stubWorkspace) Resume(context.Context) error                  { return nil }
+func (stubWorkspace) Count(context.Context, string) (int, error)    { return 0, nil }
+func (stubWorkspace) Close() error                                  { return nil }
+func (stubWorkspace) Restack(context.Context, string) (bool, error) { return false, nil }
+func (stubWorkspace) BaseMerged(context.Context, string) (bool, error) {
+	return true, nil
+}
 
 // verdictFake writes a "changes" verdict on a review brief and does nothing
 // on any other brief.

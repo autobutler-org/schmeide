@@ -38,6 +38,16 @@ type Workspace interface {
 	Resume(ctx context.Context) error
 	// Count is how many commits after the base have subject as their subject.
 	Count(ctx context.Context, subject string) (int, error)
+	// Restack rebases the branch onto the remote branch onto, which becomes
+	// its base, and force-pushes it when it moved. Commits whose change is
+	// already on onto are dropped, so a branch below that was itself
+	// rebased does not leave its old commits behind. A conflict leaves the
+	// branch as it was.
+	Restack(ctx context.Context, onto string) (moved bool, err error)
+	// BaseMerged reports whether the base the branch was last built on is
+	// in the remote branch trunk, which tells a stacked branch that the
+	// pull request below it merged.
+	BaseMerged(ctx context.Context, trunk string) (bool, error)
 	// Close removes the workspace.
 	Close() error
 }
@@ -277,6 +287,51 @@ func (w *worktree) Count(ctx context.Context, subject string) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// Restack implements [Workspace]. The push replaces the remote branch only
+// when it is still at the head this checkout started from, so a push from
+// elsewhere is not lost.
+func (w *worktree) Restack(ctx context.Context, onto string) (bool, error) {
+	ref := "refs/remotes/origin/" + onto
+	if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+refs/heads/"+onto+":"+ref); err != nil {
+		return false, err
+	}
+	w.baseRef, w.spec.base = ref, onto
+	before, err := w.Head(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err := w.git(ctx, w.dir, "-c", "commit.gpgsign=false", "rebase", "-q", ref); err != nil {
+		_, _ = w.git(ctx, w.dir, "rebase", "--abort")
+		return false, fmt.Errorf("could not rebase %s onto %s, so schmeide left it as it was; a person has to rebase it: %w", w.spec.branch, onto, err)
+	}
+	after, err := w.Head(ctx)
+	if err != nil || after == before {
+		return false, err
+	}
+	found, err := secretscan.Scan(ctx, w.dir)
+	if err != nil {
+		return false, fmt.Errorf("scan tracked files for secrets: %w", err)
+	}
+	if len(found) > 0 {
+		return false, secretLiteralsError(found)
+	}
+	branch := "refs/heads/" + w.spec.branch
+	if _, err := w.git(ctx, w.dir, "push", "-q", "--force-with-lease="+branch+":"+before, w.spec.url, "HEAD:"+branch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BaseMerged implements [Workspace].
+func (w *worktree) BaseMerged(ctx context.Context, trunk string) (bool, error) {
+	ref := "refs/remotes/origin/" + trunk
+	if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+refs/heads/"+trunk+":"+ref); err != nil {
+		return false, err
+	}
+	_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", w.baseRef, ref)
+	return err == nil, nil
 }
 
 // Close implements [Workspace].
