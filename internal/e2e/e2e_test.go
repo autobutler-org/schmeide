@@ -253,7 +253,9 @@ func (w *world) startRunner(writer, reviewer string) *proc {
 		"--nats-token", runnerToken,
 		"--work-dir", filepath.Join(w.dir, "work"),
 		"--github-api-url", w.gh.URL,
-		"--github-url", "file://"+filepath.Join(w.dir, "origin"))
+		"--github-url", "file://"+filepath.Join(w.dir, "origin"),
+		// A killed runner's job is redelivered after this, not the 5m default.
+		"--ack-wait", "3s")
 	w.runners = append(w.runners, p)
 	w.waitLog(w.control, "runner registered", len(w.runners))
 	return p
@@ -418,7 +420,7 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	<-first.done
 
-	// The job is redelivered once its ack wait (30s) runs out with no heartbeat.
+	// The job is redelivered once its ack wait (3s) runs out with no heartbeat.
 	second := w.startRunner(writer, passReview)
 	w.waitComment(3, "The review passed.", 2*time.Minute)
 	if !strings.Contains(second.log.String(), "state=claimed") {
