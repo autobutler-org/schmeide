@@ -1,6 +1,7 @@
 package secretscan
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,4 +172,74 @@ func TestScanRequiresAGitWorktree(t *testing.T) {
 	if _, err := Scan(t.Context(), t.TempDir()); err == nil {
 		t.Fatal("Scan succeeded on a directory that is not a git worktree")
 	}
+}
+
+// TestTrackedFilesHaveNoCredentialLiterals fails when a tracked file in this
+// module contains a credential-shaped literal. The same check reports a JWT
+// written at runtime into a temp copy of a tracked file, and it skips a line
+// that contains schmeide:allow-secret.
+func TestTrackedFilesHaveNoCredentialLiterals(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	root := moduleRoot(t)
+	found, err := Scan(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("tracked files contain credential-shaped literals: %+v", found)
+	}
+
+	body, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(body, []byte("\n")) {
+		body = append(body, '\n')
+	}
+	jwt := "ey" + "JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+	secretLine := bytes.Count(body, []byte("\n")) + 2
+	body = append(body, []byte(jwt+" // schmeide:allow-secret\n"+jwt+"\n")...)
+
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "dev@example.com")
+	git("config", "user.name", "Dev")
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "go.mod")
+	git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "copy a tracked file")
+
+	found, err = Scan(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Finding{File: "go.mod", Line: secretLine, Kind: KindJWT}
+	if len(found) != 1 || found[0] != want {
+		t.Fatalf("temp copy findings = %+v, want %+v", found, want)
+	}
+	if strings.Contains(found[0].Kind, jwt) || strings.Contains(found[0].File, jwt) {
+		t.Fatal("finding includes the secret text")
+	}
+}
+
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("module root: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
