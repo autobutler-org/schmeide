@@ -31,7 +31,9 @@ var controlSettings = []setting{
 	{name: "http-addr", def: ":8080", usage: "Address the plain HTTP webhook endpoint listens on. The listener is HTTP and must sit behind a TLS-terminating proxy. GitHub must be able to reach /webhook there."},
 	{name: "webhook-rate", def: "1000", usage: "Maximum webhook requests accepted per minute. Further requests are rejected and publish no job. The default leaves room for GitHub's retries and redeliveries."},
 	{name: "delivery-ttl", def: "10m", usage: "How long an X-Github-Delivery id is remembered. A repeat within this time is acknowledged with success and is not published again."},
-	{name: "nats-addr", def: "127.0.0.1:4222", usage: "Address the embedded NATS server listens on. Runners connect here."},
+	{name: "nats-addr", def: "127.0.0.1:4222", usage: "Address the embedded NATS server listens on. Runners connect here. Set --nats-tls-cert-file and --nats-tls-key-file when it listens beyond loopback."},
+	{name: "nats-tls-cert-file", usage: "Path of the PEM certificate (with its chain) the NATS listener serves. Set it with --nats-tls-key-file, and runners must connect with a tls:// URL. The file is read again on each connection, so a renewed certificate is served without a restart."},
+	{name: "nats-tls-key-file", usage: "Path of the PEM private key for --nats-tls-cert-file."},
 	{name: "runner-tokens", required: true, usage: "Comma-separated '<steward login>:<token>' entries, one per steward. A runner connects to NATS as its steward with that steward's token, and can only reach that steward's jobs and job tokens. Prefer the environment variable or config file, so the tokens stay out of the process list."},
 	{name: "data-dir", def: "schmeide-data", usage: "Directory where the job queue is stored."},
 	{name: "webhook-secret", required: true, usage: "Webhook secret of the schmeide GitHub App. Prefer the environment variable or config file, so the secret stays out of the process list."},
@@ -159,6 +161,9 @@ func parseControl(args []string) (Config, error) {
 	if _, err := parseDeliveryTTL(values["delivery-ttl"]); err != nil {
 		return Config{}, err
 	}
+	if (values["nats-tls-cert-file"] == "") != (values["nats-tls-key-file"] == "") {
+		return Config{}, errors.New("NATS TLS needs both a certificate and a key; set both --nats-tls-cert-file and --nats-tls-key-file (SCHMEIDE_NATS_TLS_CERT_FILE and SCHMEIDE_NATS_TLS_KEY_FILE), or neither")
+	}
 	return Config{
 		HTTPAddr:                values["http-addr"],
 		NATSAddr:                values["nats-addr"],
@@ -173,6 +178,8 @@ func parseControl(args []string) (Config, error) {
 		GitHubAPIURL:            values["github-api-url"],
 		WebhookRate:             values["webhook-rate"],
 		DeliveryTTL:             values["delivery-ttl"],
+		NATSTLSCertFile:         values["nats-tls-cert-file"],
+		NATSTLSKeyFile:          values["nats-tls-key-file"],
 	}, nil
 }
 
@@ -220,6 +227,11 @@ const InitConfig = `# schmeide control node config. This is an operator config, 
 # replace every "replace-me" with a real secret and do not commit the result.
 # Pass it with 'schmeide control --config .schmeide/control.conf'.
 http-addr = :8080
+# NATS listens on loopback by default. For runners on other machines, listen
+# on every interface and serve TLS; runners then use --nats-url tls://<host>:4222.
+# nats-addr = 0.0.0.0:4222
+# nats-tls-cert-file = /path/to/fullchain.pem
+# nats-tls-key-file = /path/to/privkey.pem
 webhook-secret = replace-me
 runner-tokens = replace-me:replace-me
 github-app-id = replace-me

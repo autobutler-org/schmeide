@@ -88,7 +88,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFla
 	fs = flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
 	fs.StringVar(&o.Steward, "steward", "", "Your GitHub login. The runner only takes jobs for issues assigned to this login. Required.")
 	fs.BoolVar(&o.Pool, "pool", false, "Take a job whose steward has no registered runner. The runner still works one job at a time and takes its own job first. The default is off.")
-	fs.StringVar(&o.NATSURL, "nats-url", DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr.")
+	fs.StringVar(&o.NATSURL, "nats-url", DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr. Use tls://<host>:<port> when the control node serves NATS over TLS; the system roots verify it. For a private CA on Linux, point SSL_CERT_FILE at a bundle that includes it.")
 	fs.StringVar(&o.NATSToken, "nats-token", "", "This steward's NATS token: the one the control node's --runner-tokens lists for --steward. Prefer the environment variable, so the token stays out of the process list.")
 	fs.StringVar(&o.WorkDir, "work-dir", "schmeide-work", "Directory for repository clones and per-job git worktrees.")
 	fs.StringVar(&o.GitHubAPIURL, "github-api-url", control.DefaultGitHubAPIURL, "Base URL of the GitHub REST API.")

@@ -263,7 +263,7 @@ func KeyFileCheck(path string) Check {
 func doctorFlags() (fs *flag.FlagSet, natsURL, steward, natsToken, keyFile *string, asJSON, fix *bool) {
 	fs = flag.NewFlagSet("schmeide doctor", flag.ContinueOnError)
 	steward = fs.String("steward", "", "Your GitHub login, which the runner connects to the control node as.")
-	natsURL = fs.String("nats-url", runner.DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr.")
+	natsURL = fs.String("nats-url", runner.DefaultNATSURL, "NATS URL of the control node, which is its --nats-addr. Use tls://<host>:<port> when the control node serves NATS over TLS; the system roots verify it. For a private CA on Linux, point SSL_CERT_FILE at a bundle that includes it.")
 	natsToken = fs.String("nats-token", "", "This steward's NATS token: the one the control node's --runner-tokens lists for --steward.")
 	keyFile = fs.String("github-app-private-key-file", "", "Path of the control node's GitHub App private key. When set, doctor fails if group or other can read it, as control refuses to start then. Skipped when empty.")
 	asJSON = fs.Bool("json", false, "Write the checks to stdout as a JSON list of {name, group, status, detail}.")
