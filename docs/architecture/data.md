@@ -36,7 +36,7 @@ flowchart LR
 | Store | Owner (writes) | Readers | Lifetime |
 | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` stream | `control.Queue.Publish` | runner consumers, `tokenFor`, `seedIssues` | Until 100,000 later jobs push it out (`MaxMsgs`, discard oldest). Acked jobs are not removed: the stream has the default limits retention. |
-| `SCHMEIDE_STATUS` stream | runners (registration, status) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
+| `SCHMEIDE_STATUS` stream | runners (registration, status), `Queue.Publish` (the `published` status) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
 | `SCHMEIDE_ISSUES` KV | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` | Forever, one key per issue ever made a job. Overwritten when a failed job's issue gets a new job. |
 | `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. |
 | Job consumers `runner-<steward>`, `runner-_pool` | runners (`CreateOrUpdateConsumer`) | JetStream | Durable, in `--data-dir`, until deleted by hand. |
@@ -109,8 +109,15 @@ issue a duplicate.
 `Registration` on `schmeide.runners.<steward>`: `steward`, `harnesses` (names that passed `Check`), `host`,
 `pool`, `version`. The tracker keeps one per (steward, host). Registrations are never expired.
 
-`Status` on `schmeide.status.<steward or _pool>.<repo_id>.<issue>`: `state`, `detail` (PR URL or the reason),
-`attempts` (failed work outcomes so far, omitted when zero).
+`Status` on `schmeide.status.<steward or _pool>.<repo_id>.<issue>`: `state`, `detail` (PR URL, the reason, or
+`waiting for a runner; steward <steward>` for `published`), `attempts` (failed work outcomes so far, omitted when
+zero).
+
+The first `Status` of every job is written by the control node in `Queue.Publish`, before the job itself is
+stored: `{"state":"published","detail":"waiting for a runner; steward <steward>"}`. The runner's `claimed` status
+on the same subject replaces it. Because it is stored before the job, a runner's status can never be stored before
+it, and a replay after a restart ends on the same latest state. A `published` job stays listed by
+`schmeide status` until a runner claims it.
 
 ### Job stage record
 

@@ -329,3 +329,74 @@ func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
 		t.Errorf("jobs = %+v, want only the working and reviewing jobs", got.Jobs)
 	}
 }
+
+func TestStatusListsAPublishedJobNoRunnerClaimed(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v; want a new job", created, err)
+	}
+	// octocat has no runner, so the job is on the pool subject.
+	job.Pool = true
+	published := Status{State: StatePublished, Detail: "waiting for a runner; steward octocat"}
+	eventually(t, func() bool { got, _ := tracker.JobStatus(job.Subject()); return got == published })
+
+	snap, err := ReadStatus(t.Context(), q.js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []JobState{{Subject: job.Subject(), State: StatePublished, Detail: published.Detail}}
+	if !reflect.DeepEqual(snap.Jobs, want) {
+		t.Errorf("jobs = %+v, want %+v", snap.Jobs, want)
+	}
+	var text bytes.Buffer
+	snap.WriteText(&text)
+	if line := "schmeide.jobs._pool.7.1  published  waiting for a runner; steward octocat"; !strings.Contains(text.String(), line) {
+		t.Errorf("text output %q does not contain %q", text.String(), line)
+	}
+
+	// The runner's first status replaces the published one, also after a
+	// restart replays the stream.
+	startFakeRunner(t, q).report(job, StateClaimed, "")
+	eventually(t, func() bool { got, _ := tracker.JobStatus(job.Subject()); return got.State == StateClaimed })
+	q = restartQueue(t, q, dir)
+	startTracker(t, q)
+	snap, err = ReadStatus(t.Context(), q.js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []JobState{{Subject: job.Subject(), State: StateClaimed}}
+	if !reflect.DeepEqual(snap.Jobs, want) {
+		t.Errorf("jobs after claim and restart = %+v, want %+v", snap.Jobs, want)
+	}
+}
+
+// A runner's claim is stored after the job exists. The published status is
+// stored before the job, so it can never land after the claim and hide it.
+func TestPublishStoresThePublishedStatusBeforeTheJob(t *testing.T) {
+	q := startQueue(t)
+	startTracker(t, q)
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if _, err := q.Publish(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	job.Pool = true
+	jobMsg, err := q.stream.GetLastMsgForSubject(t.Context(), job.Subject())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusStream, err := q.js.Stream(t.Context(), StatusStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusMsg, err := statusStream.GetLastMsgForSubject(t.Context(), StatusSubjectPrefix+PoolName+".7.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusMsg.Time.After(jobMsg.Time) {
+		t.Errorf("status stored at %s, after the job at %s", statusMsg.Time, jobMsg.Time)
+	}
+}

@@ -430,3 +430,20 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 		t.Errorf("pull requests = %+v, want the first runner's one only", pulls)
 	}
 }
+
+func TestJourneyStatusListsAJobNoRunnerClaimed(t *testing.T) {
+	w := newWorld(t, "true")
+	w.label(4, "Add a greeting")
+
+	cmd := exec.Command(filepath.Join(binDir, "schmeide"), "status",
+		"--steward", steward, "--nats-url", "nats://"+w.natsAddr, "--nats-token", runnerToken)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("schmeide status: %v\n%s", err, out)
+	}
+	// No runner is registered for the steward, so the job is on the pool subject.
+	want := fmt.Sprintf("schmeide.jobs._pool.%d.4  published  waiting for a runner; steward %s", repoID, steward)
+	if !strings.Contains(string(out), want) {
+		t.Errorf("schmeide status output = %q, want a line %q", out, want)
+	}
+}

@@ -147,7 +147,7 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners; `Queue.Publish` (`published`, and `failed` when the job could not be stored) | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, default config | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
@@ -201,7 +201,17 @@ It may subscribe only below `_INBOX_<steward>.>` (`InboxPrefix`). Runners and `s
    subject from closing the new one.
 4. The record is written with `Create` (no record) or `Update` at the read revision. Of two concurrent deliveries
    for one issue, one wins and the other reports duplicate.
-5. The job is published to JetStream. If that fails the record is rolled back.
+5. When the tracker is running, a `Status{state: "published", detail: "waiting for a runner; steward <steward>"}`
+   is published to `SCHMEIDE_STATUS` on the job's status subject and its JetStream ack is awaited. If that
+   fails, the record is rolled back and `Publish` returns `record published status: <err>`.
+6. The job is published to JetStream. If that fails, the record is rolled back and a
+   `Status{state: "failed", detail: "the control node could not store the job"}` is published on the same status
+   subject, so `schmeide status` stops listing a job that was never stored.
+
+The published status is stored before the job on purpose. A runner can only claim a job that is in
+`SCHMEIDE_JOBS`, so its `claimed` status is always stored after `published` and replaces it as the latest state.
+Writing `published` after the job would let a fast runner's `claimed` land first and be hidden by `published`.
+`Tracker` keeps "the latest status per subject wins" and needs no ordering rule of its own.
 
 On startup `seedIssues` copies every job still in the stream into the issue bucket when its key is missing, and
 only then is `MaxMsgs` applied to the stream. That keeps upgrades from older control nodes, where the stream was
@@ -211,7 +221,8 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 
 A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` once
 at startup and flushes. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
-state change.
+state change. The control node writes the first status of every job, `published`, in `Queue.Publish` (see
+[Publishing a job](#publishing-a-job)); the runner's `claimed` overwrites it.
 
 `Tracker` (`status.go`) keeps the registrations and the latest status per job in memory:
 
@@ -229,18 +240,30 @@ ordered consumer starts at the sequence after the replay, so no message is appli
 
 `schmeide status` (`StatusMain`) connects as a steward, calls `ReadStatus`, which replays the same stream into a
 fresh read-only `Tracker` (`issues == nil`, so it never writes), and prints the registrations and every job whose
-latest state is not final. `--json` prints the `Snapshot` struct, whose JSON form is stable.
+latest state is not final. `--json` prints the `Snapshot` struct, whose JSON form is stable. A job no runner has
+claimed is listed with state `published`, for example:
+
+```text
+JOB                       STATE      DETAIL
+schmeide.jobs._pool.42.4  published  waiting for a runner; steward octo
+```
+
+When no job is unfinished it prints `No queued or running jobs.`
 
 ### Job states
 
+The control node writes `published` (`StatePublished`, in `Queue.Publish`) and `failed` when it could not store
+the job. Runners write every other state (`runner.report`).
+
 | State | Final | Meaning |
 | --- | --- | --- |
+| `published` | no | The control node stored the job and no runner has claimed it (detail: `waiting for a runner; steward <steward>`). |
 | `claimed` | no | A runner received the delivery. |
 | `working` | no | A writer session is running (detail: harness name). |
 | `retrying` | no | A work attempt failed and the job was handed back. |
 | `reviewing` | no | A reviewer round started (detail: `round N of M`). |
 | `gate_failed` | yes, failure | The gate failed or timed out before the pull request opened, or on a fix round. |
-| `failed` | yes, failure | Work failed `--max-attempts` times. |
+| `failed` | yes, failure | Work failed `--max-attempts` times, or the control node could not store the job (detail: `the control node could not store the job`). |
 | `pr_opened` | yes | Review passed, or an earlier attempt's pull request was found closed. |
 | `review_failed` | yes | Review rejected with `review_fix` off, rounds ran out, or a post-PR step failed. |
 | `merged`, `queued` | yes | Factory merge merged, or enqueued in the merge queue. |

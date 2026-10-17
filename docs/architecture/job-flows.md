@@ -26,6 +26,7 @@ sequenceDiagram
     H->>Q: Publish(job)
     Q->>Q: Tracker.hasRunner(steward)? steward subject : pool subject
     Q->>KV: Create {repo_id}.{issue} with After = last status seq
+    Q->>Q: status published (SCHMEIDE_STATUS), before the job
     Q->>JS: publish schmeide.jobs.{steward}.{repo_id}.{issue}
     H-->>GH: 202 created
     JS->>R: Next() on consumer runner-{steward}

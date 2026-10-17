@@ -130,6 +130,10 @@ func newWorld(t *testing.T) *world {
 		if err := json.Unmarshal(m.Data, &s.Status); err != nil {
 			t.Error(err)
 		}
+		// The control node writes published; these tests watch the runner.
+		if s.State == control.StatePublished {
+			return
+		}
 		w.statuses <- s
 	}); err != nil {
 		t.Fatal(err)

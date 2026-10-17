@@ -80,6 +80,13 @@ The fallback queue for a job whose assignee has no registered runner. A runner
 started with `--pool` (off by default) also takes pool jobs. Pool runners work
 one job at a time and take their own steward's job first.
 
+## published
+
+The job state the control node writes when it stores a new job, before any
+runner claims it. `schmeide status` lists the job as `published` until the
+runner's `claimed` status replaces it. It is not the merge queue state; see
+queued.
+
 ## queued
 
 The finished job state when a factory merge added the pull request to the base
