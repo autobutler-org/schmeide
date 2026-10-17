@@ -51,7 +51,8 @@ Who merges a pull request after review has passed and CI is green.
   base branch's protection, when the runner can read it, requires one or more
   approving reviews: the runner cannot supply that review, the pull request
   stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
-  does not fail the job, and required status checks are not this failure.
+  does not fail the job. Any other read failure fails the job, and the pull
+  request stays open. Required status checks are not this failure.
 
 Absent, empty, and blank values mean `"human"`. Any other value is an error,
 and values are case-sensitive: `"Factory"` is rejected.

@@ -106,7 +106,8 @@ After review passes:
   job fails, the comment names that requirement, the pull request stays open,
   and nothing is merged or enqueued. The runner cannot supply that review. A
   404 or a 403 on the read does not fail the job: the merge is attempted and
-  GitHub still enforces its rules. Required status checks are not this
+  GitHub still enforces its rules. If the read fails for any other reason, the job fails, the comment says schmeide could not read branch protection, and the pull request stays open.
+  A canceled wait is not that case. Required status checks are not this
   failure. Human merge skips the check.
 - When the base branch has a merge queue, green checks add the pull request to
   the queue instead of merging it. The job is reported merged once it is
