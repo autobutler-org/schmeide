@@ -41,8 +41,32 @@ requests, newest first, one line per pull request with its number and merge
 date. It needs the GitHub CLI, `gh`, installed and logged in; without it the
 target exits non-zero and says so. Review the file and commit it yourself.
 
+## Publishing an image
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the
+`Dockerfile` for linux/amd64 and linux/arm64, stamped with the tag as
+`VERSION` the way `make build` stamps the binary, and pushes
+`ghcr.io/autobutler-org/schmeide:<version>` with the `v` dropped, plus
+`latest`. Tag `v0.0.1` publishes `ghcr.io/autobutler-org/schmeide:0.0.1`:
+
+```sh
+git tag v0.0.1
+git push origin v0.0.1
+```
+
+The image runs the control node only. Runner mode needs git and a harness
+CLI, which the image does not have. Every pull request builds the image
+without pushing it, so the Dockerfile cannot rot. How to run the image is in
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
+Build one locally with:
+
+```sh
+docker build --build-arg VERSION=$(git describe --tags --always --dirty) -t schmeide .
+```
+
 ## Out of scope
 
-Publishing binaries is out of scope. Nothing here builds release artifacts,
-uploads them, or creates a GitHub release. Tag a commit and build from it
-with `make build` when you need a stamped binary.
+Publishing binaries is out of scope. Nothing here uploads binaries or creates
+a GitHub release. Tag a commit and build from it with `make build` when you
+need a stamped binary.
