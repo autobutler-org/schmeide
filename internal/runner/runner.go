@@ -55,9 +55,10 @@ const (
 	defaultMaxAttempts     = 3
 	defaultMaxReviewRounds = 3
 	defaultRetryDelay      = 30 * time.Second
-	pollWait               = time.Second
 	gateTailBytes          = 4000
 )
+
+var pollWait = time.Second
 
 // The messages a runner publishes are defined by the control node, which
 // subscribes to them.
