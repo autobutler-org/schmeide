@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,4 +217,26 @@ func TestNewWorktreeGuardsOtherJobBranches(t *testing.T) {
 		t.Fatalf("the clone has core.hooksPath %s", out)
 	}
 	git(t, w.repoDir, "branch", "-f", "2_two", w.spec.branch)
+}
+
+func TestGateRunsInAScratchHomeThatCloseRemoves(t *testing.T) {
+	t.Setenv("SCHMEIDE_NATS_TOKEN", "nats-secret")
+	w, _ := newPushFixture(t)
+	w.spec.gateEnv = gateEnv(os.Environ(), nil)
+	out, err := w.Run(t.Context(), `touch "$HOME/dotfile" "$TMPDIR/tmpfile" && echo "$HOME|$TMPDIR|$SCHMEIDE_NATS_TOKEN"`)
+	if err != nil {
+		t.Fatalf("gate: %v: %s", err, out)
+	}
+	if got, want := strings.TrimSpace(out), w.scratch+"|"+w.scratch+"|"; got != want {
+		t.Errorf("gate saw HOME|TMPDIR|SCHMEIDE_NATS_TOKEN = %q, want %q", got, want)
+	}
+	if strings.HasPrefix(w.scratch, w.dir) {
+		t.Errorf("scratch %s is inside the checkout %s, so a commit would take it", w.scratch, w.dir)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(w.scratch); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("scratch %s survived Close: %v", w.scratch, err)
+	}
 }
