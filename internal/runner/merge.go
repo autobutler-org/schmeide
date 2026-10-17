@@ -199,7 +199,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 		return mergeFailed(prURL, fmt.Errorf("could not read the default branch: %w", err))
 	}
 	if base != trunk {
-		if err := waitForStack(ctx, ws, gh, issue, base, trunk, wait); err != nil {
+		if err := waitForStack(ctx, ws, gh, issue, trunk, wait); err != nil {
 			if ctx.Err() != nil {
 				return outcome{}
 			}
@@ -302,15 +302,15 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 }
 
 // waitForStack waits, backing off like the check wait, until the open pull
-// request for issue targets trunk instead of base, the branch of the pull
-// request below it, and restacks it on the way. While the pull request below
+// request for issue targets trunk instead of the branch of the pull request
+// below it, and restacks it on the way. While the pull request below
 // is open, each poll rebases onto that branch, so the stack follows a base
 // that moved. Once the pull request below merged, this one is retargeted to
 // trunk, when GitHub did not already do that on deleting the merged branch,
 // and rebased onto trunk. It returns why that did not happen within wait:
 // the pull request below has not merged, it closed without merging, which
 // only a person can sort out, or the restack failed.
-func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, base, trunk string, wait time.Duration) error {
+func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, trunk string, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	delay := checkPoll
 	for {
@@ -324,7 +324,7 @@ func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, 
 		if mine.Base.Ref == trunk {
 			return restack(ctx, ws, trunk)
 		}
-		base = mine.Base.Ref
+		base := mine.Base.Ref
 		below, err := stackedOn(base)
 		if err != nil {
 			return err
@@ -360,7 +360,8 @@ func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, 
 	}
 }
 
-// restack rebases the branch onto onto and says so when that fails.
+// restack rebases the branch onto the remote branch onto, and says so when
+// that fails.
 func restack(ctx context.Context, ws Workspace, onto string) error {
 	if _, err := ws.Restack(ctx, onto); err != nil {
 		return fmt.Errorf("could not restack the pull request onto %s: %w", onto, err)

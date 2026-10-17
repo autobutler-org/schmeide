@@ -6,10 +6,21 @@ design see [design.md](design.md).
 ## blocked-by
 
 GitHub's issue-dependencies list, which schmeide reads to stack pull requests.
-It is not a key in `.schmeide/config.toml`. Exactly one open blocker that has an
-open pull request on a branch starting with `<issue number>_` makes that
-branch the base for the new pull request. Otherwise the base is the repository
-default branch. Two or more such blockers fail the job.
+It is not a key in `.schmeide/config.toml`. Open blockers that have an open
+pull request on a branch starting with `<issue number>_` make the top of their
+stack the base for the new pull request. Otherwise the base is the repository
+default branch. Two or more such blockers have to form one linear stack, each
+pull request based on the one below it; blockers side by side (a diamond) fail
+the job.
+
+## restack
+
+Rebasing a stacked pull request's branch so it follows its base. While the pull
+request below is open, a factory merge's stack wait rebases onto that branch at
+each poll. Once the one below merges, the runner retargets the pull request to
+the default branch, if GitHub has not, and rebases it onto the default branch.
+The rebased branch is force-pushed with a lease. A conflict leaves the branch
+as it was and fails the job, asking a person to rebase.
 
 ## check_wait
 
