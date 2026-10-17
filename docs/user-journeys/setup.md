@@ -606,6 +606,9 @@ in.
 
 - A `--permission-mode` other than `acceptEdits` in `--claude-args` or
   `--grok-args` is refused the same way.
+- A `SCHMEIDE_<NAME>` value that does not parse for its flag, such as
+  `SCHMEIDE_ACK_WAIT="5 minutes"`, is refused with exit code 2 before anything
+  else is checked (JN-CLI-006).
 - A steward with `.`, `*`, `>`, `/`, `\`, or whitespace, or the reserved name
   `_pool`, fails with "steward "x" is not a GitHub login; pass your login with
   --steward", exit 1.
@@ -777,13 +780,12 @@ recorded yes for the pair.
 
 **Expected result:**
 
-- zsh lists `control`, `runner`, `doctor`, `status`, `completion`, and
-  `version`, each with a description.
+- zsh lists `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version`, each with a description.
 
 **Notes:**
 
-- The zsh script does not list `init`. The bash script does.
-- Covered by `TestCompletion`.
+- Covered by `TestCompletion` and `TestCompletionListsEveryCommand`.
 
 ---
 
@@ -798,11 +800,10 @@ recorded yes for the pair.
 
 **Expected result:**
 
-- fish lists `control`, `runner`, `doctor`, `status`, `completion`, and
-  `version` with descriptions. After `schmeide completion `, it offers `bash`,
-  `zsh`, and `fish`.
+- fish lists `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version` with descriptions. After `schmeide completion `, it offers
+  `bash`, `zsh`, and `fish`.
 
 **Notes:**
 
-- The fish script does not list `init`.
-- Covered by `TestCompletion`.
+- Covered by `TestCompletion` and `TestCompletionListsEveryCommand`.

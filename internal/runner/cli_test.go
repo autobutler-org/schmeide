@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/harness"
 )
@@ -231,5 +232,37 @@ func TestDeliveryLeaseFlagDefaults(t *testing.T) {
 		if !strings.Contains(Usage(), want) {
 			t.Errorf("Usage() does not contain %q", want)
 		}
+	}
+}
+
+func TestMainRejectsUnparsableEnv(t *testing.T) {
+	cases := []struct{ env, value, want string }{
+		{"SCHMEIDE_ACK_WAIT", "5 minutes", `SCHMEIDE_ACK_WAIT is "5 minutes", which is not a duration; set it to one such as 5m, unset it, or pass --ack-wait`},
+		{"SCHMEIDE_MAX_ATTEMPTS", "three", `SCHMEIDE_MAX_ATTEMPTS is "three", which is not an integer; set it to one such as 3, unset it, or pass --max-attempts`},
+		{"SCHMEIDE_POOL", "yes please", `SCHMEIDE_POOL is "yes please", which is not a boolean; set it to true or false, unset it, or pass --pool`},
+	}
+	for _, c := range cases {
+		t.Run(c.env, func(t *testing.T) {
+			t.Setenv(c.env, c.value)
+			var stdout, stderr bytes.Buffer
+			if code := Main([]string{"--steward", "me"}, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit code %d, want 2; stderr: %s", code, stderr.String())
+			}
+			want := "schmeide runner: " + c.want + "\nRun 'schmeide runner --help' for usage.\n"
+			if stderr.String() != want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestParseFlagsFlagWinsOverUnparsableEnv(t *testing.T) {
+	t.Setenv("SCHMEIDE_ACK_WAIT", "garbage")
+	fs, o, _, _ := runnerFlags()
+	if err := ParseFlags(fs, []string{"--ack-wait", "1m"}); err != nil {
+		t.Fatalf("ParseFlags() = %v, want nil: a given flag means its variable is not read", err)
+	}
+	if o.AckWait != time.Minute {
+		t.Errorf("ack wait = %v, want 1m", o.AckWait)
 	}
 }
