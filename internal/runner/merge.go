@@ -134,10 +134,10 @@ func merged(prURL string) outcome {
 }
 
 // enqueued is the outcome when the base branch has a merge queue: the queue
-// merges the pull request, so the job ends as merged once it is queued.
+// merges the pull request, so the job ends as queued.
 func enqueued(prURL string) outcome {
 	return outcome{
-		state:   StateMerged,
+		state:   StateQueued,
 		detail:  prURL,
 		comment: "schmeide added the pull request to the merge queue after the review passed and CI succeeded: " + prURL,
 	}

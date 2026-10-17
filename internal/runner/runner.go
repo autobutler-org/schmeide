@@ -70,9 +70,7 @@ type (
 	Registration = control.Registration
 )
 
-// The states a runner reports for a job. Reviewing and review failed are
-// published on the same status subject as the others. The control node stores
-// the state it is given, so the review loop does not need a new control state.
+// The states a runner reports for a job.
 const (
 	StateClaimed    = control.StateClaimed
 	StateWorking    = control.StateWorking
@@ -81,10 +79,11 @@ const (
 	StatePROpened   = control.StatePROpened
 	StateFailed     = control.StateFailed
 
-	StateReviewing    State = "reviewing"
-	StateReviewFailed State = "review_failed"
-	StateMerged       State = "merged"
-	StateMergeFailed  State = "merge_failed"
+	StateReviewing    = control.StateReviewing
+	StateReviewFailed = control.StateReviewFailed
+	StateMerged       = control.StateMerged
+	StateQueued       = control.StateQueued
+	StateMergeFailed  = control.StateMergeFailed
 )
 
 // Options configures a runner.

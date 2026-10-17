@@ -110,8 +110,7 @@ After review passes:
   A canceled wait is not that case. Required status checks are not this
   failure. Human merge skips the check.
 - When the base branch has a merge queue, green checks add the pull request to
-  the queue instead of merging it. The job is reported merged once it is
-  queued.
+  the queue instead of merging it. The job is reported queued.
 - The first red check during the wait runs one writer fix round, when a review
   round remains. The round counts against `--max-review-rounds`. Polling then
   continues on the new head inside the same wait. There is no second fix round.

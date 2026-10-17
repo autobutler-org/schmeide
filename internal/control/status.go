@@ -32,8 +32,9 @@ const (
 	statusStream = "SCHMEIDE_STATUS"
 )
 
-// State is where a job stands. Gate failed, PR opened, and failed are final;
-// retrying means an attempt failed and the job will be delivered again.
+// State is where a job stands. Gate failed, PR opened, failed, review failed,
+// merged, queued, and merge failed are final; retrying means an attempt failed
+// and the job will be delivered again, and reviewing is still in progress.
 type State string
 
 // The states a runner reports for a job.
@@ -44,11 +45,21 @@ const (
 	StateGateFailed State = "gate_failed"
 	StatePROpened   State = "pr_opened"
 	StateFailed     State = "failed"
+
+	StateReviewing    State = "reviewing"
+	StateReviewFailed State = "review_failed"
+	StateMerged       State = "merged"
+	StateQueued       State = "queued"
+	StateMergeFailed  State = "merge_failed"
 )
 
 // final reports whether a job in this state is done.
 func (s State) final() bool {
-	return s == StateGateFailed || s == StatePROpened || s.failure()
+	switch s {
+	case StatePROpened, StateReviewFailed, StateMerged, StateQueued, StateMergeFailed:
+		return true
+	}
+	return s.failure()
 }
 
 // failure reports whether a job ended without a pull request. Its issue may
