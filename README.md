@@ -15,6 +15,12 @@ New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull requ
 
 Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting. Terms are defined in [docs/GLOSSARY.md](docs/GLOSSARY.md), and `schmeide --help` links there.
 
+## Install
+
+`make install` builds `schmeide` with the version stamp and writes it to `GOBIN`, or to `GOPATH/bin` (usually `~/go/bin`) when `GOBIN` is unset. That directory has to be on your `PATH`.
+
+To install a tagged release without cloning, run `go install github.com/autobutler-org/schmeide/cmd/schmeide@<tag>`, for example `@v0.1.0`.
+
 ## Running the first slice
 
 One control node and one runner, on the same machine or not. The target repository needs `.schmeide/config.toml` (below). The schmeide GitHub App supplies the app ID, private key, and webhook secret. Claude Code and the Grok CLI are the harnesses. The runner uses the first one whose check passes. Claude Code is offered first, so Claude Code wins when it is usable. At least one of them must already be installed and logged in on the runner. A missing or logged-out harness is skipped when another one is ready. schmeide does not handle agent API keys.

@@ -46,6 +46,10 @@ build/go: ## Build Go codebase
 	mkdir -p ./build
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(EXE) $(MAIN)
 
+.PHONY: install
+install: ## Install schmeide into GOBIN (GOPATH/bin when unset)
+	$(GO) install -ldflags "$(LDFLAGS)" $(MAIN)
+
 .PHONY: clean
 clean: ## Clean build space
 	rm -rf \
