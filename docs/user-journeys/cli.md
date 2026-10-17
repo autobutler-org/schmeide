@@ -190,8 +190,9 @@ progress.
 
 - Jobs whose latest state is final (`pr_opened`, `gate_failed`, `failed`,
   `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
-- A job no runner has claimed yet is not listed either: the list comes from
-  the states runners report (`claimed`, `working`, `reviewing`, `retrying`).
+- Unfinished jobs are listed with the state the control node wrote at
+  publish time (`published`, see JN-CLI-016) or the latest state a runner
+  reported (`claimed`, `working`, `reviewing`, `retrying`).
 - Any steward sees every runner and job.
 - A stopped runner stays listed.
 - Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
@@ -219,6 +220,8 @@ progress.
 
 **Notes:**
 
+- A fresh control node has no jobs. Once any job is published it is listed
+  until its latest state is final (JN-CLI-016, JN-CLI-007).
 - Covered by `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`.
 
 ---
@@ -376,3 +379,49 @@ already exists.
 - `--json` writes `[{"name", "group", "status", "detail"}, ...]` to stdout.
   `status` is `ok`, `fail`, or `skip`.
 - Covered by `TestMainJSON` and `TestMainHelpAndBadFlag`.
+
+---
+
+### JN-CLI-016: `schmeide status` lists a job no runner has claimed
+
+**Preconditions:** A control node with no runner registered for steward
+`octo`. An issue in repository 42 is assigned to `octo` and labeled
+`schmeide:ready`, so the control node published it as a job (JN-PR-001).
+
+**Steps:**
+
+1. Run `schmeide status --steward octo --nats-token <token>`.
+2. Start a runner for `octo` and run `schmeide status` again after it logs
+   `state=claimed`.
+
+**Expected result:**
+
+- Step 1: exit code 0. Output:
+
+  ```text
+  No registered runners.
+
+  JOB                       STATE      DETAIL
+  schmeide.jobs._pool.42.4  published  waiting for a runner; steward octo
+  ```
+
+- Step 2: the same job is listed once, with state `claimed` or a later
+  runner state. There is no second `published` row.
+
+**Notes:**
+
+- The control node writes the `published` status in `Queue.Publish`
+  (`internal/control/queue.go`) on the job's status subject, before it
+  stores the job. The runner's `claimed` status on the same subject replaces
+  it, and a control node restart replays the stream to the same result.
+- With no registered runner for the steward the job is on the `_pool`
+  subject, so the detail names the steward. A steward with a registered
+  runner gets `schmeide.jobs.<steward>.<repo id>.<issue>`.
+- `--json` lists the job as
+  `{"subject": "schmeide.jobs._pool.42.4", "state": "published", "detail": "waiting for a runner; steward octo"}`.
+- When the control node cannot store the job after writing `published`, it
+  writes `failed` with detail `the control node could not store the job`,
+  and the job is no longer listed.
+- Covered by `TestStatusListsAPublishedJobNoRunnerClaimed`,
+  `TestPublishStoresThePublishedStatusBeforeTheJob` (`internal/control`), and
+  `TestJourneyStatusListsAJobNoRunnerClaimed` (`internal/e2e`).

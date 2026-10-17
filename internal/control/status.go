@@ -38,6 +38,11 @@ const (
 // and the job will be delivered again, and reviewing is still in progress.
 type State string
 
+// StatePublished is the one state the control node writes: the job is
+// stored and no runner has claimed it yet. The runner's first status, claimed,
+// replaces it on the same subject.
+const StatePublished State = "published"
+
 // The states a runner reports for a job.
 const (
 	StateClaimed    State = "claimed"
@@ -67,11 +72,12 @@ func (s State) final() bool {
 // get a new job.
 func (s State) failure() bool { return s == StateGateFailed || s == StateFailed }
 
-// Status is the message a runner publishes when a job changes state.
+// Status is the message a runner publishes when a job changes state. The
+// control node publishes one too, StatePublished, just before it stores a job.
 type Status struct {
 	State State `json:"state"`
-	// Detail is the PR URL for StatePROpened and the reason for the failure
-	// states.
+	// Detail is the PR URL for StatePROpened, the reason for the failure
+	// states, and the steward for StatePublished.
 	Detail string `json:"detail,omitempty"`
 	// Attempts is the number of failed work outcomes so far. It is omitted
 	// for zero so statuses written by older runners remain compatible.

@@ -291,7 +291,8 @@ func (q *Queue) Close() {
 // that ended gate_failed or failed is replaced by this one. It reports whether
 // a job was created. Once Track is running, a steward with no registration
 // gets the job on the pool subject. Until then there is no registration
-// record, and the job stays on the steward's subject.
+// record, and the job stays on the steward's subject. Once Track is running,
+// a new job's first status, StatePublished, is stored before the job.
 func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	if job.Steward == PoolName {
 		return false, fmt.Errorf("steward %q is reserved and is not a GitHub login", job.Steward)
@@ -339,13 +340,31 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("record issue %s: %w", key, err)
 	}
-	if _, err := q.js.Publish(ctx, job.Subject(), data); err != nil {
-		// Put the previous record back, so the issue is not stuck with a job
-		// that was never stored.
+	// Put the previous record back, so the issue is not stuck with a job
+	// that was never stored.
+	undo := func() {
 		if rev == 0 {
 			_ = q.issues.Delete(ctx, key)
 		} else {
 			_, _ = q.issues.Put(ctx, key, entry.Value())
+		}
+	}
+	// The published status is stored before the job, so a runner's claim,
+	// which needs the job, always lands after it and replaces it.
+	statusSubject := StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+	if q.tracker != nil {
+		status, _ := json.Marshal(Status{State: StatePublished, Detail: "waiting for a runner; steward " + job.Steward})
+		if _, err := q.js.Publish(ctx, statusSubject, status); err != nil {
+			undo()
+			return false, fmt.Errorf("record published status: %w", err)
+		}
+	}
+	if _, err := q.js.Publish(ctx, job.Subject(), data); err != nil {
+		undo()
+		if q.tracker != nil {
+			// A job that was never stored must not stay listed as published.
+			status, _ := json.Marshal(Status{State: StateFailed, Detail: "the control node could not store the job"})
+			_, _ = q.js.Publish(ctx, statusSubject, status)
 		}
 		return false, err
 	}

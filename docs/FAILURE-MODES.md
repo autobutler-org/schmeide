@@ -137,6 +137,19 @@ After review passes:
 - A check that is still red, or a wait that ends without success, comments on
   the issue and leaves the pull request open. That failure is final.
 
+## Publishing a job
+
+The control node writes a `published` status for a new job before it stores
+the job (`Queue.Publish` in `internal/control/queue.go`).
+
+- If the `published` status cannot be stored, the issue record is rolled back,
+  no job is stored, the webhook answers 500 `could not process the delivery`,
+  and the control node logs `msg="webhook failed"`. A redelivery tries again.
+- If the status is stored but the job is not, the issue record is rolled back
+  and a `failed` status with detail `the control node could not store the job`
+  is written on the same subject, so `schmeide status` stops listing the job.
+  The webhook answers 500. A redelivery tries again.
+
 ## Not built
 
 Container isolation is not built. A job runs in a git worktree on the runner's

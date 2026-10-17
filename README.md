@@ -9,7 +9,7 @@ New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull requ
 - `schmeide control` runs the control node: an embedded NATS server with JetStream for the job queue, and an HTTP endpoint at `/webhook` for the schmeide GitHub App.
 - `schmeide runner` connects out to the control node, takes one steward's jobs, opens a pull request for each, and reviews the change in the same worktree. With `--pool`, which defaults off, it registers as a pool runner and can take a job whose assignee has no registered runner. It still works one job at a time and takes its own job first. The factory merges that pull request only when the repo config sets `automate.merge = "on"`. The default is a person. Before the first job in a new pair of work directory and origin, it asks once on its terminal. A yes is stored under the user config directory, in `schmeide/trust`. A different origin asks again. `SCHMEIDE_TRUST=1` lets an unattended runner proceed for that run and records nothing. A non-interactive run with no recorded decision and without that variable refuses the job.
 - `schmeide doctor` checks that this machine can run a runner.
-- `schmeide status` shows registered runners and queued or running jobs.
+- `schmeide status` shows registered runners and queued or running jobs, including published jobs no runner has claimed.
 - `schmeide init` writes a repo config and a control node config in this directory.
 - `schmeide completion` prints a shell completion script for bash, zsh, or fish.
 

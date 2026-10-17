@@ -29,7 +29,10 @@ code and body. The body is one word: `created`, `duplicate`, `ignored`, or
 
 - The assignment delivery answers 200 `ignored` (no label yet).
 - The label delivery answers 202 `created`.
-- The control node logs `msg="webhook handled" delivery=<id> outcome=created`.
+- The control node logs `msg="webhook handled" delivery=<id> outcome=created`
+  and `msg="job state" job=schmeide.jobs.octocat.<repo id>.<n> state=published detail="waiting for a runner; steward octocat"`.
+  Until the runner claims it, `schmeide status` lists the job as `published`
+  (JN-CLI-016).
 - The runner logs `msg="job state" repo=<owner>/<repo> issue=<n> state=claimed`,
   then `state=working detail=claude-code`.
 
@@ -131,7 +134,11 @@ with a pull request (any state other than `failed` or `gate_failed`).
 
 **Notes:**
 
-- Covered by `TestPublishReplacesAFailedJob`.
+- The new job's `published` status (JN-CLI-016) carries no attempt count and
+  is the latest status on the subject, so the runner restores zero failed
+  attempts instead of the old job's count.
+- Covered by `TestPublishReplacesAFailedJob`. No test covers the attempt
+  count of a relabeled job.
 
 ---
 
