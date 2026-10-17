@@ -1,4 +1,4 @@
-package runner
+package forge
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 
 // graphql runs one query against the GitHub GraphQL API. The merge queue is
 // only in GraphQL; REST has no endpoint for it.
-func (g github) graphql(ctx context.Context, query string, vars map[string]any, out any) error {
+func (g GitHub) graphql(ctx context.Context, query string, vars map[string]any, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	data, err := json.Marshal(map[string]any{"query": query, "variables": vars})
@@ -22,12 +22,12 @@ func (g github) graphql(ctx context.Context, query string, vars map[string]any, 
 	}
 	// api.github.com serves /graphql; GitHub Enterprise serves /api/graphql
 	// next to /api/v3.
-	endpoint := strings.TrimSuffix(strings.TrimSuffix(g.api, "/"), "/v3") + "/graphql"
+	endpoint := strings.TrimSuffix(strings.TrimSuffix(g.API, "/"), "/v3") + "/graphql"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+g.Token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -56,10 +56,9 @@ func (g github) graphql(ctx context.Context, query string, vars map[string]any, 
 	return json.Unmarshal(body.Data, out)
 }
 
-// queuedPull is the node ID of pull request number when its base branch has
-// a merge queue, or "" when it does not.
-func (g github) queuedPull(ctx context.Context, number int) (string, error) {
-	owner, name, _ := strings.Cut(g.repo, "/")
+// QueuedPull reads the base branch with GraphQL: REST has no merge queue.
+func (g GitHub) QueuedPull(ctx context.Context, number int) (string, error) {
+	owner, name, _ := strings.Cut(g.Repo, "/")
 	var pr struct {
 		Repository struct {
 			PullRequest struct {
@@ -93,9 +92,8 @@ func (g github) queuedPull(ctx context.Context, number int) (string, error) {
 	return pr.Repository.PullRequest.ID, nil
 }
 
-// enqueuePull adds the pull request with node ID id to its base branch's
-// merge queue.
-func (g github) enqueuePull(ctx context.Context, id string) error {
+// EnqueuePull uses GraphQL, the only API with the merge queue.
+func (g GitHub) EnqueuePull(ctx context.Context, id string) error {
 	const mutation = `mutation($id: ID!) {
   enqueuePullRequest(input: {pullRequestId: $id}) { mergeQueueEntry { id } }
 }`

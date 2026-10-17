@@ -32,6 +32,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/ciwatch"
 	"github.com/autobutler-org/schmeide/internal/control"
+	"github.com/autobutler-org/schmeide/internal/forge"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/lintgate"
 	"github.com/autobutler-org/schmeide/internal/release"
@@ -484,7 +485,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
 	}
-	gh := github{api: r.opts.GitHubAPIURL, repo: job.Repo, token: token}
+	gh := forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}
 	out := r.work(ctx, gh, job, token)
 	if ctx.Err() != nil {
 		// Shutting down. Hand the job to another runner now, and do not count
@@ -510,7 +511,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	delete(r.failures, job.Subject())
 	if out.comment != "" {
-		if err := gh.comment(ctx, job.Issue, markOutcome(out.comment, out.state)); err != nil {
+		if err := gh.Comment(ctx, job.Issue, markOutcome(out.comment, out.state)); err != nil {
 			r.log.Error("could not comment on the issue", "repo", job.Repo, "issue", job.Issue, "err", err)
 		}
 	}
@@ -615,7 +616,7 @@ func failed(err error) outcome {
 }
 
 // work takes the job as far as it goes on this attempt.
-func (r *Runner) work(ctx context.Context, gh github, job control.Job, token string) outcome {
+func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, token string) outcome {
 	if job.Title == "" {
 		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
@@ -628,7 +629,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	// open a second one. The guard goes by the issue number, not the whole
 	// branch name, which changes when the issue is retitled. A stacked pull
 	// request matches here too, and a later review pushes the same head.
-	pr, found, err := gh.issuePull(ctx, job.Issue, "all")
+	pr, found, err := gh.IssuePull(ctx, job.Issue, "all")
 	if err != nil {
 		return failed(err)
 	}
@@ -639,7 +640,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	if !found && r.stage.PR != "" {
 		// GitHub can leave a just-opened pull request out of its list. The
 		// stage record still names it, so no second one is opened.
-		pr = ghPull{HTMLURL: r.stage.PR, State: "open", CreatedAt: r.stage.Opened}
+		pr = forge.Pull{HTMLURL: r.stage.PR, State: "open", CreatedAt: r.stage.Opened}
 		pr.Head.Ref, pr.Base.Ref = r.stage.Branch, r.stage.Base
 		found = true
 	}
@@ -647,7 +648,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	if found {
 		// An outcome posted since the pull request opened means only the
 		// acknowledgment was lost. It is not posted again.
-		state, posted, err := gh.postedOutcome(ctx, job.Issue, pr.CreatedAt)
+		state, posted, err := postedOutcome(ctx, gh, job.Issue, pr.CreatedAt)
 		if err != nil {
 			return outcome{state: StateFailed, detail: err.Error(), comment: "schmeide could not finish this job and left the pull request open: " + pr.HTMLURL + "\n\n" + err.Error()}
 		}
@@ -663,7 +664,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 		if r.stage.PR == "" {
 			r.stage = stage{Stage: stagePROpened, Branch: branch, Base: base, PR: pr.HTMLURL, Opened: pr.CreatedAt}
 		}
-	} else if base, err = gh.baseBranch(ctx, job.Issue); err != nil {
+	} else if base, err = baseBranch(ctx, gh, job.Issue); err != nil {
 		// Asked before the worktree exists, so a stacked job starts on the
 		// dependency's branch and the pull request opens against it.
 		return failed(err)
@@ -697,7 +698,7 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 // execute is the job itself, written against Workspace only. A non-empty
 // prURL is the job's open pull request from an earlier delivery, which is
 // resumed at its review.
-func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job control.Job, branch, base, prURL string) outcome {
+func (r *Runner) execute(ctx context.Context, ws Workspace, gh forge.Forge, job control.Job, branch, base, prURL string) outcome {
 	// The gate is read before the session runs, so the session cannot weaken it.
 	cfg, err := repoconfig.Load(ws.Dir())
 	if err != nil {
@@ -744,13 +745,13 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 			return r.fixCheck(ctx, ws, job, cfg.Gate, url, limits, run, tail)
 		}
 	}
-	return r.mergeWhenGreen(ctx, ws, gh, url, cfg.CheckWait, fix)
+	return r.mergeWhenGreen(ctx, ws, gh, base, url, cfg.CheckWait, fix)
 }
 
 // warnLintGate comments when the configured gate does not mention a lint
 // target detected in the checkout. The comment is a warning: the job still
 // runs. A detection or comment error is logged and does not fail the job.
-func (r *Runner) warnLintGate(ctx context.Context, gh github, job control.Job, root, gate string) {
+func (r *Runner) warnLintGate(ctx context.Context, gh forge.Forge, job control.Job, root, gate string) {
 	found, err := lintgate.Detect(root)
 	if err != nil {
 		r.log.Warn("could not detect a repo lint gate", "repo", job.Repo, "issue", job.Issue, "err", err)
@@ -760,14 +761,14 @@ func (r *Runner) warnLintGate(ctx context.Context, gh github, job control.Job, r
 	if body == "" {
 		return
 	}
-	if err := gh.comment(ctx, job.Issue, body); err != nil {
+	if err := gh.Comment(ctx, job.Issue, body); err != nil {
 		r.log.Error("could not comment on the detected lint gate", "repo", job.Repo, "issue", job.Issue, "err", err)
 	}
 }
 
 // open runs the session, the gate, and the push, and opens the pull request.
 // ok is true when out.detail is the new pull request's URL.
-func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.Job, gate, branch, base string, limits deadlines) (out outcome, ok bool) {
+func (r *Runner) open(ctx context.Context, ws Workspace, gh forge.Forge, job control.Job, gate, branch, base string, limits deadlines) (out outcome, ok bool) {
 	r.report(job, StateWorking, r.harness.Name())
 	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), brief(job, gate)))); err != nil {
 		return failed(err), false
@@ -789,7 +790,7 @@ func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.
 		return failed(err), false
 	}
 	opened := time.Now().UTC().Format(time.RFC3339)
-	url, err := gh.openPR(ctx, title, body, branch, base)
+	url, err := gh.OpenPull(ctx, title, body, branch, base)
 	if err != nil {
 		return failed(err), false
 	}

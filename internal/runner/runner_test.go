@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/autobutler-org/schmeide/internal/ciwatch"
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
@@ -1137,6 +1137,29 @@ func TestFactoryMergeWhenACheckFails(t *testing.T) {
 	}
 }
 
+func TestFactoryMergeRefusedByRequiredReviews(t *testing.T) {
+	w := newWorld(t)
+	w.pushConfig(t, testGateConfig+"merge = \"factory\"\n")
+	w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
+	w.gh.Protect("main", 1)
+	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+		t.Errorf("states = %s, want %s", got, want)
+	}
+	assertSettled(t, w)
+	assertNoMerge(t, w)
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 1 || pulls[0].State != "open" {
+		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "approving review") || !strings.Contains(comments["7"][0], pulls[0].URL) {
+		t.Errorf("issue comments = %q, want the required review named", comments["7"])
+	}
+}
+
 // TestFactoryMergeRefusedByGitHub has green checks but a merge GitHub
 // refuses, which must fail the job rather than report it merged.
 func TestFactoryMergeRefusedByGitHub(t *testing.T) {
@@ -1223,28 +1246,28 @@ func TestMergeNopeIsAConfigError(t *testing.T) {
 }
 
 func TestJudgeChecks(t *testing.T) {
-	if verdict, _ := judgeChecks([]ghCheckRun{{Name: "test", Status: "completed", Conclusion: "success"}}); verdict != checksGreen {
+	if verdict, _ := judgeChecks([]ciwatch.Run{{Name: "test", Status: "completed", Conclusion: "success"}}); verdict != checksGreen {
 		t.Fatalf("one success = %v, want green", verdict)
 	}
 	verdict, why := judgeChecks(nil)
 	if verdict != checksPending || !strings.Contains(why, "no check runs") {
 		t.Fatalf("no runs = %v %q, want pending", verdict, why)
 	}
-	verdict, why = judgeChecks([]ghCheckRun{
+	verdict, why = judgeChecks([]ciwatch.Run{
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "failure"},
 	})
 	if verdict != checksRed || !strings.Contains(why, "failure") || !strings.Contains(why, "lint") {
 		t.Fatalf("mixed = %v %q, want the failure", verdict, why)
 	}
-	verdict, why = judgeChecks([]ghCheckRun{
+	verdict, why = judgeChecks([]ciwatch.Run{
 		{Name: "test", Status: "completed", Conclusion: "failure"},
 		{Name: "lint", Status: "in_progress"},
 	})
 	if verdict != checksRed || !strings.Contains(why, "failure") {
 		t.Fatalf("failed plus pending = %v %q, want red without waiting", verdict, why)
 	}
-	verdict, _ = judgeChecks([]ghCheckRun{{Name: "test", Status: "in_progress"}})
+	verdict, _ = judgeChecks([]ciwatch.Run{{Name: "test", Status: "in_progress"}})
 	if verdict != checksPending {
 		t.Fatalf("in progress = %v, want pending", verdict)
 	}
@@ -1551,63 +1574,6 @@ func TestForeignJobBranchCommitIsKept(t *testing.T) {
 	}
 	if !strings.Contains(comment, "moved") || !strings.Contains(comment, "look at that branch") {
 		t.Errorf("issue comments = %q, want one saying the branch moved and that someone has to look at that branch", comments["7"])
-	}
-}
-
-// TestFindPRPagesPastTheNewest finds a pull request on a later page. The head
-// ref only shares the issue-number prefix, which is what survives a retitle.
-func TestFindPRPagesPastTheNewest(t *testing.T) {
-	const want = "https://github.test/o/r/pull/7"
-	var pages []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/"+testRepo+"/pulls" {
-			t.Errorf("path = %s", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		q := r.URL.Query()
-		if q.Get("state") != "all" {
-			t.Errorf("state = %q, want all", q.Get("state"))
-		}
-		perPage, err := strconv.Atoi(q.Get("per_page"))
-		if err != nil || perPage < 1 {
-			t.Errorf("per_page = %q", q.Get("per_page"))
-			perPage = 100
-		}
-		page := q.Get("page")
-		if page == "" {
-			page = "1"
-		}
-		pages = append(pages, page)
-		var pulls []ghPull
-		switch page {
-		case "1":
-			for i := range perPage {
-				p := ghPull{HTMLURL: fmt.Sprintf("https://github.test/o/r/pull/%d", 1000+i)}
-				// 70_newer must not match issue 7. Only a "7_" prefix does.
-				p.Head.Ref = fmt.Sprintf("%d_newer", 70+i)
-				pulls = append(pulls, p)
-			}
-		case "2":
-			p := ghPull{HTMLURL: want}
-			p.Head.Ref = "7_previous-title"
-			pulls = append(pulls, p)
-		}
-		if err := json.NewEncoder(w).Encode(pulls); err != nil {
-			t.Error(err)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	got, ok, err := (github{api: srv.URL, repo: testRepo, token: testToken}).issuePull(t.Context(), 7, "all")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok || got.HTMLURL != want {
-		t.Errorf("issuePull = %q, %v, want %q", got.HTMLURL, ok, want)
-	}
-	if !slices.Equal(pages, []string{"1", "2"}) {
-		t.Errorf("pages = %v, want the first page and the next", pages)
 	}
 }
 

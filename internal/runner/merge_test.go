@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/autobutler-org/schmeide/internal/forge"
 )
 
 // headWorkspace is a Workspace whose only working method is Head.
@@ -29,6 +31,9 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 		switch r.URL.Path {
 		case "/repos/" + testRepo + "/commits/abc123/check-runs":
 			reply = `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`
+		case "/repos/" + testRepo + "/branches/main/protection":
+			http.Error(w, `{"message":"Branch not protected"}`, http.StatusNotFound)
+			return
 		case "/repos/" + testRepo + "/pulls/9/merge":
 			reply = `{"merged":true}`
 		case "/graphql":
@@ -73,8 +78,8 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 
 func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, true)
-	gh := github{api: srv.URL, repo: testRepo, token: testToken}
-	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "https://github.com/o/r/pull/9", time.Minute, nil)
+	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
+	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
 	if out.state != StateMerged || !strings.Contains(out.comment, "merge queue") {
 		t.Fatalf("outcome = %+v, want merged with a merge queue comment", out)
 	}
@@ -89,8 +94,8 @@ func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 
 func TestMergeWhenGreenMergesWithoutMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, false)
-	gh := github{api: srv.URL, repo: testRepo, token: testToken}
-	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "https://github.com/o/r/pull/9", time.Minute, nil)
+	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
+	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
 	if out.state != StateMerged || strings.Contains(out.comment, "merge queue") {
 		t.Fatalf("outcome = %+v, want merged without a merge queue comment", out)
 	}
@@ -100,5 +105,39 @@ func TestMergeWhenGreenMergesWithoutMergeQueue(t *testing.T) {
 	}
 	if strings.Contains(got, "graphql enqueue") {
 		t.Fatalf("calls = %s, want no enqueue", got)
+	}
+}
+
+func TestMergeWhenGreenRefusesRequiredReviews(t *testing.T) {
+	gh := &forge.Fake{
+		Checks:      []forge.CheckRun{{Name: "ci", Status: "completed", Conclusion: "success"}},
+		Protections: map[string]forge.Protection{"main": {RequiredApprovals: 1}},
+	}
+	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
+	if out.state != StateMergeFailed {
+		t.Fatalf("outcome = %+v, want merge failed", out)
+	}
+	for _, want := range []string{"left the pull request open", "https://github.com/o/r/pull/9", "approving review", "cannot supply"} {
+		if !strings.Contains(out.comment, want) {
+			t.Errorf("comment = %q, want it to name %q", out.comment, want)
+		}
+	}
+	if len(gh.Merged()) != 0 || len(gh.Enqueued()) != 0 {
+		t.Fatalf("merged %v, enqueued %v, want neither", gh.Merged(), gh.Enqueued())
+	}
+}
+
+func TestMergeWhenGreenMergesAnUnprotectedBranch(t *testing.T) {
+	gh := &forge.Fake{
+		Checks: []forge.CheckRun{{Name: "ci", Status: "completed", Conclusion: "success"}},
+		// Protection on another branch does not apply to main.
+		Protections: map[string]forge.Protection{"release": {RequiredApprovals: 2}},
+	}
+	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
+	if out.state != StateMerged {
+		t.Fatalf("outcome = %+v, want merged", out)
+	}
+	if got := gh.Merged(); len(got) != 1 || got[0] != 9 {
+		t.Fatalf("merged = %v, want pull 9", got)
 	}
 }

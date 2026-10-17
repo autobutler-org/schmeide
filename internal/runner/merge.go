@@ -8,6 +8,7 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/ciwatch"
 	"github.com/autobutler-org/schmeide/internal/control"
+	"github.com/autobutler-org/schmeide/internal/forge"
 )
 
 // ciFixLead is the first sentence of a CI fix brief, so a fake harness can
@@ -64,8 +65,8 @@ func (r *Runner) fixCheck(ctx context.Context, ws Workspace, job control.Job, ga
 
 // logTail is the capped end of the failed run's log, or why it could not be
 // read: a check that Actions did not run has no job log.
-func logTail(ctx context.Context, gh github, run ciwatch.Run) string {
-	log, err := gh.jobLog(ctx, run.ID)
+func logTail(ctx context.Context, gh forge.Forge, run ciwatch.Run) string {
+	log, err := gh.JobLog(ctx, run.ID)
 	if err != nil {
 		return "(schmeide could not read the log: " + ciwatch.Tail([]byte(err.Error())) + ")"
 	}
@@ -87,7 +88,7 @@ const (
 // check runs is not green: that stays pending until the wait ends. A
 // completed run whose conclusion is not success is red. A run that has not
 // completed stays pending so a later poll can see it finish.
-func judgeChecks(runs []ghCheckRun) (checkVerdict, string) {
+func judgeChecks(runs []ciwatch.Run) (checkVerdict, string) {
 	if len(runs) == 0 {
 		return checksPending, "the head commit has no check runs, so CI is not green"
 	}
@@ -117,7 +118,7 @@ func judgeChecks(runs []ghCheckRun) (checkVerdict, string) {
 	return checksGreen, ""
 }
 
-func checkName(run ghCheckRun) string {
+func checkName(run ciwatch.Run) string {
 	if run.Name == "" {
 		return "unnamed"
 	}
@@ -150,6 +151,17 @@ func mergeFailed(prURL string, err error) outcome {
 	}
 }
 
+// mergeBlocked says why protection on base makes a factory merge impossible,
+// or nil when it does not. Required approving reviews are the one such
+// rule: the runner cannot approve its own pull request. Required status
+// checks are not: the check wait covers them.
+func mergeBlocked(base string, p forge.Protection) error {
+	if p.RequiredApprovals > 0 {
+		return fmt.Errorf("branch protection on %s requires %d approving review(s), and schmeide cannot supply that review, so it did not merge; a person can approve and merge the pull request", base, p.RequiredApprovals)
+	}
+	return nil
+}
+
 // mergeWhenGreen polls check runs on the pull request's head commit and
 // merges with a merge commit when every one has succeeded. When the base
 // branch has a merge queue, it adds the pull request to the queue instead.
@@ -158,8 +170,19 @@ func mergeFailed(prURL string, err error) outcome {
 // wait. A failed check after that, or a wait of the repo's check_wait that
 // does not end in success, leaves the pull request open. That failure is
 // final: the pull request already exists, and a redelivery would treat it as
-// done.
-func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, prURL string, wait time.Duration, fix ciFix) outcome {
+// done. Before any of that, branch protection on base is read, and a merge
+// it makes impossible fails without waiting.
+func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forge, base, prURL string, wait time.Duration, fix ciFix) outcome {
+	protection, err := gh.Protection(ctx, base)
+	if err != nil {
+		if ctx.Err() != nil {
+			return outcome{}
+		}
+		return mergeFailed(prURL, fmt.Errorf("could not read branch protection on %s: %w", base, err))
+	}
+	if err := mergeBlocked(base, protection); err != nil {
+		return mergeFailed(prURL, err)
+	}
 	sha, err := ws.Head(ctx)
 	if err != nil {
 		return mergeFailed(prURL, err)
@@ -176,7 +199,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 		if ctx.Err() != nil {
 			return outcome{}
 		}
-		runs, err := gh.checkRuns(ctx, sha)
+		runs, err := gh.CheckRuns(ctx, sha)
 		if err != nil {
 			if ctx.Err() != nil {
 				return outcome{}
@@ -192,7 +215,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 			if ctx.Err() != nil {
 				return outcome{}
 			}
-			queued, err := gh.queuedPull(ctx, number)
+			queued, err := gh.QueuedPull(ctx, number)
 			if err != nil {
 				if ctx.Err() != nil {
 					return outcome{}
@@ -200,7 +223,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 				return mergeFailed(prURL, fmt.Errorf("could not read the merge queue: %w", err))
 			}
 			if queued != "" {
-				if err := gh.enqueuePull(ctx, queued); err != nil {
+				if err := gh.EnqueuePull(ctx, queued); err != nil {
 					if ctx.Err() != nil {
 						return outcome{}
 					}
@@ -208,7 +231,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh github, pr
 				}
 				return enqueued(prURL)
 			}
-			if err := gh.mergePull(ctx, number); err != nil {
+			if err := gh.MergePull(ctx, number); err != nil {
 				if ctx.Err() != nil {
 					return outcome{}
 				}
