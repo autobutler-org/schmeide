@@ -60,6 +60,12 @@ run: build ## Build and run the application
 test: ## Run tests
 	$(GO) test ./...
 
+.PHONY: test/e2e
+test/e2e: ## Build the binary and run the end-to-end journeys (build tag e2e)
+	start=$$(date +%s)
+	$(GO) test -tags e2e -count=1 ./internal/e2e
+	echo "internal/e2e took $$(( $$(date +%s) - start ))s"
+
 COVER_OUT ?= ./build/coverage.out
 COVER_HTML ?= ./build/coverage.html
 
