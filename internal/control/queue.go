@@ -40,6 +40,10 @@ const (
 	// issueBucket is the JetStream KV bucket that records, per issue, the
 	// latest job and whether it has finished. Publish dedupes against it.
 	issueBucket = "SCHMEIDE_ISSUES"
+	// StageBucket is the JetStream KV bucket a runner records each job's
+	// stage in, keyed by the job's subject without "schmeide.jobs.". A
+	// restarted runner reads it to resume a job whose pull request is open.
+	StageBucket = "SCHMEIDE_STAGES"
 )
 
 // jobStreamMaxMsgs caps the job stream once the issue bucket has been seeded
@@ -169,6 +173,9 @@ func (q *Queue) openJobs(ctx context.Context) error {
 	if q.issues, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: issueBucket}); err != nil {
 		return fmt.Errorf("create issue bucket: %w", err)
 	}
+	if _, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: StageBucket}); err != nil {
+		return fmt.Errorf("create stage bucket: %w", err)
+	}
 	// Create the stream without a limit if it is new; leave an existing one
 	// as it is until the seed is done.
 	config := jetstream.StreamConfig{Name: JobStream, Subjects: []string{jobSubjectPrefix + ">"}}
@@ -221,10 +228,13 @@ func (q *Queue) seedIssues(ctx context.Context) error {
 // may also use the one shared pool consumer and report a pool job's status.
 // A runner only pulls from that consumer when it was started with --pool.
 // Any steward may read the status stream, which is what `schmeide status`
-// shows: every runner's registration and every job's latest state.
+// shows: every runner's registration and every job's latest state. A steward
+// reads and writes the stage records of its own jobs and of pool jobs.
 func runnerPermissions(steward string) *server.Permissions {
 	consumer := JobStream + "." + ConsumerName(steward)
 	pool := JobStream + "." + ConsumerName(PoolName)
+	stages := "$KV." + StageBucket + "."
+	stageGet := "$JS.API.DIRECT.GET.KV_" + StageBucket + "." + stages
 	return &server.Permissions{
 		Publish: &server.SubjectPermission{Allow: []string{
 			"$JS.API.CONSUMER.CREATE." + consumer + "." + JobFilter(steward),
@@ -241,6 +251,11 @@ func runnerPermissions(steward string) *server.Permissions {
 			TokenSubjectPrefix + steward,
 			"$JS.API.STREAM.INFO." + statusStream,
 			"$JS.API.STREAM.MSG.GET." + statusStream,
+			"$JS.API.STREAM.INFO.KV_" + StageBucket,
+			stages + steward + ".>",
+			stages + PoolName + ".>",
+			stageGet + steward + ".>",
+			stageGet + PoolName + ".>",
 		}},
 		Subscribe: &server.SubjectPermission{Allow: []string{InboxPrefix(steward) + ".>"}},
 	}

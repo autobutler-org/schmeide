@@ -160,6 +160,34 @@ type Runner struct {
 	// and shutdown hand-backs are not counted. Only handle writes it, and
 	// Run works one job at a time.
 	failures map[string]int
+	// stages is control.StageBucket. Nil when the control node has none, and
+	// then no stage is recorded.
+	stages jetstream.KeyValue
+	// stage is how far the current job got. Only the job's goroutine uses it.
+	stage stage
+}
+
+// The stages a job records. A job recorded at stagePROpened or stageReview
+// resumes at its review after a restart. Any earlier stage starts over.
+const (
+	stageWorktreeReady   = "worktree_ready"
+	stageSessionFinished = "session_finished"
+	stageGatePassed      = "gate_passed"
+	stagePROpened        = "pr_opened"
+	stageReview          = "review"
+)
+
+// stage is the record kept in control.StageBucket for one job.
+type stage struct {
+	Stage  string `json:"stage"`
+	Branch string `json:"branch,omitempty"`
+	Base   string `json:"base,omitempty"`
+	// PR is the open pull request's URL, and Opened when it was opened, in
+	// RFC 3339.
+	PR     string `json:"pr,omitempty"`
+	Opened string `json:"opened,omitempty"`
+	// Round is the last review round started.
+	Round int `json:"round,omitempty"`
 }
 
 // Connect opens a connection to the control node's NATS as the steward and
@@ -282,6 +310,12 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 			return fmt.Errorf("subscribe to pool jobs: %w", err)
 		}
 	}
+	// An older control node has no stage bucket. Jobs still run, and GitHub
+	// alone finds an open pull request after a restart.
+	if r.stages, err = js.KeyValue(ctx, control.StageBucket); err != nil {
+		r.log.Warn("the control node keeps no job stages; upgrade it so a restarted runner resumes at review", "err", err)
+		r.stages = nil
+	}
 	host, _ := os.Hostname()
 	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{
 		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool, Version: r.opts.Version,
@@ -345,9 +379,53 @@ func (r *Runner) publish(subject string, v any) {
 }
 
 func (r *Runner) report(job control.Job, state State, detail string) {
+	// review reports each round it starts.
+	if state == StateReviewing && r.stage.PR != "" {
+		s := r.stage
+		s.Stage, s.Round = stageReview, s.Round+1
+		r.mark(job, s)
+	}
 	r.log.Info("job state", "repo", job.Repo, "issue", job.Issue, "state", string(state), "detail", detail)
 	subject := StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
 	r.publish(subject, Status{State: state, Detail: detail})
+}
+
+func stageKey(job control.Job) string {
+	return strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+}
+
+// mark records how far the job got. A record that cannot be written is only
+// logged, since GitHub still finds an open pull request.
+func (r *Runner) mark(job control.Job, s stage) {
+	r.stage = s
+	if r.stages == nil {
+		return
+	}
+	data, _ := json.Marshal(s)
+	// Not the job's context: a stage reached during shutdown is still kept.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := r.stages.Put(ctx, stageKey(job), data); err != nil {
+		r.log.Warn("could not record the job's stage", "repo", job.Repo, "issue", job.Issue, "stage", s.Stage, "err", err)
+	}
+}
+
+// recordedStage returns the job's stage record. A missing or unreadable one
+// is the zero stage, which starts the job from the beginning.
+func (r *Runner) recordedStage(ctx context.Context, job control.Job) stage {
+	var s stage
+	if r.stages == nil {
+		return s
+	}
+	entry, err := r.stages.Get(ctx, stageKey(job))
+	if err == nil {
+		err = json.Unmarshal(entry.Value(), &s)
+	}
+	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		r.log.Warn("could not read the job's stage; GitHub decides where it resumes", "repo", job.Repo, "issue", job.Issue, "err", err)
+		return stage{}
+	}
+	return s
 }
 
 // token asks the control node for the job's GitHub token.
@@ -436,6 +514,11 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		}
 	}
 	r.report(job, out.state, out.detail)
+	if r.stages != nil {
+		if err := r.stages.Delete(ctx, stageKey(job)); err != nil {
+			r.log.Warn("could not clear the job's stage", "repo", job.Repo, "issue", job.Issue, "err", err)
+		}
+	}
 	if err := msg.Ack(); err != nil {
 		r.log.Error("could not acknowledge the job; it will be redelivered", "repo", job.Repo, "issue", job.Issue, "err", err)
 	}
@@ -548,6 +631,17 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 	if err != nil {
 		return failed(err)
 	}
+	r.stage = r.recordedStage(ctx, job)
+	if r.stage.PR == "" {
+		r.stage = stage{}
+	}
+	if !found && r.stage.PR != "" {
+		// GitHub can leave a just-opened pull request out of its list. The
+		// stage record still names it, so no second one is opened.
+		pr = ghPull{HTMLURL: r.stage.PR, State: "open", CreatedAt: r.stage.Opened}
+		pr.Head.Ref, pr.Base.Ref = r.stage.Branch, r.stage.Base
+		found = true
+	}
 	var base string
 	if found {
 		// An outcome posted since the pull request opened means only the
@@ -565,6 +659,9 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 			return outcome{state: StatePROpened, detail: pr.HTMLURL}
 		}
 		branch, base = pr.Head.Ref, pr.Base.Ref
+		if r.stage.PR == "" {
+			r.stage = stage{Stage: stagePROpened, Branch: branch, Base: base, PR: pr.HTMLURL, Opened: pr.CreatedAt}
+		}
 	} else if base, err = gh.baseBranch(ctx, job.Issue); err != nil {
 		// Asked before the worktree exists, so a stacked job starts on the
 		// dependency's branch and the pull request opens against it.
@@ -590,6 +687,9 @@ func (r *Runner) work(ctx context.Context, gh github, job control.Job, token str
 			r.log.Warn("could not clean up the job's worktree", "repo", job.Repo, "issue", job.Issue, "err", err)
 		}
 	}()
+	if !found {
+		r.mark(job, stage{Stage: stageWorktreeReady, Branch: branch, Base: base})
+	}
 	return r.execute(ctx, ws, gh, job, branch, base, pr.HTMLURL)
 }
 
@@ -624,7 +724,11 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 		if spent, err = ws.Count(ctx, fixMessage(job.Issue)); err != nil {
 			return reviewFailed(url, err)
 		}
+		// A started round that is recorded but whose fix never reached the
+		// branch is run again.
+		spent = max(spent, r.stage.Round-1)
 	}
+	r.stage.Round = spent
 	out := r.review(ctx, ws, job, cfg.Gate, url, spent, limits)
 	// The merge policy was read with the gate, before the session ran, so the
 	// session cannot turn factory merge on for itself. Absent and "human"
@@ -660,6 +764,7 @@ func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.
 	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), brief(job, gate)))); err != nil {
 		return failed(err), false
 	}
+	r.mark(job, stage{Stage: stageSessionFinished, Branch: branch, Base: base})
 	title, body := prText(ws.Dir(), job.Issue, job.Title)
 	changed, err := ws.Commit(ctx, title)
 	if err != nil {
@@ -671,13 +776,16 @@ func (r *Runner) open(ctx context.Context, ws Workspace, gh github, job control.
 	if output, err := r.runGate(ctx, ws, limits.gate, gate); err != nil {
 		return r.gateOutcome(job, gate, "", err, output), false
 	}
+	r.mark(job, stage{Stage: stageGatePassed, Branch: branch, Base: base})
 	if err := ws.Push(ctx); err != nil {
 		return failed(err), false
 	}
+	opened := time.Now().UTC().Format(time.RFC3339)
 	url, err := gh.openPR(ctx, title, body, branch, base)
 	if err != nil {
 		return failed(err), false
 	}
+	r.mark(job, stage{Stage: stagePROpened, Branch: branch, Base: base, PR: url, Opened: opened})
 	return outcome{detail: url}, true
 }
 
