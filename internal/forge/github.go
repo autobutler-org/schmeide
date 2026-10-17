@@ -185,11 +185,59 @@ func (g GitHub) CheckRuns(ctx context.Context, sha string) ([]CheckRun, error) {
 	}
 }
 
-// JobLog is answered with a redirect to the log text. ponytail: the read
-// keeps the first 8 MiB, so a longer log loses its tail; stream it if logs
-// grow past that.
+// logReadLimit is how much of a job log JobLog keeps. A var so a test can
+// shrink it.
+var logReadLimit = 8 << 20
+
+// JobLog is answered with a redirect to the log text. It keeps the last
+// logReadLimit bytes, since a failure is reported at the end of a log.
 func (g GitHub) JobLog(ctx context.Context, id int64) ([]byte, error) {
-	return g.send(ctx, http.MethodGet, fmt.Sprintf("/actions/jobs/%d/logs", id), nil)
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	path := fmt.Sprintf("/actions/jobs/%d/logs", id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(g.API, "/")+"/repos/"+g.Repo+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	data, err := readTail(resp.Body, logReadLimit)
+	if err != nil {
+		return nil, fmt.Errorf("github GET %s: %w", path, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, &statusError{code: resp.StatusCode, msg: fmt.Sprintf("github GET %s: %s: %s", path, resp.Status, data)}
+	}
+	return data, nil
+}
+
+// readTail reads r to the end and returns its last limit bytes. The buffer is
+// cut back to limit whenever it passes twice that.
+func readTail(r io.Reader, limit int) ([]byte, error) {
+	var buf []byte
+	chunk := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if len(buf) > 2*limit {
+			buf = append(buf[:0], buf[len(buf)-limit:]...)
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(buf) > limit {
+		buf = buf[len(buf)-limit:]
+	}
+	return buf, nil
 }
 
 // MergePull does not squash or rebase.

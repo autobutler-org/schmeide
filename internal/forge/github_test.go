@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,38 @@ func TestProtectionFailsOnAServerError(t *testing.T) {
 	t.Cleanup(srv.Close)
 	if _, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).Protection(t.Context(), "main"); err == nil {
 		t.Fatal("Protection on a 502 = nil error, want the failure")
+	}
+}
+
+// TestJobLogKeepsTheTail follows the redirect to the log text and keeps the
+// end of a log longer than the limit. A shorter log comes back whole.
+func TestJobLogKeepsTheTail(t *testing.T) {
+	old := logReadLimit
+	logReadLimit = 16
+	t.Cleanup(func() { logReadLimit = old })
+	long := strings.Repeat("head ", 20) + "FAIL: TestThing"
+	for _, tc := range []struct{ body, want string }{
+		{"short log", "short log"},
+		{long, long[len(long)-16:]},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/" + testRepo + "/actions/jobs/9/logs":
+				http.Redirect(w, r, "/log", http.StatusFound)
+			case "/log":
+				fmt.Fprint(w, tc.body)
+			default:
+				t.Errorf("path = %s", r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		got, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).JobLog(t.Context(), 9)
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != tc.want {
+			t.Errorf("JobLog = %q, want %q", got, tc.want)
+		}
 	}
 }
