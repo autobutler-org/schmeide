@@ -27,7 +27,8 @@ again.
 - A review that is not passed after the allowed rounds is final. A fix whose
   gate fails is a gate failure and is final too.
 - A factory merge that does not land is final. The pull request already
-  exists, and a retry would treat the job as done.
+  exists, and a retry would treat the job as done. That includes a check that
+  is still red after its one fix round (see below).
 - A harness session that fails, times out, or makes no changes counts as a
   failed attempt. So do a git error and a GitHub error before the pull request
   is open.
@@ -39,6 +40,10 @@ it. The in-memory counter does not treat it specially.
 
 A pull request already open on a branch starting with `<issue number>_`, open
 or closed, keeps a retried job from opening a second one.
+
+After a runner restart, a job whose stage record names an open pull request
+resumes at review and does not open a second pull request. A job with no pull
+request starts over.
 
 ## Deadlines
 
@@ -95,9 +100,15 @@ After review passes:
   open. A person merges it.
 - With `merge = "factory"`, the runner waits for the head commit's check runs
   to succeed, then merges with a merge commit. The wait is `check_wait` from the
-  repo config, default two minutes. No check runs is not green. A failed check,
-  or a wait that ends without success, comments on the issue and leaves the
-  pull request open.
+  repo config, default two minutes. No check runs is not green.
+- When the base branch has a merge queue, green checks add the pull request to
+  the queue instead of merging it. The job is reported merged once it is
+  queued.
+- The first red check during the wait runs one writer fix round, when a review
+  round remains. The round counts against `--max-review-rounds`. Polling then
+  continues on the new head inside the same wait. There is no second fix round.
+- A check that is still red, or a wait that ends without success, comments on
+  the issue and leaves the pull request open. That failure is final.
 
 ## Not built
 
