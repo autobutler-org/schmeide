@@ -218,6 +218,13 @@ Claude Code (`internal/runner/cli.go`, `internal/runner/runner.go`). A
 missing or logged-out harness is skipped when another one is ready. Doctor
 fails the harness check only when every harness fails (`internal/doctor`).
 
+Every session starts from a permission floor. `--claude-args` and
+`--grok-args` both default to `--permission-mode acceptEdits`. The runner
+refuses to start when either contains `--dangerously-skip-permissions` or a
+`--permission-mode` other than `acceptEdits`, unless
+`--allow-dangerous-harness-args` is set. An OS sandbox is not part of this
+floor. See [harness permissions](permissions.md).
+
 ### Isolation
 
 Each job runs in its own git worktree on the runner's host, using the machine's
