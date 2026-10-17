@@ -12,6 +12,7 @@ import (
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/repoconfig"
+	"github.com/autobutler-org/schmeide/internal/repomap"
 )
 
 const (
@@ -223,7 +224,9 @@ func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Jo
 }
 
 // session is one fresh harness session in the job's worktree. A workspace
-// with Go caches shares them with the session.
+// with Go caches shares them with the session. The prompt is the brief plus
+// the worktree's repo map when that map is not empty. Every session,
+// including the reviewer, goes through here.
 func (r *Runner) session(dir, prompt string) harness.Request {
 	env := harnessEnv(os.Environ(), r.opts.PassEnv)
 	if ws, ok := openWorkspaces.Load(dir); ok {
@@ -233,8 +236,18 @@ func (r *Runner) session(dir, prompt string) harness.Request {
 	}
 	return harness.Request{
 		Dir:    dir,
-		Prompt: prompt,
+		Prompt: promptWithMap(dir, prompt),
 		Env:    env,
 		Output: r.opts.Output,
 	}
+}
+
+// promptWithMap appends dir's repo map to prompt. An empty map leaves prompt
+// unchanged, and so does a directory whose map cannot be read.
+func promptWithMap(dir, prompt string) string {
+	text, err := repomap.Map(dir)
+	if err != nil || text == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + text
 }

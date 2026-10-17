@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,5 +85,49 @@ func TestReviewStaysOnWriterWhenNoOtherHarnessIsReady(t *testing.T) {
 	}
 	if ps := prompts(writer); len(ps) != 2 || !strings.Contains(ps[0], reviewLead) || strings.Contains(ps[1], reviewLead) {
 		t.Errorf("writer harness ran %q, want the review then the fix session", ps)
+	}
+}
+
+// TestSessionPromptIncludesTrackedFile checks the prompt session builds for
+// every harness session, including the reviewer.
+func TestSessionPromptIncludesTrackedFile(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "config", "user.email", "dev@example.com")
+	runGit(t, dir, "config", "user.name", "Dev")
+	body := "package p\n\nfunc Hello() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "mapped.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "mapped.go")
+	runGit(t, dir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "add mapped.go")
+
+	const brief = "Fix the widget."
+	req := (&Runner{}).session(dir, brief)
+	if !strings.Contains(req.Prompt, "mapped.go") {
+		t.Fatalf("prompt = %q, want the tracked Go file", req.Prompt)
+	}
+	if !strings.Contains(req.Prompt, brief) {
+		t.Fatalf("prompt = %q, want the brief", req.Prompt)
+	}
+}
+
+func TestSessionPromptUnchangedWithoutAMap(t *testing.T) {
+	const brief = "Fix the widget."
+	req := (&Runner{}).session(t.TempDir(), brief)
+	if req.Prompt != brief {
+		t.Fatalf("prompt = %q, want the brief alone", req.Prompt)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
