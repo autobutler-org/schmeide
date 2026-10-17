@@ -170,6 +170,14 @@ func TestContract(t *testing.T) {
 	if pulls, _ := s.Snapshot(); pulls[0].State != "closed" || !pulls[0].Merged {
 		t.Errorf("merged pull = %+v, want closed and merged", pulls[0])
 	}
+	_, got = call(t, s, http.MethodGet, "/pulls?state=closed", "")
+	closed := list(t, "closed pulls", got, 2)
+	if m := hasKeys(t, "merged pull", closed[0], "merged_at"); m["merged_at"] == nil {
+		t.Errorf("merged pull = %v, want merged_at set", m)
+	}
+	if m := hasKeys(t, "unmerged pull", closed[1], "merged_at"); m["merged_at"] != nil {
+		t.Errorf("unmerged pull = %v, want merged_at null", m)
+	}
 }
 
 func TestJobLogs(t *testing.T) {

@@ -73,7 +73,7 @@ func (f *stackForge) MergePull(_ context.Context, number int) error {
 	if p.Base.Ref != "main" {
 		return fmt.Errorf("pull %d targets %s, not main", number, p.Base.Ref)
 	}
-	p.State = "closed"
+	p.State, p.MergedAt = "closed", time.Now().UTC().Format(time.RFC3339)
 	for i := range f.pulls {
 		if !f.keep && f.pulls[i].Base.Ref == p.Head.Ref {
 			f.pulls[i].Base.Ref = "main"
@@ -214,7 +214,8 @@ func (refusingForge) MergePull(context.Context, int) error {
 }
 
 // stackWorkspace is a headWorkspace that records restacks. merged is what
-// BaseMerged reports, and a non-nil restackErr fails every restack.
+// BaseMerged reports, a non-nil restackErr fails every restack, and a
+// non-nil restacked runs after each one.
 type stackWorkspace struct {
 	headWorkspace
 
@@ -222,12 +223,16 @@ type stackWorkspace struct {
 	merged     bool
 	restackErr error
 	restacks   []string
+	restacked  func()
 }
 
 func (w *stackWorkspace) Restack(_ context.Context, onto string) (bool, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.restacks = append(w.restacks, onto)
+	if w.restacked != nil {
+		w.restacked()
+	}
 	return w.restackErr == nil, w.restackErr
 }
 
@@ -255,6 +260,34 @@ func TestMergeWhenGreenRetargetsAndRebasesAfterTheBottomMerges(t *testing.T) {
 	}
 	if got := ws.Restacks(); !slices.Equal(got, []string{"main"}) {
 		t.Errorf("restacks = %v, want a rebase onto main", got)
+	}
+	if got := gh.Merged(); !slices.Equal(got, []int{2}) {
+		t.Fatalf("merged %v, want [2]", got)
+	}
+}
+
+func TestMergeWhenGreenRetargetsWhenTheBottomIsRebasedThenMerged(t *testing.T) {
+	// Pull 1 is open on the first poll. Before the next one it is rebased
+	// and merged, its branch kept, so the base pull 2 last built on is not
+	// in main: only the pull request says it merged.
+	gh := newStackForge(0, "success")
+	gh.keep = true
+	gh.pull(2, "1_x")
+	ws := &stackWorkspace{}
+	ws.restacked = func() {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		gh.pulls[0].State, gh.pulls[0].MergedAt = "closed", "2026-10-16T00:00:00Z"
+	}
+	out := (&Runner{}).mergeWhenGreen(t.Context(), ws, gh, 2, "1_x", gh.pulls[1].HTMLURL, time.Minute, nil)
+	if out.state != StateMerged {
+		t.Fatalf("outcome = %+v, want merged", out)
+	}
+	if got := gh.base(2); got != "main" {
+		t.Errorf("pull 2 targets %s, want main", got)
+	}
+	if got := ws.Restacks(); !slices.Equal(got, []string{"1_x", "main"}) {
+		t.Errorf("restacks = %v, want a rebase onto 1_x, then onto main", got)
 	}
 	if got := gh.Merged(); !slices.Equal(got, []int{2}) {
 		t.Fatalf("merged %v, want [2]", got)

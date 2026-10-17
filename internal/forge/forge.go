@@ -48,7 +48,10 @@ type Pull struct {
 	HTMLURL   string `json:"html_url"`
 	State     string `json:"state"`
 	CreatedAt string `json:"created_at"`
-	Head      struct {
+	// MergedAt is when the pull request merged, empty when it has not. The
+	// pull request list carries it; it does not carry "merged".
+	MergedAt string `json:"merged_at"`
+	Head     struct {
 		Ref string `json:"ref"`
 	} `json:"head"`
 	Base struct {

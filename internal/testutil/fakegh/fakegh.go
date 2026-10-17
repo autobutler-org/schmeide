@@ -129,6 +129,10 @@ func (p Pull) reply() map[string]any {
 	if state == "" {
 		state = "open"
 	}
+	var mergedAt any
+	if p.Merged {
+		mergedAt = time.Date(2026, 1, 2, 0, 0, p.Number, 0, time.UTC).Format(time.RFC3339)
+	}
 	return map[string]any{
 		"number":     p.Number,
 		"title":      p.Title,
@@ -136,6 +140,7 @@ func (p Pull) reply() map[string]any {
 		"html_url":   p.URL,
 		"state":      state,
 		"merged":     p.Merged,
+		"merged_at":  mergedAt,
 		"created_at": time.Date(2026, 1, 1, 0, 0, p.Number, 0, time.UTC).Format(time.RFC3339),
 		"head":       map[string]string{"ref": p.Head},
 		"base":       map[string]string{"ref": p.Base},

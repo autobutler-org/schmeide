@@ -31,3 +31,18 @@ func TestFakeCommentsSince(t *testing.T) {
 		t.Error("Comments since yesterday: no error, want one")
 	}
 }
+
+// TestFakeMergePullMarksItMerged closes the merged pull request and stamps
+// when it merged, as the pull request list then shows it.
+func TestFakeMergePullMarksItMerged(t *testing.T) {
+	f := &Fake{}
+	if _, err := f.OpenPull(t.Context(), "t", "b", "7_x", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.MergePull(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok, err := f.IssuePull(t.Context(), 7, "closed"); err != nil || !ok || p.MergedAt == "" {
+		t.Errorf("IssuePull = %+v, %v, %v; want closed and merged", p, ok, err)
+	}
+}

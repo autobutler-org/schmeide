@@ -338,9 +338,13 @@ func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, 
 				return err
 			}
 		} else {
-			merged, err := ws.BaseMerged(ctx, trunk)
-			if err != nil {
-				return fmt.Errorf("could not tell whether %s merged into %s: %w", base, trunk, err)
+			// The pull request says it merged even when it was rebased
+			// first, which leaves the base this branch built on off trunk.
+			merged := ok && parent.MergedAt != ""
+			if !merged {
+				if merged, err = ws.BaseMerged(ctx, trunk); err != nil {
+					return fmt.Errorf("could not tell whether %s merged into %s: %w", base, trunk, err)
+				}
 			}
 			if !merged {
 				return fmt.Errorf("the pull request is stacked on %s, whose pull request for issue #%d closed without merging into %s, so schmeide did not merge it; a person can retarget it to %s", base, below, trunk, trunk)

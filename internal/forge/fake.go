@@ -136,6 +136,10 @@ func (f *Fake) MergePull(_ context.Context, number int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.merged = append(f.merged, number)
+	if number >= 1 && number <= len(f.Pulls) {
+		f.Pulls[number-1].State = "closed"
+		f.Pulls[number-1].MergedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	return nil
 }
 

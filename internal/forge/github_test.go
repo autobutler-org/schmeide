@@ -51,7 +51,7 @@ func TestFindPRPagesPastTheNewest(t *testing.T) {
 				pulls = append(pulls, p)
 			}
 		case "2":
-			p := Pull{HTMLURL: want}
+			p := Pull{HTMLURL: want, MergedAt: "2026-10-16T00:00:00Z"}
 			p.Head.Ref = "7_previous-title"
 			pulls = append(pulls, p)
 		}
@@ -65,8 +65,8 @@ func TestFindPRPagesPastTheNewest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || got.HTMLURL != want {
-		t.Errorf("IssuePull = %q, %v, want %q", got.HTMLURL, ok, want)
+	if !ok || got.HTMLURL != want || got.MergedAt != "2026-10-16T00:00:00Z" {
+		t.Errorf("IssuePull = %q merged at %q, %v, want %q merged", got.HTMLURL, got.MergedAt, ok, want)
 	}
 	if !slices.Equal(pages, []string{"1", "2"}) {
 		t.Errorf("pages = %v, want the first page and the next", pages)
