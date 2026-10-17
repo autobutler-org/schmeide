@@ -13,7 +13,7 @@ New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull requ
 - `schmeide init` writes a repo config and a control node config in this directory.
 - `schmeide completion` prints a shell completion script for bash, zsh, or fish.
 
-Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment. The control node's `--config` file is one `name = value` line per setting. Terms are defined in [docs/GLOSSARY.md](docs/GLOSSARY.md), and `schmeide --help` links there.
+Run `schmeide --help` or `schmeide <command> --help` for that command's flags. Every flag has a `SCHMEIDE_<NAME>` environment variable, with hyphens in the flag turned into underscores (`SCHMEIDE_WEBHOOK_SECRET` for `--webhook-secret`). On `control`, a flag wins over the environment, which wins over the `--config` file. On `runner` and `doctor`, a flag wins over the environment, and an environment value that does not parse for its flag (a duration, an integer, or a boolean) stops the command with exit code 2 and a message naming the variable. The control node's `--config` file is one `name = value` line per setting. Terms are defined in [docs/GLOSSARY.md](docs/GLOSSARY.md), and `schmeide --help` links there.
 
 ## Install
 

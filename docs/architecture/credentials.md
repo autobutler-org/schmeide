@@ -129,8 +129,8 @@ the harness's own login under `HOME`.
 back to `os.Environ()` for the gate. The gate therefore sees the runner's whole environment, including
 `SCHMEIDE_NATS_TOKEN` when the token was passed that way, and any agent API keys. The gate is a command from the
 repository's base branch, but it runs code the session just wrote (tests, build scripts), so a session can reach
-the runner's environment through the gate. This is a known gap. The comment on `baseEnv` in `env.go` says the base
-list applies to gate commands as well; the code does not pass it. Until it does, run the runner as a user that
+the runner's environment through the gate. This is a known gap (#111). The comment on `baseEnv` in `env.go` says the
+base list does not apply to the gate. Until the gate gets a filtered environment, run the runner as a user that
 holds nothing else worth taking, and pass the NATS token in a way the gate cannot read if that matters.
 
 Git commands get only the token and identity variables (`GIT_TERMINAL_PROMPT`, `GIT_CONFIG_*`, `GIT_AUTHOR_*`,

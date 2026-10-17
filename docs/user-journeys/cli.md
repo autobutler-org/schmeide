@@ -111,6 +111,9 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 - `SCHMEIDE_TRUST` is not a flag. It is read by the runner directly
   (JN-SETUP-023).
 - An empty variable counts as unset.
+- On `runner` and `doctor`, a variable whose value does not parse for its
+  flag's type (a duration, an integer, a boolean) is a usage error, exit code
+  2, unless the flag was also given (JN-CLI-006).
 - Covered by `TestRun` (`set SCHMEIDE_GITHUB_APP_ID` in the error text) and
   `TestParseControl`.
 
@@ -145,20 +148,48 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 
 1. Run `SCHMEIDE_NATS_URL=nats://127.0.0.1:1 schmeide doctor --steward octocat`.
 2. Run the same with `--nats-url nats://127.0.0.1:4222` added.
+3. Run `SCHMEIDE_ACK_WAIT="5 minutes" schmeide runner --steward octocat`.
+4. Run `SCHMEIDE_JSON=maybe schmeide doctor`.
+5. Run step 3 again with `--ack-wait 5m` added.
 
 **Expected result:**
 
 - Step 1 tries `nats://127.0.0.1:1`. Step 2 tries `nats://127.0.0.1:4222`: the
   flag wins.
+- Step 3: exit code 2, nothing is started, and stderr is:
+
+  ```text
+  schmeide runner: SCHMEIDE_ACK_WAIT is "5 minutes", which is not a duration; set it to one such as 5m, unset it, or pass --ack-wait
+  Run 'schmeide runner --help' for usage.
+  ```
+
+- Step 4: exit code 2, no checks run, and stderr is:
+
+  ```text
+  schmeide doctor: SCHMEIDE_JSON is "maybe", which is not a boolean; set it to true or false, unset it, or pass --json
+  Run 'schmeide doctor --help' for usage.
+  ```
+
+- Step 5: the runner starts with an ack wait of 5m. A given flag means its
+  variable is not read, so the bad value is not an error.
 
 **Notes:**
 
 - These commands take no config file.
-- An environment value that does not parse for its flag (for example
-  `SCHMEIDE_MAX_ATTEMPTS=lots`) is ignored, and the flag's default is used. A
-  flag value that does not parse is an error, exit code 2.
-- Implemented in `runner.ParseFlags` (`internal/runner/cli.go`). No automated
-  test for the ignored bad value.
+- The message depends on the flag's type. A duration flag says "which is not a
+  duration; set it to one such as 5m". An integer flag, such as
+  `--max-attempts`, says "which is not an integer; set it to one such as 3". A
+  boolean flag, such as `--pool`, says "which is not a boolean; set it to true
+  or false". String flags accept any value.
+- When several variables are bad, each gets its own line, in flag order.
+- A flag value that does not parse is also an error, exit code 2 (JN-CLI-002).
+- `control` takes every setting as a string and checks `--webhook-rate` and
+  `--delivery-ttl` itself, with exit code 2 (JN-SETUP-009). `status` takes only
+  strings.
+- Implemented in `runner.ParseFlags` (`internal/runner/cli.go`), which `runner`
+  and `doctor` share. Covered by `runner.TestMainRejectsUnparsableEnv`,
+  `runner.TestParseFlagsFlagWinsOverUnparsableEnv`, and
+  `doctor.TestMainRejectsUnparsableEnv`.
 
 ---
 
@@ -311,7 +342,13 @@ progress.
 
 **Notes:**
 
-- Covered by `TestCompletion` and `TestCompletionUnknownShell`.
+- All three scripts list every command `run` in `cmd/schmeide/main.go`
+  dispatches: `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version`. `TestCompletionListsEveryCommand` reads the commands from
+  that switch, so a command added to the dispatcher and not to every script
+  fails it.
+- Covered by `TestCompletion`, `TestCompletionListsEveryCommand`, and
+  `TestCompletionUnknownShell`.
 
 ---
 
@@ -375,4 +412,7 @@ already exists.
 
 - `--json` writes `[{"name", "group", "status", "detail"}, ...]` to stdout.
   `status` is `ok`, `fail`, or `skip`.
-- Covered by `TestMainJSON` and `TestMainHelpAndBadFlag`.
+- A `SCHMEIDE_<NAME>` value that does not parse for its flag is a usage error,
+  exit code 2 (JN-CLI-006).
+- Covered by `TestMainJSON`, `TestMainHelpAndBadFlag`, and
+  `TestMainRejectsUnparsableEnv`.
