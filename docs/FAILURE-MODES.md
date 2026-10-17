@@ -112,6 +112,21 @@ runner therefore has to remain connected to the control node throughout a
 long session. If the process dies or heartbeats stop, JetStream redelivers the
 job after the lease expires.
 
+The lease belongs to the shared consumer, not to each runner. The first runner
+to start for a steward (or the first `--pool` runner) creates the consumer with
+its `--ack-wait`, and later runners use it unchanged. A runner whose
+`--ack-wait` differs logs `a shared job consumer already has another ack wait;
+heartbeating at the consumer's` and heartbeats every third of the consumer's
+lease, so a mismatch cannot cause a redelivery of a job that is still being
+worked. To change the lease, delete the consumer (`runner-<steward>` or
+`runner-_pool` on `SCHMEIDE_JOBS`) with the `nats` CLI while no runner holds a
+job from it, then start a runner with the new `--ack-wait`.
+
+JetStream redelivers without limit: no `MaxDeliver` is set. The runner's
+attempt count is what ends retries, because it does not count hand-backs for a
+missing token, for shutdown, or for a dead runner, and a job stopped by
+`MaxDeliver` would end with no status and no issue comment.
+
 `--stuck-after` defaults to 3 hours and is a separate no-progress budget. Each
 reported job-state change resets it. If the budget expires, the runner cancels
 the work, stops heartbeats, and Naks the delivery so another runner can take

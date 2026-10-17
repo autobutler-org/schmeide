@@ -1183,6 +1183,7 @@ func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
 		TokenSubjectPrefix + "octocat",
 		TokenSubjectPrefix + PoolName,
 		RegisterSubjectPrefix + "octocat",
+		RegisterSubject("octocat", "desk"),
 		StatusSubjectPrefix + "octocat.7.1",
 		jobSubjectPrefix + "hubot.7.1",
 		jobSubjectPrefix + PoolName + ".7.1",
@@ -1205,5 +1206,68 @@ func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("hubot published to %s", subject)
 		}
+	}
+}
+
+// TestUnsignedRequestNeverReachesTheReplayCache pins the intake order: the
+// signature is checked before the delivery id is looked up, so a request
+// without the secret learns nothing from the cache and gets no 2xx.
+func TestUnsignedRequestNeverReachesTheReplayCache(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	q := startQueue(t)
+	var published int
+	h := webhookHandler(q, WebhookPolicy{RequestsPerMinute: 100, DeliveryTTL: 10 * time.Minute}, &published)
+	if got := deliver(t, h, delivery{body: ready, signature: sign(ready), id: "deliv-1"}); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", got, http.StatusAccepted)
+	}
+	for _, signature := range []string{"", "sha256=abcd"} {
+		if got := deliver(t, h, delivery{body: ready, signature: signature, id: "deliv-1"}); got != http.StatusUnauthorized {
+			t.Errorf("replayed id with signature %q: status = %d, want %d", signature, got, http.StatusUnauthorized)
+		}
+	}
+	if published != 1 {
+		t.Errorf("Publish calls = %d, want 1", published)
+	}
+}
+
+// TestReplayCountsAgainstTheRateLimit pins that the rate limit runs before
+// the replay check, so repeating a delivery id is not a way around it.
+func TestReplayCountsAgainstTheRateLimit(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	now := time.Now()
+	q := startQueue(t)
+	h := webhookHandler(q, WebhookPolicy{
+		RequestsPerMinute: 1,
+		DeliveryTTL:       10 * time.Minute,
+		now:               func() time.Time { return now },
+	}, nil)
+	d := delivery{body: ready, signature: sign(ready), id: "deliv-1"}
+	if got := deliver(t, h, d); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := deliver(t, h, d); got != http.StatusTooManyRequests {
+		t.Errorf("replay over the limit: status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+// TestUnsignedRequestsDoNotUseTheRateBudget pins that the signature is checked
+// before the rate limit, so a flood without the secret cannot crowd out a
+// genuine delivery.
+func TestUnsignedRequestsDoNotUseTheRateBudget(t *testing.T) {
+	ready := payload(t, "issues_assigned_labeled.json")
+	now := time.Now()
+	q := startQueue(t)
+	h := webhookHandler(q, WebhookPolicy{
+		RequestsPerMinute: 1,
+		DeliveryTTL:       10 * time.Minute,
+		now:               func() time.Time { return now },
+	}, nil)
+	for range 3 {
+		if got := deliver(t, h, delivery{body: ready, id: "flood"}); got != http.StatusUnauthorized {
+			t.Fatalf("unsigned status = %d, want %d", got, http.StatusUnauthorized)
+		}
+	}
+	if got := deliver(t, h, delivery{body: ready, signature: sign(ready), id: "deliv-1"}); got != http.StatusAccepted {
+		t.Errorf("signed status after an unsigned flood = %d, want %d", got, http.StatusAccepted)
 	}
 }

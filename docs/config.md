@@ -181,7 +181,7 @@ serves:
 
 | Flag | Default | Overridden by |
 | --- | --- | --- |
-| `--ack-wait` | `5m` | never; the runner heartbeats every third of it |
+| `--ack-wait` | `5m` | the shared consumer's `AckWait`, when another runner created it first; the runner heartbeats every third of the lease in force |
 | `--stuck-after` | `3h` | never; a state change resets it |
 | `--gate-timeout` | `30m` | `gate_timeout` |
 | `--session-timeout` | `2h` | `session_timeout` |
@@ -198,6 +198,13 @@ flag. They come from the repo config alone.
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
 the longer no-progress budget: when it expires the runner cancels the work and
 Naks the job for redelivery. They are operator settings, not repository keys.
+
+`ack-wait` is applied only by the runner that creates a consumer. All of a
+steward's runners share one consumer, and all `--pool` runners share another,
+so give every runner that shares a consumer the same `--ack-wait`. A runner
+whose value differs logs a warning and heartbeats at the consumer's lease. See
+[FAILURE-MODES.md](FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs) for how
+to change the lease.
 
 ## Errors
 
