@@ -20,7 +20,7 @@ func (headWorkspace) Head(context.Context) (string, error) { return "abc123", ni
 
 func (headWorkspace) Restack(context.Context, string) (bool, error) { return false, nil }
 
-func (headWorkspace) BaseMerged(context.Context, string) (bool, error) { return true, nil }
+func (headWorkspace) BaseMerged(context.Context, string, int) (bool, error) { return true, nil }
 
 // mergeServer is a GitHub API with green checks on abc123 and pull request
 // 9. queue says whether its base branch has a merge queue. It records the
