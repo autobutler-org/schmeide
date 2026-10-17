@@ -91,13 +91,17 @@ The full key list is in [docs/config.md](docs/config.md). See `internal/repoconf
 Requires Go and `make`; the Go toolchain version pinned in `go.mod` is downloaded automatically.
 
 ```sh
-make build   # build ./build/schmeide
-make test    # run tests
-make check   # lint (golangci-lint, applies autofixes)
-make format  # format
-make help    # list all targets
+make build       # build ./build/schmeide
+make test        # run tests
+make test/race   # run tests with the race detector (PKGS=./internal/control to pick some)
+make check       # format, tidy, vet, lint, tests and script tests, without changing files
+make check/vuln  # govulncheck with the go on PATH (needs network)
+make format      # format
+make help        # list all targets
 ```
 
 `make test/e2e` builds the binary and runs the end-to-end journeys in `internal/e2e`, which need the `e2e` build tag, so `go test ./...` skips them.
+
+CI (`.github/workflows/ci.yml`) runs on pull requests and on pushes to `main`: lint, the race suite with a coverage report that fails a pull request whose total drops more than one point below `main`'s, govulncheck, the end-to-end journeys, and `make test/scripts`, which runs every `scripts/*_test.sh`.
 
 Seeded from [exokomodo/template-golang](https://github.com/exokomodo/template-golang).
