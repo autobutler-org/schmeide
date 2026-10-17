@@ -7,6 +7,10 @@ implements a decision, or says the code is not updated in this change.
 Anything not yet decided is listed under [Open decisions](#open-decisions),
 not stated as fact.
 
+This document records decisions. How the code is laid out today is in
+[ARCHITECTURE.md](../ARCHITECTURE.md) and [architecture/README.md](architecture/README.md), and what
+schmeide does feature by feature is in [user-journeys/README.md](user-journeys/README.md).
+
 ## Purpose
 
 schmeide is the software factory for autobutler-org: it takes a GitHub issue to

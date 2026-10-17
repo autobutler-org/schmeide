@@ -2,7 +2,7 @@
 
 The autobutler-org software factory. A control node and a runner take an assigned, ready-labeled GitHub issue to an opened pull request, then review the change. The default is that a person presses merge.
 
-New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull request. See [docs/design.md](docs/design.md) for the agreed design, and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to run a control node. The first slice, the AI review stage, merging, the Grok CLI harness, pool fallback, and stacked pull requests are done. `--pool` defaults off, and a runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. Stacked pull requests have shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers fail the job. The runner comments on the issue that only one open dependency is supported and does not open a pull request. Container isolation is not built.
+New here? Follow the [quickstart](docs/QUICKSTART.md) from zero to one pull request. See [docs/design.md](docs/design.md) for the agreed design, and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to run a control node. See [ARCHITECTURE.md](ARCHITECTURE.md) for how it is built and [docs/user-journeys/README.md](docs/user-journeys/README.md) for what it does end to end. The first slice, the AI review stage, merging, the Grok CLI harness, pool fallback, and stacked pull requests are done. `--pool` defaults off, and a runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. Stacked pull requests have shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers fail the job. The runner comments on the issue that only one open dependency is supported and does not open a pull request. Container isolation is not built.
 
 ## Commands
 
@@ -90,10 +90,12 @@ The full key list is in [docs/config.md](docs/config.md). See `internal/repoconf
 
 Requires Go and `make`; the Go toolchain version pinned in `go.mod` is downloaded automatically.
 
+Contributors and coding agents read [AGENTS.md](AGENTS.md).
+
 ```sh
 make build   # build ./build/schmeide
 make test    # run tests
-make check   # lint (golangci-lint, applies autofixes)
+make check   # format, tidy, vet, and lint checks, then the tests; changes no files
 make format  # format
 make help    # list all targets
 ```
