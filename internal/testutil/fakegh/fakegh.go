@@ -56,6 +56,12 @@ var mergeErrors = map[int]string{
 
 const mergeDocs = "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request"
 
+// comment is an issue comment and when it was created.
+type comment struct {
+	body    string
+	created time.Time
+}
+
 // Server is the fake. Start one with New.
 type Server struct {
 	// URL is the API base URL to hand to the client.
@@ -68,7 +74,7 @@ type Server struct {
 	mu       sync.Mutex
 	onPR     func()
 	pulls    []Pull
-	comments map[string][]string // by issue number
+	comments map[string][]comment // by issue number
 	calls    []string
 	checks   []CheckRun
 	logs     map[int64]string // by job ID
@@ -86,7 +92,7 @@ type Server struct {
 // closed when the test ends.
 func New(t testing.TB, repo, token string) *Server {
 	owner, _, _ := strings.Cut(repo, "/")
-	s := &Server{t: t, owner: owner, repo: repo, token: token, comments: map[string][]string{}}
+	s := &Server{t: t, owner: owner, repo: repo, token: token, comments: map[string][]comment{}}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	s.URL = srv.URL
@@ -176,11 +182,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch r.Method {
 		case http.MethodGet:
-			// ponytail: since is ignored; every comment counts as new.
+			// since keeps the comments created at or after it, as GitHub
+			// does for updated_at; the fake never edits a comment.
+			var after time.Time
+			if since := r.URL.Query().Get("since"); since != "" {
+				t, err := time.Parse(time.RFC3339, since)
+				if err != nil {
+					writeError(w, http.StatusUnprocessableEntity, "Validation Failed", "https://docs.github.com/rest/issues/comments#list-issue-comments")
+					return
+				}
+				after = t
+			}
 			found := []map[string]any{}
-			for i, body := range s.comments[parts[1]] {
+			for i, c := range s.comments[parts[1]] {
+				if c.created.Before(after) {
+					continue
+				}
 				// Every comment here is the app's own, so each is a bot's.
-				found = append(found, map[string]any{"id": i + 1, "body": body, "user": map[string]string{"type": "Bot"}})
+				found = append(found, map[string]any{"id": i + 1, "body": c.body, "user": map[string]string{"type": "Bot"}})
 			}
 			writeJSON(w, http.StatusOK, page(r, found))
 		case http.MethodPost:
@@ -191,7 +210,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusUnprocessableEntity, "Validation Failed", "https://docs.github.com/rest/issues/comments#create-an-issue-comment")
 				return
 			}
-			s.comments[parts[1]] = append(s.comments[parts[1]], c.Body)
+			s.comments[parts[1]] = append(s.comments[parts[1]], comment{body: c.Body, created: time.Now()})
 			writeJSON(w, http.StatusCreated, map[string]any{"id": len(s.comments[parts[1]]), "body": c.Body, "user": map[string]string{"type": "Bot"}})
 		default:
 			s.unexpected(w, r)
@@ -360,11 +379,16 @@ func (s *Server) SeedPull(p Pull) Pull {
 	return s.add(p)
 }
 
-// SetComments replaces the comments on issue.
+// SetComments replaces the comments on issue, all created now.
 func (s *Server) SetComments(issue int, bodies ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.comments[strconv.Itoa(issue)] = slices.Clone(bodies)
+	now := time.Now()
+	cs := make([]comment, len(bodies))
+	for i, body := range bodies {
+		cs[i] = comment{body: body, created: now}
+	}
+	s.comments[strconv.Itoa(issue)] = cs
 }
 
 // SetChecks sets the check runs every commit has.
@@ -389,8 +413,10 @@ func (s *Server) Snapshot() ([]Pull, map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	comments := map[string][]string{}
-	for k, v := range s.comments {
-		comments[k] = slices.Clone(v)
+	for k, cs := range s.comments {
+		for _, c := range cs {
+			comments[k] = append(comments[k], c.body)
+		}
 	}
 	return slices.Clone(s.pulls), comments
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Fake is an in-memory Forge for tests. It makes no network calls. Set its
@@ -29,12 +30,18 @@ type Fake struct {
 	Protections map[string]Protection
 
 	mu       sync.Mutex
-	comments map[int][]Comment
+	comments map[int][]stamped
 	merged   []int
 	enqueued []string
 }
 
 var _ Forge = (*Fake)(nil)
+
+// stamped is a comment and when Comment stored it.
+type stamped struct {
+	Comment
+	at time.Time
+}
 
 func (f *Fake) DefaultBranch(context.Context) (string, error) {
 	if f.Default == "" {
@@ -67,24 +74,39 @@ func (f *Fake) OpenPull(_ context.Context, _, _, head, base string) (string, err
 	return p.HTMLURL, nil
 }
 
-// Comment stores body as a bot's comment.
+// Comment stores body as a bot's comment, stamped with the time now.
 func (f *Fake) Comment(_ context.Context, issue int, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.comments == nil {
-		f.comments = map[int][]Comment{}
+		f.comments = map[int][]stamped{}
 	}
-	c := Comment{Body: body}
+	c := stamped{Comment: Comment{Body: body}, at: time.Now()}
 	c.User.Type = "Bot"
 	f.comments[issue] = append(f.comments[issue], c)
 	return nil
 }
 
-// Comments ignores since: every comment counts as new.
-func (f *Fake) Comments(_ context.Context, issue int, _ string) ([]Comment, error) {
+// Comments lists the comments stored at or after since, as GitHub does.
+// Empty since lists them all.
+func (f *Fake) Comments(_ context.Context, issue int, since string) ([]Comment, error) {
+	var after time.Time
+	if since != "" {
+		t, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			return nil, fmt.Errorf("comments since %q: %w", since, err)
+		}
+		after = t
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.comments[issue]), nil
+	var found []Comment
+	for _, c := range f.comments[issue] {
+		if !c.at.Before(after) {
+			found = append(found, c.Comment)
+		}
+	}
+	return found, nil
 }
 
 func (f *Fake) CheckRuns(context.Context, string) ([]CheckRun, error) {

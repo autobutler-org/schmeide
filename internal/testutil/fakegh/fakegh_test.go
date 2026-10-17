@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -196,5 +197,29 @@ func TestJobLogs(t *testing.T) {
 	}
 	if code, _ := get("43"); code != http.StatusNotFound {
 		t.Errorf("GET job 43 logs = %d, want 404 for a job without a log", code)
+	}
+}
+
+// TestCommentsSince leaves out a comment created before since and keeps one
+// created at or after it.
+func TestCommentsSince(t *testing.T) {
+	s := New(t, repo, token)
+	s.SetComments(7, "old")
+	// The sleeps keep a coarse clock from stamping both sides of since alike.
+	time.Sleep(time.Millisecond)
+	since := time.Now().UTC().Format(time.RFC3339Nano)
+	time.Sleep(time.Millisecond)
+	if code, _ := call(t, s, http.MethodPost, "/issues/7/comments", `{"body":"new"}`); code != http.StatusCreated {
+		t.Fatalf("POST comment = %d, want 201", code)
+	}
+
+	code, got := call(t, s, http.MethodGet, "/issues/7/comments?since="+since, "")
+	if c := hasKeys(t, "comment", list(t, "since comments", got, 1)[0], "body"); code != http.StatusOK || c["body"] != "new" {
+		t.Errorf("GET comments since = %d %v, want only new", code, got)
+	}
+	_, got = call(t, s, http.MethodGet, "/issues/7/comments", "")
+	list(t, "all comments", got, 2)
+	if code, _ := call(t, s, http.MethodGet, "/issues/7/comments?since=yesterday", ""); code != http.StatusUnprocessableEntity {
+		t.Errorf("GET comments since=yesterday = %d, want 422", code)
 	}
 }
