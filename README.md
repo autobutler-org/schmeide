@@ -87,4 +87,6 @@ make format  # format
 make help    # list all targets
 ```
 
+`make test/e2e` builds the binary and runs the end-to-end journeys in `internal/e2e`, which need the `e2e` build tag, so `go test ./...` skips them.
+
 Seeded from [exokomodo/template-golang](https://github.com/exokomodo/template-golang).
