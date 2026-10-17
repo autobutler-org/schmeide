@@ -33,7 +33,8 @@ sequenceDiagram
     R->>Q: request schmeide.token.{steward} with job subject
     Q->>GH: POST /app/installations/{id}/access_tokens (token.go)
     GH-->>Q: installation token, 1 hour
-    Q-->>R: TokenReply
+    Q-->>R: TokenReply (kept in jobToken)
+    Note over R,Q: before every later GitHub call or git command, jobToken.get<br/>repeats the token request when under 10 minutes remain
     R->>R: trust.Check(work dir, origin)
     R->>GH: IssuePull(issue, all) finds no PR (forge)
     R->>GH: DefaultBranch, BlockedBy (github.go baseBranch)

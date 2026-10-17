@@ -84,7 +84,7 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 
 func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, true)
-	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
+	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: forge.StaticToken(testToken)}
 	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
 	if out.state != StateQueued || !strings.Contains(out.comment, "merge queue") {
 		t.Fatalf("outcome = %+v, want queued with a merge queue comment", out)
@@ -100,7 +100,7 @@ func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 
 func TestMergeWhenGreenMergesWithoutMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, false)
-	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
+	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: forge.StaticToken(testToken)}
 	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
 	if out.state != StateMerged || strings.Contains(out.comment, "merge queue") {
 		t.Fatalf("outcome = %+v, want merged without a merge queue comment", out)

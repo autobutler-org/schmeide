@@ -627,6 +627,10 @@ func fakeGitHub(t *testing.T, key *rsa.PublicKey, expires time.Time) *httptest.S
 			"pull_requests": "write",
 			"issues":        "write",
 			"checks":        "read",
+			// Branch protection, read before a factory merge.
+			"administration": "read",
+			// An Actions job log, read for a CI fix round.
+			"actions": "read",
 		}
 		if len(body.Permissions) != len(wantPerms) {
 			t.Errorf("permissions = %v, want %v", body.Permissions, wantPerms)

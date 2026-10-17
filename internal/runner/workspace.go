@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/autobutler-org/schmeide/internal/forge"
 	"github.com/autobutler-org/schmeide/internal/refguard"
 	"github.com/autobutler-org/schmeide/internal/secretscan"
 )
@@ -53,8 +54,11 @@ type Workspace interface {
 }
 
 type worktreeSpec struct {
-	workDir, url, base, branch, token string
-	gitName, gitEmail                 string
+	workDir, url, base, branch string
+	// token is asked for on every git command, so a long job's push uses a
+	// token that has not expired. Nil sends no credentials.
+	token             forge.TokenSource
+	gitName, gitEmail string
 	// id names the worktree directory and repoID the clone it hangs off.
 	id, repoID string
 	// env is the environment for git and the gate, without the runner's own
@@ -88,13 +92,8 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		repoDir: filepath.Join(s.workDir, "repos", s.repoID+".git"),
 		dir:     filepath.Join(s.workDir, "worktrees", s.id),
 		baseRef: "refs/remotes/origin/" + s.base,
-		// The token goes in through the environment so that it is never
-		// written to git config or shown in the process list.
 		env: append(slices.Clone(s.env),
 			"GIT_TERMINAL_PROMPT=0",
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+s.token)),
 			"GIT_AUTHOR_NAME="+s.gitName, "GIT_AUTHOR_EMAIL="+s.gitEmail,
 			"GIT_COMMITTER_NAME="+s.gitName, "GIT_COMMITTER_EMAIL="+s.gitEmail,
 		),
@@ -146,6 +145,19 @@ func (w *worktree) git(ctx context.Context, dir string, args ...string) (string,
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = w.env
+	if w.spec.token != nil {
+		token, err := w.spec.token(ctx)
+		if err != nil {
+			return "", fmt.Errorf("get the job's GitHub token for git %s: %w", strings.Join(args, " "), err)
+		}
+		// The token goes in through the environment so that it is never
+		// written to git config or shown in the process list.
+		cmd.Env = append(slices.Clone(w.env),
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http.extraHeader",
+			"GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+		)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

@@ -353,7 +353,9 @@ change for an hour (for example a session that hangs under a longer
 ### JN-FAIL-015: No token for the job
 
 **Preconditions:** The control node cannot mint an installation token, for
-example because the App was uninstalled from the repository.
+example because the App was uninstalled from the repository, or because the
+App or its installation lacks one of the permissions the token asks for
+(Contents, Pull requests, Issues, Checks, Administration, Actions).
 
 **Steps:**
 
@@ -371,6 +373,11 @@ example because the App was uninstalled from the repository.
 **Notes:**
 
 - This repeats until the token works or the job is removed.
+- A missing permission shows in the GitHub reply quoted after "github refused
+  an installation token for installation <id>:". Grant the permission to the
+  App and accept it on the installation.
+- Only the first token request of a delivery is handled this way. A refresh
+  later in the job is JN-FAIL-020.
 - Covered by `TestTokenHandBackDoesNotConsumeAttempts` and
   `TestMintReportsGitHubRefusal`.
 
@@ -464,3 +471,38 @@ the runner's checkout does not contain.
 **Notes:**
 
 - No automated test.
+
+---
+
+### JN-FAIL-020: A job outlives its first token
+
+**Preconditions:** A job is still working more than 50 minutes after its
+claim: a long harness session, several review rounds, or a long
+`check_wait`.
+
+**Steps:**
+
+1. Assign and label an issue whose job runs that long.
+
+**Expected result:**
+
+- Before each GitHub call and each git command, the runner checks the job's
+  token. When it has less than 10 minutes left before its `expires_at`, the
+  runner asks the control node on `schmeide.token.<steward>` again and uses
+  the new token. Push, opening the pull request, review comments, check
+  polling, and the merge do not fail with 401.
+- If that request fails while the held token has not expired, the runner
+  keeps using the held token and asks again on the next call.
+- If it fails after the held token expired, the GitHub call fails with "get
+  the job's GitHub token: the control node could not mint a token: ...", or a
+  git command fails with "get the job's GitHub token for git <args>: ...".
+  That error is handled like any other GitHub or git error at that point in
+  the job: before the pull request is open it is a failed attempt; after, the
+  outcome comment says it and the pull request stays open.
+
+**Notes:**
+
+- The control node mints a new token for every request it accepts. It does
+  not limit how many tokens one job asks for.
+- Covered by `TestJobTokenRefresh` and `TestJobRefreshesAnExpiringToken` in
+  `internal/runner`.
