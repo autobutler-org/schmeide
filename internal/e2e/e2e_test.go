@@ -42,6 +42,9 @@ const (
 	runnerToken    = "runner-token"
 	jobToken       = "ghs_e2e"
 	webhookSecret  = "e2e-secret"
+	// ackWait is the runners' --ack-wait. The default (5m) would make the
+	// killed-runner journey wait minutes for JetStream to redeliver its job.
+	ackWait = 5 * time.Second
 )
 
 // binDir holds schmeide, fakeagent, and the claude and grok wrappers.
@@ -251,6 +254,7 @@ func (w *world) startRunner(writer, reviewer string) *proc {
 		"--steward", steward,
 		"--nats-url", "nats://"+w.natsAddr,
 		"--nats-token", runnerToken,
+		"--ack-wait", ackWait.String(),
 		"--work-dir", filepath.Join(w.dir, "work"),
 		"--github-api-url", w.gh.URL,
 		"--github-url", "file://"+filepath.Join(w.dir, "origin"))
@@ -418,7 +422,7 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	<-first.done
 
-	// The job is redelivered once its ack wait (30s) runs out with no heartbeat.
+	// The job is redelivered once its ack wait runs out with no heartbeat.
 	second := w.startRunner(writer, passReview)
 	w.waitComment(3, "The review passed.", 2*time.Minute)
 	if !strings.Contains(second.log.String(), "state=claimed") {
