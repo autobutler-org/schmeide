@@ -53,6 +53,12 @@ Who merges a pull request after review has passed and CI is green.
   stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
   does not fail the job. Any other read failure fails the job, and the pull
   request stays open. Required status checks are not this failure.
+  - The first red check runs one writer fix round when a review round
+    remains. It counts against `--max-review-rounds`. There is no second fix
+    round. A check that is still red, or a wait that ends without success,
+    leaves the pull request open.
+  - When the base branch has a merge queue, green checks add the pull request
+    to the queue instead of merging it. The job is reported queued.
 
 Absent, empty, and blank values mean `"human"`. Any other value is an error,
 and values are case-sensitive: `"Factory"` is rejected.
@@ -63,7 +69,8 @@ merge = "factory"
 
 ### check_wait
 
-How long a factory merge waits for the head commit's check runs to succeed.
+How long a factory merge waits for the head commit's check runs to succeed,
+including the fix round's new head.
 A Go duration such as `90s`, `10m`, or `1h30m`; it must be positive. Absent
 or empty means `2m`. The key only matters when `merge = "factory"`. If the wait
 ends without success, the pull request stays open.
