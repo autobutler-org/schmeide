@@ -102,10 +102,13 @@ session_timeout = "2h"
 
 ## Runner flags
 
-Two runner flags set the same deadlines for every repo that runner serves:
+Runner flags set delivery and execution deadlines for every repo that runner
+serves:
 
 | Flag | Default | Overridden by |
 | --- | --- | --- |
+| `--ack-wait` | `5m` | never; the runner heartbeats every third of it |
+| `--stuck-after` | `3h` | never; a state change resets it |
 | `--gate-timeout` | `30m` | `gate_timeout` |
 | `--session-timeout` | `2h` | `session_timeout` |
 
@@ -116,6 +119,11 @@ minutes for a repo with `gate_timeout = "30m"`.
 
 `gate`, `merge`, and `check_wait` have no runner or control flag. They come
 from the repo config alone.
+
+`ack-wait` is the JetStream lease for a claimed job. A runner must stay
+connected and send `InProgress` heartbeats during long work. `stuck-after` is
+the longer no-progress budget: when it expires the runner cancels the work and
+Naks the job for redelivery. They are operator settings, not repository keys.
 
 ## Errors
 

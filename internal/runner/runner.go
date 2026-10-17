@@ -53,7 +53,8 @@ const (
 	// relative to the checkout. It is never committed.
 	prTextPath = ".schmeide/pr.md"
 
-	defaultAckWait         = 30 * time.Second
+	defaultAckWait         = 5 * time.Minute
+	defaultStuckAfter      = 3 * time.Hour
 	defaultMaxAttempts     = 3
 	defaultMaxReviewRounds = 3
 	defaultRetryDelay      = 30 * time.Second
@@ -120,12 +121,15 @@ type Options struct {
 	// Output receives harness session output. Nil discards it.
 	Output io.Writer
 	// AckWait is how long the control node waits without a heartbeat before
-	// it redelivers a job. Zero means 30 seconds.
+	// it redelivers a job. Zero means 5 minutes.
 	AckWait time.Duration
-	// MaxAttempts is how many StateFailed outcomes this process allows for
+	// StuckAfter is how long a delivery may go without a job state change
+	// before its work is canceled and it is handed back. Zero means 3 hours.
+	StuckAfter time.Duration
+	// MaxAttempts is how many StateFailed outcomes are allowed for
 	// one job before that failure is final. A hand-back for a missing token
-	// or a shutdown is not one of them. Zero means 3. The count is kept in
-	// memory, so a restarted process starts over.
+	// or a shutdown is not one of them. Zero means 3. The count is persisted
+	// with the job's status, so a restarted process continues it.
 	MaxAttempts int
 	// MaxReviewRounds is how many reviewer sessions run after the pull
 	// request is open. Zero means 3. Exhausting them fails the job and leaves
@@ -156,11 +160,17 @@ type Runner struct {
 	nc       *nats.Conn
 	cons     jetstream.Consumer
 	poolCons jetstream.Consumer
+	statuses jetstream.Stream
 	harness  harness.Harness
-	// failures counts StateFailed outcomes per job subject. Token hand-backs
-	// and shutdown hand-backs are not counted. Only handle writes it, and
-	// Run works one job at a time.
+	// attempts is restored from the status stream for the current job. Only
+	// handle writes it, and Run works one job at a time.
+	attempts int
+	// failures is the same-process fallback when the status stream is absent
+	// or temporarily unreadable.
 	failures map[string]int
+	// progress receives a signal whenever report publishes a state for the
+	// current job. Only one handle runs at a time.
+	progress chan struct{}
 	// stages is control.StageBucket. Nil when the control node has none, and
 	// then no stage is recorded.
 	stages jetstream.KeyValue
@@ -231,6 +241,15 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	}
 	if o.AckWait == 0 {
 		o.AckWait = defaultAckWait
+	}
+	if o.AckWait < 0 {
+		return nil, fmt.Errorf("ack wait must be positive, got %s", o.AckWait)
+	}
+	if o.StuckAfter == 0 {
+		o.StuckAfter = defaultStuckAfter
+	}
+	if o.StuckAfter < 0 {
+		return nil, fmt.Errorf("stuck after must be positive, got %s", o.StuckAfter)
 	}
 	if o.MaxAttempts <= 0 {
 		o.MaxAttempts = defaultMaxAttempts
@@ -311,6 +330,12 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 			return fmt.Errorf("subscribe to pool jobs: %w", err)
 		}
 	}
+	// An older control node may not have started status tracking yet. Jobs can
+	// still run, but their attempt count cannot survive a runner restart.
+	if r.statuses, err = js.Stream(ctx, control.StatusStream); err != nil {
+		r.log.Warn("the control node keeps no job status history; upgrade it so retries survive runner restarts", "err", err)
+		r.statuses = nil
+	}
 	// An older control node has no stage bucket. Jobs still run, and GitHub
 	// alone finds an open pull request after a restart.
 	if r.stages, err = js.KeyValue(ctx, control.StageBucket); err != nil {
@@ -387,8 +412,39 @@ func (r *Runner) report(job control.Job, state State, detail string) {
 		r.mark(job, s)
 	}
 	r.log.Info("job state", "repo", job.Repo, "issue", job.Issue, "state", string(state), "detail", detail)
-	subject := StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
-	r.publish(subject, Status{State: state, Detail: detail})
+	r.publish(statusSubject(job), Status{State: state, Detail: detail, Attempts: r.attempts})
+	if r.progress != nil {
+		select {
+		case r.progress <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func statusSubject(job control.Job) string {
+	return StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+}
+
+// recordedAttempts returns the failed-work count on the latest persisted
+// status for job. Statuses from older runners have no count and decode as zero.
+func (r *Runner) recordedAttempts(ctx context.Context, job control.Job) int {
+	fallback := r.failures[job.Subject()]
+	if r.statuses == nil {
+		return fallback
+	}
+	msg, err := r.statuses.GetLastMsgForSubject(ctx, statusSubject(job))
+	if errors.Is(err, jetstream.ErrMsgNotFound) {
+		return fallback
+	}
+	var status Status
+	if err == nil {
+		err = json.Unmarshal(msg.Data, &status)
+	}
+	if err != nil {
+		r.log.Warn("could not restore the job's attempt count", "repo", job.Repo, "issue", job.Issue, "err", err)
+		return fallback
+	}
+	return max(status.Attempts, fallback)
 }
 
 func stageKey(job control.Job) string {
@@ -448,7 +504,7 @@ func (r *Runner) token(ctx context.Context, subject string) (string, error) {
 // handle works one delivered job. It acknowledges the job only once the job
 // has reached a final state, so a runner that dies before then leaves the job
 // to be redelivered. A StateFailed outcome is handed back until this process
-// has seen Options.MaxAttempts of them. A hand-back because the token request
+// has persisted Options.MaxAttempts of them. A hand-back because the token request
 // failed, or because the runner's context is canceled, does not count.
 func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	var job control.Job
@@ -458,25 +514,51 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	// Heartbeats keep the job ours while it is being worked.
+	r.attempts = r.recordedAttempts(ctx, job)
+	workCtx, cancelWork := context.WithCancelCause(ctx)
+	defer cancelWork(nil)
+	progress := make(chan struct{}, 1)
+	r.progress = progress
+	defer func() { r.progress = nil }()
+
+	// Heartbeats keep the job ours while it is being worked. The watchdog
+	// prevents a live but wedged runner from renewing the delivery forever.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		tick := time.NewTicker(r.opts.AckWait / 3)
 		defer tick.Stop()
+		stuck := time.NewTimer(r.opts.StuckAfter)
+		defer stuck.Stop()
 		for {
 			select {
 			case <-done:
 				return
+			case <-progress:
+				if !stuck.Stop() {
+					select {
+					case <-stuck.C:
+					default:
+					}
+				}
+				stuck.Reset(r.opts.StuckAfter)
 			case <-tick.C:
 				_ = msg.InProgress()
+			case <-stuck.C:
+				r.log.Error("job is stuck; handing it back", "repo", job.Repo, "issue", job.Issue, "stuck_after", r.opts.StuckAfter)
+				cancelWork(errJobStuck)
+				_ = msg.Nak()
+				return
 			}
 		}
 	}()
 
 	r.report(job, StateClaimed, "")
-	token, err := r.token(ctx, msg.Subject())
+	token, err := r.token(workCtx, msg.Subject())
 	if err != nil {
+		if errors.Is(context.Cause(workCtx), errJobStuck) {
+			return
+		}
 		// Without a token the outcome cannot be put on the issue, so the job
 		// is handed back instead of being failed where nobody would see it.
 		// This delivery is not a work failure and does not count.
@@ -485,7 +567,10 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	gh := forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}
-	out := r.work(ctx, gh, job, token)
+	out := r.work(workCtx, gh, job, token)
+	if errors.Is(context.Cause(workCtx), errJobStuck) {
+		return
+	}
 	if ctx.Err() != nil {
 		// Shutting down. Hand the job to another runner now, and do not count
 		// this delivery as a work failure.
@@ -493,16 +578,21 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	// A failure may be passing (a harness outage, a GitHub error), so the job
-	// is tried again until this process has seen MaxAttempts StateFailed
+	// is tried again until the persisted count reaches MaxAttempts StateFailed
 	// outcomes. The JetStream delivery count is not that number: a token
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
 	// pass is final too: its rounds are spent. A factory merge that does not
 	// land is final as well.
 	if out.state == StateFailed {
-		n := r.recordWorkFailure(job.Subject())
+		r.attempts++
+		r.failures[job.Subject()] = r.attempts
+		n := r.attempts
 		if n < r.opts.MaxAttempts {
 			r.report(job, StateRetrying, fmt.Sprintf("attempt %d of %d failed: %s", n, r.opts.MaxAttempts, out.detail))
+			if err := r.nc.FlushTimeout(5 * time.Second); err != nil {
+				r.log.Warn("could not persist the job's attempt count before handing it back", "repo", job.Repo, "issue", job.Issue, "err", err)
+			}
 			if err := msg.NakWithDelay(r.opts.RetryDelay); err == nil {
 				return
 			}
@@ -525,12 +615,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 }
 
-// recordWorkFailure counts one StateFailed outcome for the job and returns
-// how many this process has seen.
-func (r *Runner) recordWorkFailure(subject string) int {
-	r.failures[subject]++
-	return r.failures[subject]
-}
+var errJobStuck = errors.New("job made no progress before stuck-after")
 
 // deadlines bound one job's harness sessions and its gate command.
 type deadlines struct {

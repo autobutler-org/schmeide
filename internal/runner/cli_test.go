@@ -218,3 +218,18 @@ func TestUsageStatesPermissionFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestDeliveryLeaseFlagDefaults(t *testing.T) {
+	fs, o, _, _ := runnerFlags()
+	if err := ParseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if o.AckWait != defaultAckWait || o.StuckAfter != defaultStuckAfter {
+		t.Errorf("delivery lease defaults = ack wait %v, stuck after %v; want %v and %v", o.AckWait, o.StuckAfter, defaultAckWait, defaultStuckAfter)
+	}
+	for _, want := range []string{"--ack-wait", "--stuck-after", "InProgress", "heartbeat"} {
+		if !strings.Contains(Usage(), want) {
+			t.Errorf("Usage() does not contain %q", want)
+		}
+	}
+}
