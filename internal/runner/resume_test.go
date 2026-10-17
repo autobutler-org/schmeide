@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -108,7 +109,19 @@ func TestResumeAtReviewFromTheStageRecord(t *testing.T) {
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "review passed") {
 		t.Errorf("issue comments = %q, want one outcome comment", comments["7"])
 	}
-	if _, err := stages.Get(t.Context(), key); err == nil {
-		t.Error("the finished job's stage record was not cleared")
+	// The runner reports the final state before it deletes the record, so
+	// give the delete a moment to land.
+	for i := 0; ; i++ {
+		_, err := stages.Get(t.Context(), key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			break
+		}
+		if err != nil && !errors.Is(err, jetstream.ErrKeyDeleted) {
+			t.Fatalf("reading the finished job's stage record: %v", err)
+		}
+		if i == 20 {
+			t.Fatal("the finished job's stage record was not cleared")
+		}
+		time.Sleep(pollWait)
 	}
 }
