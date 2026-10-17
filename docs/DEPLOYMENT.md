@@ -51,7 +51,9 @@ tokens would then cross the network in plain text.
 `SCHMEIDE_DATA_DIR` holds JetStream's files: the job queue, the per-issue
 records that dedupe webhooks, the stage records a restarted runner resumes
 from, and the status history `schmeide status` shows. Put it on persistent
-block storage that outlives the machine or container.
+block storage that outlives the machine or container. The image's user, UID
+65532, must be able to write it. A fresh named volume already is; for a host
+directory or disk, run `sudo chown 65532:65532 /data` on the host.
 
 Losing it loses all of that. Queued jobs are gone, an issue that already had a
 job can get a second one, and a runner cannot resume a job in progress. The
