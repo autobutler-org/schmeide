@@ -19,7 +19,16 @@ job a fresh retry budget.
   on the issue and acknowledges the job.
 - A token hand-back does not consume an attempt. If the runner cannot get a
   GitHub token for the job, it hands the job back without commenting, because
-  the issue could not be reached anyway.
+  the issue could not be reached anyway. An App without one of the permissions
+  the control node asks for (Contents, Pull requests, Issues, Checks,
+  Administration, Actions) gets no token, so every job is handed back until
+  the App and its installation have them.
+- A token is refreshed during the job. Before each GitHub call or git command
+  the runner asks the control node for a new token when the one it holds has
+  less than 10 minutes left. A failed refresh keeps the held token while it
+  has not expired. Once it has expired, the call fails with "get the job's
+  GitHub token: ..." and is handled like any other GitHub or git error at
+  that point in the job.
 - A shutdown does not consume an attempt. If the runner is stopping, it hands
   the job back at once for another runner.
 - A gate failure is final. It is the session's own result, so it is not

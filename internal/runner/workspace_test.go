@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/autobutler-org/schmeide/internal/forge"
 	"github.com/autobutler-org/schmeide/internal/secretscan"
 )
 
@@ -153,7 +154,7 @@ func newPushFixture(t *testing.T) (*worktree, string) {
 		url:      bare,
 		base:     "main",
 		branch:   "job",
-		token:    "gh" + "p_" + strings.Repeat("e", 36),
+		token:    forge.StaticToken("gh" + "p_" + strings.Repeat("e", 36)),
 		gitName:  "schmeide[bot]",
 		gitEmail: "bot@example.com",
 		id:       "job",

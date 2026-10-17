@@ -20,8 +20,28 @@ type GitHub struct {
 	// API is the REST base URL, such as https://api.github.com.
 	API string
 	// Repo is "owner/name".
-	Repo  string
-	Token string
+	Repo string
+	// Token returns the token for each request. The runner passes one that
+	// refreshes the job's installation token before it expires.
+	Token TokenSource
+}
+
+// TokenSource returns the token to send on the next request.
+type TokenSource func(context.Context) (string, error)
+
+// StaticToken is a TokenSource that always returns token.
+func StaticToken(token string) TokenSource {
+	return func(context.Context) (string, error) { return token, nil }
+}
+
+// Authorize sets the request's Authorization header from g.Token.
+func (g GitHub) Authorize(req *http.Request) error {
+	token, err := g.Token(req.Context())
+	if err != nil {
+		return fmt.Errorf("get the job's GitHub token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 var _ Forge = GitHub{}
@@ -60,7 +80,9 @@ func (g GitHub) send(ctx context.Context, method, path string, in any) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	if err := g.Authorize(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -199,7 +221,9 @@ func (g GitHub) JobLog(ctx context.Context, id int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	if err := g.Authorize(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -246,10 +270,11 @@ func (g GitHub) MergePull(ctx context.Context, number int) error {
 	return g.do(ctx, http.MethodPut, fmt.Sprintf("/pulls/%d/merge", number), body, nil)
 }
 
-// Protection reads the branch protection endpoint. GitHub answers 404 for a
-// branch without protection. It answers 403 when the token cannot read
-// protection (that needs Administration: read); that is treated as no
-// protection too, so merge goes on as it did before this read existed.
+// Protection reads the branch protection endpoint, which needs
+// Administration: read. GitHub answers 404 for a branch without protection.
+// It answers 403 when the token cannot read protection, which happens when
+// the App installation was not granted Administration: read; that is treated
+// as no protection too, so merge goes on as it did before this read existed.
 func (g GitHub) Protection(ctx context.Context, branch string) (Protection, error) {
 	var resp struct {
 		Reviews *struct {

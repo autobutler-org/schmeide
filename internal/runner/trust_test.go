@@ -31,7 +31,7 @@ func TestWorkRefusesAnUntrustedPair(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	// No GitHub API is set up: the refusal must come before any call to it.
 	r := &Runner{opts: Options{WorkDir: t.TempDir(), GitHubURL: "https://github.invalid"}}
-	out := r.work(t.Context(), &forge.Fake{}, control.Job{Repo: "acme/widgets", Issue: 1, Title: "x"}, "token")
+	out := r.work(t.Context(), &forge.Fake{}, control.Job{Repo: "acme/widgets", Issue: 1, Title: "x"}, forge.StaticToken("token"))
 	if out.state != StateFailed || !strings.Contains(out.detail, "SCHMEIDE_TRUST=1") {
 		t.Fatalf("work = %+v, want a failure naming SCHMEIDE_TRUST=1", out)
 	}

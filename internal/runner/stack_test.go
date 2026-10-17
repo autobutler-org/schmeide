@@ -422,7 +422,7 @@ func TestGitHubRetargetPullPatchesTheBase(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
-	gh := github{forge.GitHub{API: srv.URL, Repo: "o/r", Token: "t"}}
+	gh := github{forge.GitHub{API: srv.URL, Repo: "o/r", Token: forge.StaticToken("t")}}
 	if err := gh.RetargetPull(t.Context(), 2, "main"); err != nil {
 		t.Fatal(err)
 	}

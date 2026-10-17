@@ -61,7 +61,7 @@ func TestFindPRPagesPastTheNewest(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got, ok, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).IssuePull(t.Context(), 7, "all")
+	got, ok, err := (GitHub{API: srv.URL, Repo: testRepo, Token: StaticToken(testToken)}).IssuePull(t.Context(), 7, "all")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestProtectionReadsRequiredReviews(t *testing.T) {
 				_, _ = w.Write([]byte(tt.body))
 			}))
 			t.Cleanup(srv.Close)
-			got, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).Protection(t.Context(), "feat/x")
+			got, err := (GitHub{API: srv.URL, Repo: testRepo, Token: StaticToken(testToken)}).Protection(t.Context(), "feat/x")
 			if err != nil || got.RequiredApprovals != tt.want {
 				t.Fatalf("Protection = %+v, %v, want %d approvals", got, err, tt.want)
 			}
@@ -107,7 +107,7 @@ func TestProtectionFailsOnAServerError(t *testing.T) {
 		http.Error(w, "boom", http.StatusBadGateway)
 	}))
 	t.Cleanup(srv.Close)
-	if _, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).Protection(t.Context(), "main"); err == nil {
+	if _, err := (GitHub{API: srv.URL, Repo: testRepo, Token: StaticToken(testToken)}).Protection(t.Context(), "main"); err == nil {
 		t.Fatal("Protection on a 502 = nil error, want the failure")
 	}
 }
@@ -134,7 +134,7 @@ func TestJobLogKeepsTheTail(t *testing.T) {
 				http.NotFound(w, r)
 			}
 		}))
-		got, err := (GitHub{API: srv.URL, Repo: testRepo, Token: testToken}).JobLog(t.Context(), 9)
+		got, err := (GitHub{API: srv.URL, Repo: testRepo, Token: StaticToken(testToken)}).JobLog(t.Context(), 9)
 		srv.Close()
 		if err != nil {
 			t.Fatal(err)

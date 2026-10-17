@@ -52,26 +52,57 @@ sandbox. [FAILURE-MODES.md](../FAILURE-MODES.md#not-built) and [design.md](../de
 | Authenticated as | the App, with an RS256 JWT: `iss` App ID, `iat` now minus 1 minute, `exp` now plus 9 minutes |
 | Endpoint | `POST <github-api-url>/app/installations/<installation_id>/access_tokens` |
 | Repository scope | `repository_ids: [job.repo_id]`, the one repository |
-| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read` |
-| Lifetime | one hour, set by GitHub. One token per delivery, requested at claim time. |
+| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `administration: read`, `actions: read` |
+| Lifetime | one hour, set by GitHub. The first token of a delivery is requested at claim time; the runner requests a new one when the token it holds has less than 10 minutes left (`jobToken.get`, `internal/runner/runner.go`). |
 | Who may ask | a runner on `schmeide.token.<steward>`, for a subject in `SCHMEIDE_JOBS` that is that steward's job, or a pool job when the steward registered with `--pool` (`Queue.tokenFor`) |
-| Where the runner keeps it | in memory, in `forge.GitHub.Token`, and in the git environment of the job's worktree |
+| Where the runner keeps it | in memory only, in the job's `jobToken`. `forge.GitHub.Token` and the worktree's git commands read it from there on each call. |
 
 How the runner uses it:
 
-- Git: `newWorktree` sets `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.extraHeader`, and
-  `GIT_CONFIG_VALUE_0=Authorization: Basic base64(x-access-token:<token>)` in the environment of every git command
-  it runs. The token is never written to git config or put on a command line. `GIT_TERMINAL_PROMPT=0` stops a
-  credential prompt.
-- REST and GraphQL: `Authorization: Bearer <token>` (`internal/forge/github.go`, `internal/runner/github.go`).
+- Git: `worktree.git` (`internal/runner/workspace.go`) asks the job's token source for the token before every git
+  command and sets `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.extraHeader`, and
+  `GIT_CONFIG_VALUE_0=Authorization: Basic base64(x-access-token:<token>)` in that command's environment. The token
+  is never written to git config or put on a command line. `GIT_TERMINAL_PROMPT=0` stops a credential prompt.
+- REST and GraphQL: `forge.GitHub.Authorize` (`internal/forge/github.go`) asks `forge.GitHub.Token`, a
+  `forge.TokenSource`, before every request and sends `Authorization: Bearer <token>`. `internal/forge/queue.go`
+  (GraphQL) and `github.RetargetPull` (`internal/runner/github.go`) use the same method.
 
-The token is not refreshed. A job that runs longer than an hour after its claim (long sessions, many review
-rounds, a long `check_wait`) will see GitHub reject later calls, and those calls fail the job.
+What each permission is for:
 
-The four permissions do not include `administration` or `actions`. Reading branch protection needs
-Administration read, and `forge.GitHub.Protection` treats the resulting 403 as no protection. Reading an Actions
-job log for a CI fix round needs Actions read; when that read fails, `logTail` puts "(schmeide could not read the
-log ...)" in the fix brief in place of the log.
+| Permission | Used for |
+| --- | --- |
+| `contents: write` | fetch and push the job's branch, merge the pull request |
+| `pull_requests: write` | open, find, retarget, and merge pull requests |
+| `issues: write` | read the issue's comments and blockers, post the outcome comment |
+| `checks: read` | list check runs on the pull request's head |
+| `administration: read` | `GET /repos/{owner}/{repo}/branches/{branch}/protection` in `forge.GitHub.Protection`, before a factory merge |
+| `actions: read` | `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` in `forge.GitHub.JobLog`, for a CI fix round |
+
+GitHub's "Permissions required for GitHub Apps" REST page lists the protection read under Administration (read)
+and the job log download under Actions (read).
+
+GitHub cannot grant an installation token a permission the App installation was not granted. An App created
+before `administration: read` and `actions: read` were requested, or an installation whose owner has not accepted
+the App's new permissions, gets no token at all: every job is handed back as in JN-FAIL-015 until the App has
+both permissions.
+
+### Refresh
+
+`runner.handle` builds one `jobToken` per delivery. Its `get` method returns the held token while it has more
+than `tokenRefreshMargin` (10 minutes) left before its `expires_at`. Otherwise it sends a new request on
+`schmeide.token.<steward>` with the job's subject, and the control node mints a new token through the same
+`Queue.tokenFor` checks. A reply with no `expires_at` is taken to expire `tokenLifetime` (one hour) after it
+arrived. The control node does not limit how many tokens a job may ask for; every request it accepts mints a new
+token.
+
+The check runs before every GitHub request and every git command, so a push, opening the pull request, each review
+round's comment, check polling, and the merge all use a token with at least 10 minutes left. A request that runs
+longer than 10 minutes on one token can still meet its expiry.
+
+If a refresh fails, `get` returns the held token while it has not expired yet. When it has expired, the GitHub
+call or git command fails with "get the job's GitHub token: ..." (REST and GraphQL) or "get the job's GitHub token
+for git <args>: ..." (git), and that error is handled like any other GitHub or git error at that point in the job (JN-FAIL-020). The first request of a
+delivery is different: when it fails the job is handed back without an attempt (JN-FAIL-015).
 
 ## Per-steward NATS tokens
 

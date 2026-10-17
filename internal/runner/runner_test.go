@@ -2244,3 +2244,69 @@ func TestRedeliveryKeepsSpentReviewRounds(t *testing.T) {
 	}
 	assertNoMerge(t, w)
 }
+
+// TestJobTokenRefresh pins when a job's token is asked for again: not while
+// it has more than tokenRefreshMargin left, and before each use once it does
+// not. A failed refresh keeps a token that has not expired yet.
+func TestJobTokenRefresh(t *testing.T) {
+	tests := []struct {
+		name      string
+		expiresIn time.Duration
+		zero      bool
+		failNext  bool
+		wantToken string
+		wantMints int
+		wantErr   bool
+	}{
+		{name: "fresh token is reused", expiresIn: time.Hour, wantToken: "t1", wantMints: 1},
+		{name: "no expiry counts as one hour", zero: true, wantToken: "t1", wantMints: 1},
+		{name: "near expiry is refreshed", expiresIn: tokenRefreshMargin - time.Minute, wantToken: "t2", wantMints: 2},
+		{name: "failed refresh keeps an unexpired token", expiresIn: time.Minute, failNext: true, wantToken: "t1", wantMints: 2},
+		{name: "failed refresh of an expired token fails", expiresIn: -time.Minute, failNext: true, wantErr: true, wantMints: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mints := 0
+			tok := &jobToken{fetch: func(context.Context) (control.Token, error) {
+				mints++
+				if mints > 1 && tt.failNext {
+					return control.Token{}, errors.New("control node is away")
+				}
+				expires := time.Now().Add(tt.expiresIn)
+				if tt.zero {
+					expires = time.Time{}
+				}
+				return control.Token{Token: fmt.Sprintf("t%d", mints), ExpiresAt: expires}, nil
+			}}
+			if got, err := tok.get(t.Context()); err != nil || got != "t1" {
+				t.Fatalf("first get = %q, %v; want t1", got, err)
+			}
+			got, err := tok.get(t.Context())
+			if (err != nil) != tt.wantErr || got != tt.wantToken || mints != tt.wantMints {
+				t.Errorf("second get = %q, %v after %d mints; want %q, error %v, %d mints", got, err, mints, tt.wantToken, tt.wantErr, tt.wantMints)
+			}
+		})
+	}
+}
+
+// TestJobRefreshesAnExpiringToken is a job whose tokens are all close to
+// expiry. The runner asks the control node again before later GitHub calls,
+// and the job still opens its pull request.
+func TestJobRefreshesAnExpiringToken(t *testing.T) {
+	w := newWorld(t)
+	var mints atomic.Int32
+	w.mint = func(context.Context, control.Job) (control.Token, error) {
+		mints.Add(1)
+		return control.Token{Token: testToken, ExpiresAt: time.Now().Add(tokenRefreshMargin / 2)}, nil
+	}
+	h, _ := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+	want := []State{StateClaimed, StateWorking, StateReviewing, StatePROpened}
+	if got := w.await(t, "alice", 7); !slices.Equal(got, want) {
+		t.Errorf("states = %v, want %v", got, want)
+	}
+	if n := mints.Load(); n < 3 {
+		t.Errorf("token requests = %d, want the runner to ask again before later GitHub calls", n)
+	}
+}

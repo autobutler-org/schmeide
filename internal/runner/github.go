@@ -101,7 +101,9 @@ func (g github) RetargetPull(ctx context.Context, number int, base string) error
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	if err := g.Authorize(req); err != nil {
+		return err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)

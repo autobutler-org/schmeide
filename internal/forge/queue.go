@@ -27,7 +27,9 @@ func (g GitHub) graphql(ctx context.Context, query string, vars map[string]any, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	if err := g.Authorize(req); err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
