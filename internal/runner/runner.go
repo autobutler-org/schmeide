@@ -113,9 +113,14 @@ type Options struct {
 	GitName, GitEmail string
 	// PassEnv names variables to add for the harness session only, on top of
 	// the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use
-	// this list: the gate inherits the runner process environment. Git sees
-	// only the installation-token variables. Never list a secret.
+	// this list. Git sees only the installation-token variables. Never list
+	// a secret.
 	PassEnv []string
+	// GatePassEnv names variables to add for the gate only, on top of the
+	// base list. A SCHMEIDE_ name is never passed to the gate, listed or
+	// not. The gate's HOME and TMPDIR are a per-job scratch directory that
+	// is removed with the worktree. Never list a secret.
+	GatePassEnv []string
 	// Harnesses are the harnesses to offer. The first one that passes its
 	// check runs the jobs.
 	Harnesses []harness.Harness
@@ -765,6 +770,7 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 		gitEmail: r.opts.GitEmail,
 		id:       fmt.Sprintf("%d-%d", job.RepoID, job.Issue),
 		repoID:   strconv.FormatInt(job.RepoID, 10),
+		gateEnv:  gateEnv(os.Environ(), r.opts.GatePassEnv),
 	})
 	if err != nil {
 		return failed(err)
