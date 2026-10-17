@@ -59,6 +59,14 @@ Who merges a pull request after review has passed and CI is green.
     leaves the pull request open.
   - When the base branch has a merge queue, green checks add the pull request
     to the queue instead of merging it. The job is reported queued.
+  - A pull request stacked on another schmeide pull request merges bottom
+    first. Before the check wait it waits, for up to `check_wait`, until it
+    targets the default branch, which GitHub does when the pull request below
+    merges and its branch is deleted. A bottom that has not merged by then, or
+    one that closed while this pull request still targets its branch, leaves
+    the pull request open, and the comment says which.
+  - A failure after the checks are green starts with "CI is green, but", so a
+    pull request that looks ready says why it was not merged.
 
 Absent, empty, and blank values mean `"human"`. Any other value is an error,
 and values are case-sensitive: `"Factory"` is rejected.
@@ -72,8 +80,12 @@ merge = "factory"
 How long a factory merge waits for the head commit's check runs to succeed,
 including the fix round's new head.
 A Go duration such as `90s`, `10m`, or `1h30m`; it must be positive. Absent
-or empty means `2m`. The key only matters when `merge = "factory"`. If the wait
-ends without success, the pull request stays open.
+or empty means `2m`. The key only matters when `merge = "factory"`. The runner
+reads the check runs after one second, then backs off, doubling the pause up to
+30 seconds, and reads them once more at the end of the wait. If the wait ends
+without success, the pull request stays open, and the comment names the check
+that was not green and the wait. A stacked pull request gets a wait of its own
+for the pull request below it to merge, before this one.
 
 ```toml
 check_wait = "10m"

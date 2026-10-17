@@ -4,4 +4,7 @@ import "time"
 
 // A short poll keeps the "nothing else arrives" waits, which sleep a few
 // polls, from costing seconds per test.
-func init() { pollWait = 10 * time.Millisecond }
+func init() {
+	pollWait = 10 * time.Millisecond
+	checkPoll, checkPollMax = time.Millisecond, 5*time.Millisecond
+}
