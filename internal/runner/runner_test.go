@@ -402,7 +402,7 @@ func writes(files map[string]string) (*harness.Fake, *atomic.Int32) {
 func TestJobOpensPR(t *testing.T) {
 	w := newWorld(t)
 	registered := make(chan Registration, 1)
-	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice", func(m *nats.Msg) {
+	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice.*", func(m *nats.Msg) {
 		var reg Registration
 		if err := json.Unmarshal(m.Data, &reg); err != nil {
 			t.Error(err)
@@ -1749,6 +1749,35 @@ func TestPoolNameIsNotASteward(t *testing.T) {
 	_, err := New(t.Context(), Options{Steward: control.PoolName}, slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), control.PoolName) {
 		t.Fatalf("New(%q) = %v, want a refusal of that steward", control.PoolName, err)
+	}
+}
+
+// TestSharedConsumersKeepTheFirstAckWait pins that a runner does not rewrite
+// a consumer another runner created, and heartbeats at the consumer's AckWait
+// rather than its own --ack-wait.
+func TestSharedConsumersKeepTheFirstAckWait(t *testing.T) {
+	w := newWorld(t)
+	h, _ := writes(nil)
+	w.ackWait = time.Second
+	w.runnerWith(t, "alice", h, true)
+	w.ackWait = time.Minute
+	second, _ := w.runnerWith(t, "alice", h, true)
+
+	js, err := jetstream.New(w.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, steward := range []string{"alice", control.PoolName} {
+		cons, err := js.Consumer(t.Context(), control.JobStream, control.ConsumerName(steward))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cons.CachedInfo().Config.AckWait; got != time.Second {
+			t.Errorf("%s consumer AckWait = %v, want the first runner's %v", steward, got, time.Second)
+		}
+	}
+	if second.ackWait != time.Second {
+		t.Errorf("second runner's ack wait = %v, want the consumers' %v", second.ackWait, time.Second)
 	}
 }
 

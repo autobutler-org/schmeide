@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/nats-io/nats.go"
@@ -20,8 +21,10 @@ import (
 )
 
 const (
-	// RegisterSubjectPrefix plus a steward is the subject a runner announces
-	// itself on when it starts. The message is a Registration.
+	// RegisterSubjectPrefix plus a steward and a host (see RegisterSubject)
+	// is the subject a runner announces itself on when it starts. The message
+	// is a Registration. Runners from before the host token publish on the
+	// prefix plus the steward alone, which is still accepted.
 	RegisterSubjectPrefix = "schmeide.runners."
 	// StatusSubjectPrefix replaces "schmeide.jobs." in a job's subject to give
 	// the subject its Status messages are published on.
@@ -32,6 +35,24 @@ const (
 	// loads.
 	StatusStream = "SCHMEIDE_STATUS"
 )
+
+// RegisterSubject is the subject a runner on host registers for steward on.
+// Each steward and host pair gets its own subject, so the status stream can
+// keep only the latest message per subject without losing another host's
+// registration. A character that NATS gives a meaning in a subject (".", "*",
+// ">", or white space) becomes "_" in the host token, and an empty host is "_".
+func RegisterSubject(steward, host string) string {
+	token := strings.Map(func(r rune) rune {
+		if r == '.' || r == '*' || r == '>' || unicode.IsSpace(r) {
+			return '_'
+		}
+		return r
+	}, host)
+	if token == "" {
+		token = "_"
+	}
+	return RegisterSubjectPrefix + steward + "." + token
+}
 
 // State is where a job stands. Gate failed, PR opened, failed, review failed,
 // merged, queued, and merge failed are final; retrying means an attempt failed
@@ -109,12 +130,20 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	defer cancel()
 	// The same subjects runners already publish. JetStream stores each
 	// message because the stream listens on them; publishers stay unchanged.
+	// Every registration (one subject per steward and host) and every job's
+	// status (one subject per job) is replaced by the next one on its
+	// subject, and replay needs only the latest, so one message per subject
+	// is kept. CreateOrUpdateStream applies the limit to a stream an older
+	// control node created without it, which drops the older messages.
 	stream, err := q.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: StatusStream,
 		Subjects: []string{
 			RegisterSubjectPrefix + "*",
+			RegisterSubjectPrefix + "*.*",
 			StatusSubjectPrefix + "*.*.*",
 		},
+		MaxMsgsPerSubject: 1,
+		Discard:           jetstream.DiscardOld,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create status stream: %w", err)
@@ -141,13 +170,16 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 
 // replay applies the status stream in order. A malformed registration or a
 // junk status is dropped here the same way it is dropped live, so a restart
-// does not bring it back.
+// does not bring it back. A sequence the per-subject limit removed is skipped.
 func (t *Tracker) replay(ctx context.Context, stream jetstream.Stream, log *slog.Logger, state jetstream.StreamState) error {
 	if state.Msgs == 0 {
 		return nil
 	}
 	for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
 		msg, err := stream.GetMsg(ctx, seq)
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load status history: %w", err)
 		}
@@ -188,8 +220,11 @@ func (t *Tracker) observe(log *slog.Logger, seq uint64, subject string, data []b
 func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []byte) {
 	var reg Registration
 	// The subject, not the payload, is what NATS permissions can pin to a
-	// steward, so the two must agree.
-	if err := json.Unmarshal(data, &reg); err != nil || RegisterSubjectPrefix+reg.Steward != subject {
+	// steward, so the two must agree. The host must agree too, so a steward
+	// and host pair has one subject and the per-subject limit keeps its
+	// latest registration.
+	if err := json.Unmarshal(data, &reg); err != nil ||
+		(subject != RegisterSubject(reg.Steward, reg.Host) && subject != RegisterSubjectPrefix+reg.Steward) {
 		log.Warn("dropping a malformed runner registration", "subject", subject, "err", err)
 		return
 	}

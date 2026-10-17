@@ -21,7 +21,7 @@ sequenceDiagram
 
     P->>GH: assign issue, add schmeide:ready
     GH->>H: POST /webhook (issues, labeled)
-    H->>H: replay check, rate limit, HMAC (guard.go, intake.go)
+    H->>H: HMAC, rate limit, replay check (intake.go, guard.go)
     H->>H: JobFromIssuesEvent, Allowlist.allows
     H->>Q: Publish(job)
     Q->>Q: Tracker.hasRunner(steward)? steward subject : pool subject

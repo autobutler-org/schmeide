@@ -9,7 +9,7 @@ token for each job a runner asks for. All of it is in `internal/control`.
 | `internal/control/cli.go` | `Main`, `parseControl`, the `controlSettings` table, `--config` file reading, `CheckPrivateKeyFileMode`, `InitConfig` (what `schmeide init` writes) |
 | `internal/control/control.go` | `Config`, `Run` (startup order), `Handler` (the `/webhook` endpoint), `WebhookPolicy`, the HTTP server timeouts |
 | `internal/control/guard.go` | `webhookGate`: the per-minute rate limit and the delivery-id memory |
-| `internal/control/intake.go` | `Job`, `Job.Subject`, `VerifySignature`, `JobFromIssuesEvent`, `Allowlist`, `ParseRunnerTokens`, `Intake.Handle`, `Outcome` |
+| `internal/control/intake.go` | `Job`, `Job.Subject`, `VerifySignature`, `JobFromIssuesEvent`, `Allowlist`, `ParseRunnerTokens`, `Intake.Verify`, `Intake.Handle`, `Outcome` |
 | `internal/control/queue.go` | `StartQueue`, `Queue.Publish`, `runnerPermissions`, `ServeTokens`, the job stream, the issue and stage buckets |
 | `internal/control/status.go` | `State`, `Status`, `Registration`, `Tracker` (`Queue.Track`), the `SCHMEIDE_STATUS` stream, `ReadStatus`, `StatusMain` |
 | `internal/control/token.go` | `TokenMinter.Mint`, `ParsePrivateKey`, the App JWT |
@@ -48,7 +48,8 @@ the table in `controlSettings`.
    password (`rand.Text()`), open the `SCHMEIDE_ISSUES` and `SCHMEIDE_STAGES` buckets and the `SCHMEIDE_JOBS`
    stream (`Queue.openJobs`).
 4. `Queue.ServeTokens`: subscribe to `schmeide.token.*`.
-5. `Queue.Track`: create or update `SCHMEIDE_STATUS`, replay its whole history, then follow new messages. Only
+5. `Queue.Track`: create or update `SCHMEIDE_STATUS` (which applies its one-message-per-subject limit to a stream
+   an older control node created without it), replay what it holds, then follow new messages. Only
    after the replay is `q.tracker` set, so pool routing knows which stewards have runners before the first
    webhook is accepted.
 6. Listen on `--http-addr` and serve `/webhook`.
@@ -62,14 +63,15 @@ On SIGINT or SIGTERM the HTTP server gets 10 seconds to finish requests in fligh
 flowchart TD
     req["POST /webhook"] --> method{"POST?"}
     method -- no --> m405["405"]
-    method -- yes --> replay{"delivery id seen<br/>within --delivery-ttl?"}
-    replay -- yes --> r200["200 replay<br/>(nothing published)"]
-    replay -- no --> rate{"under --webhook-rate<br/>this minute?"}
-    rate -- no --> r429["429"]
-    rate -- yes --> body["read body, cap 25 MiB"]
+    method -- yes --> body["read body, cap 25 MiB"]
+    body -- "too large or unreadable" --> r400["400"]
     body --> sig{"X-Hub-Signature-256<br/>matches?"}
     sig -- no --> r401["401"]
-    sig -- yes --> ev{"X-GitHub-Event = issues?"}
+    sig -- yes --> rate{"under --webhook-rate<br/>this minute?"}
+    rate -- no --> r429["429"]
+    rate -- yes --> replay{"delivery id seen<br/>within --delivery-ttl?"}
+    replay -- yes --> r200["200 replay<br/>(nothing published)"]
+    replay -- no --> ev{"X-GitHub-Event = issues?"}
     ev -- no --> ign["200 ignored"]
     ev -- yes --> job{"labeled or assigned,<br/>open, assignee, ready label?"}
     job -- no --> ign
@@ -82,10 +84,16 @@ flowchart TD
     pub -- error --> r500
 ```
 
-- `Handler` (`control.go`) checks the replay memory before the rate limit and before the signature, so a
-  repeated delivery id costs nothing. A delivery id is remembered only after a successful outcome
-  (`webhookGate.remember`), so a failed delivery can be redelivered. An empty id is never a replay. Both the
-  rate limit and the id memory are in memory and reset on restart. `Queue.Publish` dedupes across restarts.
+- `Handler` (`control.go`) reads the capped body, then checks the signature (`Intake.Verify`), then the rate
+  limit (`webhookGate.allow`), then the replay memory (`webhookGate.replay`), and only then calls
+  `Intake.Handle`. The signature comes first so a request without the webhook secret gets a 401 and never uses
+  the rate budget or reaches the replay memory: it cannot crowd out genuine deliveries, and it cannot learn
+  whether a delivery id was seen. The rate limit comes before the replay check, so repeating a delivery id is
+  not a way around the limit; a replay counts as one request. The cost of this order is that an unsigned flood
+  is read (up to 25 MiB per request) and hashed before it is rejected.
+- A delivery id is remembered only after a successful outcome (`webhookGate.remember`), so a failed delivery
+  can be redelivered. An empty id is never a replay. Both the rate limit and the id memory are in memory and
+  reset on restart. `Queue.Publish` dedupes across restarts.
 - The HTTP server sets `ReadHeaderTimeout` 10s and `ReadTimeout` 30s (`newWebhookServer`).
 - `VerifySignature` is an HMAC-SHA256 over the raw body, compared with `hmac.Equal`.
 - `JobFromIssuesEvent` builds a `Job` only for actions `labeled` and `assigned` (`jobActions`). Edits and reopens
@@ -114,8 +122,8 @@ flowchart LR
         js2["schmeide.jobs._pool.{repo_id}.{issue}"]
     end
 
-    subgraph status["Stream SCHMEIDE_STATUS<br/>no limits"]
-        st1["schmeide.runners.{steward}"]
+    subgraph status["Stream SCHMEIDE_STATUS<br/>MaxMsgsPerSubject 1"]
+        st1["schmeide.runners.{steward}.{host}"]
         st2["schmeide.status.{steward or _pool}.{repo_id}.{issue}"]
     end
 
@@ -147,27 +155,41 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, `MaxMsgsPerSubject` 1, discard oldest | `schmeide.runners.<steward>.<host>` (`Registration`, `RegisterSubject`; older runners use `schmeide.runners.<steward>`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, default config | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
 
-The status stream subjects are the same subjects runners have always published on. The stream captures them, so
-publishers do not need JetStream acks for statuses.
+The status stream captures the subjects runners publish on, so publishers do not need JetStream acks for
+statuses. It keeps one message per subject: each registration subject names one steward and one host, and each
+status subject names one job, and only the latest message on each is ever read (by the replay, by
+`ReadStatus`, and by a runner's `GetLastMsgForSubject`). The stream therefore grows with the number of jobs and
+of steward and host pairs, not with the number of status changes or runner restarts. `Track` applies the limit
+with `CreateOrUpdateStream`, so a stream an older control node created without limits is updated on the first
+start and its older messages are dropped then.
 
 ### Consumers
 
-The control node creates no job consumers. Each runner calls `CreateOrUpdateConsumer` on `SCHMEIDE_JOBS` at
-startup (`Runner.register` in `internal/runner/runner.go`):
+The control node creates no job consumers. Each runner opens them on `SCHMEIDE_JOBS` at startup
+(`Runner.sharedConsumer` in `internal/runner/runner.go`): it calls `CreateConsumer`, and when the consumer
+already exists (`jetstream.ErrConsumerExists`) it uses it as it is with `js.Consumer`.
 
 - `runner-<steward>` (`ConsumerName`), filter `schmeide.jobs.<steward>.>` (`JobFilter`), explicit ack, `AckWait`
   from the runner's `--ack-wait`. All of one steward's runners share it, so each job is delivered to one of them.
 - `runner-_pool`, filter `schmeide.jobs._pool.>`, created only by a runner started with `--pool`. All pool runners
   share it.
 
-Because the consumer is shared and created or updated by each runner, the last runner to start sets `AckWait`
-for that consumer. No `MaxDeliver` is set, so JetStream redelivers without limit. The runner's own attempt count
-(see [Runner](runner.md#retries-and-acknowledgment)) is what ends retries.
+Because the consumer is shared, the first runner to create it sets its `AckWait`, and a later runner with a
+different `--ack-wait` does not change it. That runner logs `a shared job consumer already has another ack
+wait; heartbeating at the consumer's` and sends `InProgress` every third of the consumer's `AckWait` (the
+shorter one, for a `--pool` runner with two consumers). To change `AckWait`, delete the consumer with the
+`nats` CLI while no runner is working a job from it; the next runner to start creates it again.
+
+No `MaxDeliver` is set, so JetStream redelivers without limit. The runner's own attempt count
+(see [Runner](runner.md#retries-and-acknowledgment)) is what ends retries. `MaxDeliver` would count every
+delivery, including a hand-back when a token could not be minted, a hand-back at shutdown, and a redelivery
+after a runner died, which the attempt count deliberately does not count. A job that reached `MaxDeliver` would
+stop being delivered with no status and no issue comment.
 
 ### Runner permissions
 
@@ -175,7 +197,8 @@ for that consumer. No `MaxDeliver` is set, so JetStream redelivers without limit
 
 - consumer create, info, next, and ack for `runner-<steward>` with exactly its own filter, and the same for
   `runner-_pool` with the pool filter;
-- `schmeide.runners.<steward>`, `schmeide.status.<steward>.>`, and `schmeide.status._pool.>`;
+- `schmeide.runners.<steward>`, `schmeide.runners.<steward>.*`, `schmeide.status.<steward>.>`, and
+  `schmeide.status._pool.>`;
 - `schmeide.token.<steward>`;
 - stream info and message get on `SCHMEIDE_STATUS` (any steward may read every registration and status, which
   is what `schmeide status` shows);
@@ -209,13 +232,15 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 
 ## Runner registration and status
 
-A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` once
-at startup and flushes. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
+A runner publishes a `Registration{steward, harnesses, host, pool, version}` on
+`schmeide.runners.<steward>.<host>` (`RegisterSubject`) once at startup and flushes. In the host token, `.`, `*`,
+`>`, and white space become `_`, and an empty host is `_`. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
 state change.
 
 `Tracker` (`status.go`) keeps the registrations and the latest status per job in memory:
 
-- `observeRegistration` drops a registration whose payload steward does not match the subject, since only the
+- `observeRegistration` drops a registration whose payload steward and host do not match the subject
+  (`RegisterSubject(steward, host)`, or `schmeide.runners.<steward>` from an older runner), since only the
   subject is pinned by NATS permissions. It keeps one entry per (steward, host). It logs a warning when
   `release.Skewed(runner version, control version)`, and still accepts the runner.
 - `observeStatus` stores the status and, for a final state (`State.final`: `pr_opened`, `review_failed`,
@@ -224,8 +249,16 @@ state change.
   sequence is after `After`.
 
 After a restart, `Track` replays `SCHMEIDE_STATUS` from its first sequence before it sets `q.tracker`, so the
-registrations, latest states, and issue-record final states are rebuilt before any new webhook is published. The
-ordered consumer starts at the sequence after the replay, so no message is applied twice.
+registrations, latest states, and issue-record final states are rebuilt before any new webhook is published.
+Sequences the per-subject limit removed are skipped (`jetstream.ErrMsgNotFound`). The ordered consumer starts at
+the sequence after the replay, so no message is applied twice.
+
+Because only the latest message per subject is kept, a status can be replaced before the live ordered consumer
+reads it. The tracker then applies the newer one instead. This only matters for a final state followed at once
+by another status on the same subject: `pr_opened` followed by `reviewing` skips recording `pr_opened` on the
+issue record, and the later `merged`, `queued`, `merge_failed`, or `review_failed` records the final state. A
+malformed message on a job's status subject replaces that job's stored status; only a runner holding that
+steward's token can publish there.
 
 `schmeide status` (`StatusMain`) connects as a steward, calls `ReadStatus`, which replays the same stream into a
 fresh read-only `Tracker` (`issues == nil`, so it never writes), and prints the registrations and every job whose
@@ -266,7 +299,8 @@ The reply is a `TokenReply`, with `error` set instead of a token on any refusal.
 
 Both are runner flags that act on the JetStream delivery, not control node flags:
 
-- `--ack-wait` (default 5m) becomes the consumer's `AckWait`. The runner sends `InProgress` every third of it.
+- `--ack-wait` (default 5m) becomes the consumer's `AckWait` when this runner creates the consumer. The runner
+  sends `InProgress` every third of the consumer's `AckWait`, whichever runner set it.
   When the heartbeats stop, JetStream redelivers the job to another runner on the same consumer.
 - `--stuck-after` (default 3h) is a runner-side watchdog. Each state the runner reports resets it. When it fires,
   the runner cancels the job's work and `Nak`s the delivery.

@@ -37,7 +37,8 @@ terminal. `New` then:
    unlimited reconnects, then sends an empty request on `schmeide.token.<steward>`. Only a control node answers
    it, so a wrong URL fails here with a message saying what to check.
 3. `register`: requires `git` on `PATH`, runs `Check` on every harness and picks the first that passes as the
-   writer, creates or updates the steward consumer and, with `--pool`, the pool consumer, opens the
+   writer, opens the steward consumer and, with `--pool`, the pool consumer (`sharedConsumer`: created with
+   this runner's `--ack-wait` when missing, used unchanged when another runner created it), opens the
    `SCHMEIDE_STATUS` stream and `SCHMEIDE_STAGES` bucket (each optional, for older control nodes), and publishes
    the `Registration` with the names of every harness that passed.
 
@@ -131,7 +132,9 @@ and `queued` are never retried.
 
 ### Heartbeat and the stuck watchdog
 
-The goroutine in `handle` sends `msg.InProgress()` every `AckWait/3`. Every `report` call signals a `progress`
+The goroutine in `handle` sends `msg.InProgress()` every third of the consumers' `AckWait` (`Runner.ackWait`,
+the shorter of the two for a `--pool` runner), which differs from `--ack-wait` when another runner created the
+consumer. Every `report` call signals a `progress`
 channel that resets a `--stuck-after` timer. When the timer fires, the goroutine cancels the work context with
 `errJobStuck` and `Nak`s the delivery. The job's processes are killed through their process groups, and
 `handle` returns without commenting or acking.
