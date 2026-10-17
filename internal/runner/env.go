@@ -37,3 +37,28 @@ func filterEnv(environ, names, prefixes []string) []string {
 func harnessEnv(environ, passEnv []string) []string {
 	return filterEnv(environ, slices.Concat(baseEnv, passEnv), slices.Concat(basePrefixes, harnessPrefixes))
 }
+
+// gateEnv is the environment of a job's gate command: the base list, the
+// base prefixes, and passEnv, and never a SCHMEIDE_ name, even one listed in
+// passEnv. HOME and TMPDIR are replaced per job by [scratchHome].
+func gateEnv(environ, passEnv []string) []string {
+	return slices.DeleteFunc(filterEnv(environ, slices.Concat(baseEnv, passEnv), basePrefixes), func(entry string) bool {
+		return strings.HasPrefix(entry, "SCHMEIDE_")
+	})
+}
+
+// homeEnv are the variables that point a process at the runner's own home.
+// [scratchHome] drops them, so the XDG directories default to under the
+// scratch HOME.
+var homeEnv = []string{"HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
+
+// scratchHome returns env with HOME and TMPDIR pointed at dir, so the gate
+// reads no dotfiles from the runner's home and leaves nothing behind once
+// dir is removed.
+func scratchHome(env []string, dir string) []string {
+	env = slices.DeleteFunc(slices.Clone(env), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(homeEnv, name)
+	})
+	return append(env, "HOME="+dir, "TMPDIR="+dir)
+}
