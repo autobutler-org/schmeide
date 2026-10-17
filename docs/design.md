@@ -309,6 +309,11 @@ suggested deployment pattern and belongs in deployment docs, not in the design
 of the tool. A control node without a public address needs a tunnel for
 webhooks.
 
+`schmeide version` prints the version the Makefile baked in; an unstamped build
+prints `dev`. When a runner registers, the control node compares versions. If
+both are valid semver and differ, it logs a warning and still accepts the
+runner. See [VERSIONING.md](VERSIONING.md).
+
 ## First slice
 
 Epic #7 is done. One control node and one runner take an assigned,
