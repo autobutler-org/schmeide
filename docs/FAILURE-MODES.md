@@ -6,13 +6,13 @@ it does not do. It covers only behavior that is built. For the lifecycle see
 
 ## Attempts
 
-A runner counts failed work outcomes per job, in memory. The count is not
-written anywhere. **If the runner process restarts, the count starts over at
-zero.** A job that failed twice before a restart gets a full set of attempts
-again.
+A runner writes the number of failed work outcomes on every job status. The
+status stream is stored in the control node's data directory, so a restarted
+runner restores the count before it claims the job. A restart does not grant a
+job a fresh retry budget.
 
-- `--max-attempts` (default 3) is how many failed work outcomes this process
-  allows for a job. While the count is below that, the runner reports the job
+- `--max-attempts` (default 3) is how many failed work outcomes the runners
+  allow for a job. While the count is below that, the runner reports the job
   as retrying and hands it back to the queue. The wait before the next try is
   30 seconds and has no flag.
 - When the count reaches the limit, the failure is final: the runner comments
@@ -36,7 +36,7 @@ again.
 A non-interactive run with no recorded decision for the work directory and
 origin, and without `SCHMEIDE_TRUST=1`, refuses the job before it creates a
 worktree. That refusal is a failed work outcome, so the count above includes
-it. The in-memory counter does not treat it specially.
+it. The persisted counter does not treat it specially.
 
 A pull request already open on a branch starting with `<issue number>_`, open
 or closed, keeps a retried job from opening a second one.
@@ -68,6 +68,21 @@ command's output.
 A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
+
+## Delivery heartbeats and stuck jobs
+
+`--ack-wait` defaults to 5 minutes. It is the JetStream delivery lease: while
+a runner owns a job it sends `InProgress` every third of that duration. The
+runner therefore has to remain connected to the control node throughout a
+long session. If the process dies or heartbeats stop, JetStream redelivers the
+job after the lease expires.
+
+`--stuck-after` defaults to 3 hours and is a separate no-progress budget. Each
+reported job-state change resets it. If the budget expires, the runner cancels
+the work, stops heartbeats, and Naks the delivery so another runner can take
+it immediately. This hand-back does not consume an attempt. Set the budget
+longer than the longest legitimate phase; in particular, account for
+`--session-timeout`, `--gate-timeout`, and slow factory-merge checks.
 
 ## Secret scan before push
 

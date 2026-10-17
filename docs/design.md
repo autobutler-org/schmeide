@@ -351,13 +351,18 @@ Follow-ups that landed with the slice:
   directory. A restarted control node loads them before it accepts new
   messages.
 - **#15.** A job that fails for a reason other than the gate is tried again, up
-  to `--max-attempts` (default 3). The runner counts those work failures
-  itself, and a token hand-back or a shutdown does not consume an attempt. The
-  count is kept in memory, and a restarted runner starts the attempt count
-  over. A job whose stage record names an open pull request resumes at review
+  to `--max-attempts` (default 3). The runner counts those work failures in the
+  persisted job status, and a token hand-back, shutdown, or stuck-job hand-back
+  does not consume an attempt. A restarted runner restores the attempt count.
+  A job whose stage record names an open pull request resumes at review
   and does not open a second one. A job with no pull request starts over. The wait before the next try is 30 seconds and has no flag. A gate
   failure is final. A pull request on a branch named `<issue number>_*`
   suppresses a second PR.
+- **#103.** A runner sends a JetStream `InProgress` heartbeat every third of
+  `--ack-wait` (default 5 minutes), so a dead runner's unacknowledged job is
+  redelivered. `--stuck-after` (default 3 hours) also cancels and Naks a job
+  that reports no state change within the budget, preventing a live but wedged
+  runner from heartbeating it forever.
 - **#16.** Webhooks are limited to an allowlist of orgs or App installations.
 - **Pull request #30.** Runner credentials are scoped per steward, the job
   carries the issue text from the event that created it, the harness session

@@ -102,5 +102,6 @@ schmeide completion fish > ~/.config/fish/completions/schmeide.fish
 
 - **Control will not start:** check the allowlist is set and the key file is mode 0600.
 - **No job after labeling:** check the delivery in the App's Advanced tab, and that the issue is assigned, labeled, and in an allowed org. A repeat delivery within `--delivery-ttl` is not published again.
-- **A failure before the pull request opens** is retried up to `--max-attempts` (default 3). The count is in memory, so a restart starts it over. A gate failure is commented on the issue and is not retried.
+- **A failure before the pull request opens** is retried up to `--max-attempts` (default 3). The count is persisted with job status, so a runner restart keeps it. A gate failure is commented on the issue and is not retried.
+- **A runner must keep heartbeating a claimed job.** `--ack-wait` defaults to 5 minutes, and the runner sends `InProgress` every third of that window; if the runner dies, JetStream redelivers the job after the window. `--stuck-after` defaults to 3 hours and Naks work that has reported no state change within that budget. See [failure modes](FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs).
 - Container isolation is not built. The harness and gate run as the user that started the runner, so use a user that holds nothing else worth taking.

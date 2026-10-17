@@ -92,10 +92,10 @@ The longest one harness session may run. The `session_timeout` config key
 overrides the runner's `--session-timeout` flag, which defaults to two hours.
 When it fires, the runner cancels the session, fails the job, and comments on
 the issue. A timeout before the pull request is open counts toward
-`--max-attempts`, and that count is kept in memory, so a restarted runner's
-count starts over. After a restart, a job whose stage record names an open pull
-request resumes at review and does not open a second pull request. A job with
-no pull request starts over.
+`--max-attempts`, and that count is stored with job status, so a restarted
+runner continues from the last count. After a restart, a job whose stage
+record names an open pull request resumes at review and does not open a second
+pull request. A job with no pull request starts over.
 
 ## steward
 
