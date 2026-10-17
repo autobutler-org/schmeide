@@ -14,7 +14,7 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-export GOTOOLCHAIN=go1.26.0+auto
+export GOTOOLCHAIN=go1.26.9+auto
 export GOPROXY ?= https://proxy.golang.org,direct
 GO := $(shell which go)
 
