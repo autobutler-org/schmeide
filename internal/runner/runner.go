@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/autobutler-org/schmeide/internal/ciwatch"
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
 	"github.com/autobutler-org/schmeide/internal/lintgate"
@@ -736,7 +737,14 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh github, job contr
 	if cfg.Merge != repoconfig.MergeFactory || out.state != StatePROpened {
 		return out
 	}
-	return r.mergeWhenGreen(ctx, ws, gh, url, cfg.CheckWait)
+	// One fix round for a failed check, when a review round is left for it.
+	var fix ciFix
+	if r.stage.Round < r.opts.MaxReviewRounds {
+		fix = func(ctx context.Context, run ciwatch.Run, tail string) (outcome, bool) {
+			return r.fixCheck(ctx, ws, job, cfg.Gate, url, limits, run, tail)
+		}
+	}
+	return r.mergeWhenGreen(ctx, ws, gh, url, cfg.CheckWait, fix)
 }
 
 // warnLintGate comments when the configured gate does not mention a lint

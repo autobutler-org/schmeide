@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/autobutler-org/schmeide/internal/ciwatch"
 )
 
 // github is the slice of the GitHub REST API a job needs, for one repository
@@ -23,39 +25,46 @@ type github struct {
 
 // do calls one endpoint under /repos/<repo>.
 func (g github) do(ctx context.Context, method, path string, in, out any) error {
+	data, err := g.send(ctx, method, path, in)
+	if err != nil || out == nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+// send calls one endpoint under /repos/<repo> and returns the body of a 2xx
+// reply. A redirect is followed.
+func (g github) send(ctx context.Context, method, path string, in any) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(g.api, "/")+"/repos/"+g.repo+path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+g.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("github %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("github %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return fmt.Errorf("github %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("github %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("github %s %s: %s: %s", method, path, resp.Status, data)
+		return nil, fmt.Errorf("github %s %s: %s: %s", method, path, resp.Status, data)
 	}
-	if out == nil {
-		return nil
-	}
-	return json.Unmarshal(data, out)
+	return data, nil
 }
 
 func (g github) defaultBranch(ctx context.Context) (string, error) {
@@ -250,13 +259,8 @@ func (g github) postedOutcome(ctx context.Context, issue int, since string) (Sta
 	}
 }
 
-// ghCheckRun is one check run on a commit. Status is completed once GitHub
-// has a conclusion.
-type ghCheckRun struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-}
+// ghCheckRun is one check run on a commit.
+type ghCheckRun = ciwatch.Run
 
 // checkPageSize is how many check runs one list page holds. A shorter page
 // is the last page.
@@ -287,6 +291,13 @@ func (g github) checkRuns(ctx context.Context, sha string) ([]ghCheckRun, error)
 			return all, nil
 		}
 	}
+}
+
+// jobLog reads the log of the Actions job behind a check run. GitHub answers
+// with a redirect to the log text. ponytail: the read keeps the first 8 MiB,
+// so a longer log loses its tail; stream it if logs grow past that.
+func (g github) jobLog(ctx context.Context, id int64) ([]byte, error) {
+	return g.send(ctx, http.MethodGet, fmt.Sprintf("/actions/jobs/%d/logs", id), nil)
 }
 
 // mergePull merges the pull request with a merge commit. It does not squash
