@@ -101,6 +101,14 @@ After review passes:
 - With `merge = "factory"`, the runner waits for the head commit's check runs
   to succeed, then merges with a merge commit. The wait is `check_wait` from the
   repo config, default two minutes. No check runs is not green.
+- Before the wait, the runner reads branch protection on the base branch. If
+  it can read it and the branch requires one or more approving reviews, the
+  job fails, the comment names that requirement, the pull request stays open,
+  and nothing is merged or enqueued. The runner cannot supply that review. A
+  404 or a 403 on the read does not fail the job: the merge is attempted and
+  GitHub still enforces its rules. If the read fails for any other reason, the job fails, the comment says schmeide could not read branch protection, and the pull request stays open.
+  A canceled wait is not that case. Required status checks are not this
+  failure. Human merge skips the check.
 - When the base branch has a merge queue, green checks add the pull request to
   the queue instead of merging it. The job is reported merged once it is
   queued.
