@@ -258,6 +258,7 @@ func runnerPermissions(steward string) *server.Permissions {
 			"$JS.API.CONSUMER.MSG.NEXT." + pool,
 			"$JS.ACK." + pool + ".>",
 			RegisterSubjectPrefix + steward,
+			RegisterSubjectPrefix + steward + ".*",
 			StatusSubjectPrefix + steward + ".>",
 			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
