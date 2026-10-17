@@ -236,7 +236,7 @@ func (w *stackWorkspace) Restack(_ context.Context, onto string) (bool, error) {
 	return w.restackErr == nil, w.restackErr
 }
 
-func (w *stackWorkspace) BaseMerged(context.Context, string) (bool, error) { return w.merged, nil }
+func (w *stackWorkspace) BaseMerged(context.Context, string, int) (bool, error) { return w.merged, nil }
 
 func (w *stackWorkspace) Restacks() []string {
 	w.mu.Lock()
@@ -340,43 +340,11 @@ func TestMergeWhenGreenSaysWhenARestackConflicts(t *testing.T) {
 func TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges(t *testing.T) {
 	// main <- 1_x <- 2_x on a real remote. 1_x merges into main with a merge
 	// commit, main moves on, and the branch is kept.
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-	src := t.TempDir()
-	commit := func(name string) {
-		if err := os.WriteFile(filepath.Join(src, name), []byte(name+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		git(t, src, "add", "-A")
-		git(t, src, "-c", "commit.gpgsign=false", "commit", "-q", "-m", name)
-	}
-	git(t, src, "init", "-q", "-b", "main")
-	git(t, src, "config", "user.email", "dev@example.com")
-	git(t, src, "config", "user.name", "Dev")
-	commit("README")
-	git(t, src, "checkout", "-q", "-b", "1_x")
-	commit("one.txt")
-	git(t, src, "checkout", "-q", "-b", "2_x")
-	commit("two.txt")
-	bare := filepath.Join(t.TempDir(), "origin.git")
-	git(t, src, "clone", "-q", "--bare", src, bare)
-	git(t, src, "remote", "add", "origin", bare)
-
-	ws, err := newWorktree(t.Context(), worktreeSpec{
-		workDir: t.TempDir(), url: bare, base: "1_x", branch: "2_x",
-		gitName: "schmeide[bot]", gitEmail: "bot@example.com", id: "2", repoID: "1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ws.Close() })
-	if err := ws.Resume(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-
+	src, ws := newStackRemote(t)
+	bare := git(t, src, "remote", "get-url", "origin")
 	git(t, src, "checkout", "-q", "main")
 	git(t, src, "-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "merge 1_x", "1_x")
-	commit("later.txt")
+	stackCommit(t, src, "later.txt")
 	git(t, src, "push", "-q", "origin", "main")
 	trunk := git(t, src, "rev-parse", "main")
 
@@ -401,15 +369,15 @@ func TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges(t *testing.T) {
 
 func TestBaseMergedTellsWhetherTheBaseIsOnTrunk(t *testing.T) {
 	w, _ := newPushFixture(t)
-	merged, err := w.BaseMerged(t.Context(), "main")
+	merged, err := w.BaseMerged(t.Context(), "main", 0)
 	if err != nil || !merged {
 		t.Fatalf("BaseMerged = %v, %v; want true for a branch built on main", merged, err)
 	}
 	// A base that only a branch which closed unmerged holds.
 	orphan := git(t, w.repoDir, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit-tree", "-m", "orphan", w.baseRef+"^{tree}")
-	w.baseRef = "refs/remotes/origin/1_x"
+	w.baseRef, w.spec.base = "refs/remotes/origin/1_x", "1_x"
 	git(t, w.repoDir, "update-ref", w.baseRef, orphan)
-	if merged, err = w.BaseMerged(t.Context(), "main"); err != nil || merged {
+	if merged, err = w.BaseMerged(t.Context(), "main", 0); err != nil || merged {
 		t.Fatalf("BaseMerged = %v, %v; want false for a base that is not on main", merged, err)
 	}
 }
@@ -428,5 +396,105 @@ func TestGitHubRetargetPullPatchesTheBase(t *testing.T) {
 	}
 	if want := `PATCH /repos/o/r/pulls/2 {"base":"main"}`; got != want {
 		t.Fatalf("request = %q, want %q", got, want)
+	}
+}
+
+// newStackRemote builds main <- 1_x <- 2_x on a bare remote and a worktree
+// for 2_x built on 1_x. It returns the source clone, which pushes to the
+// remote as origin, and the worktree.
+func newStackRemote(t *testing.T) (src string, ws *worktree) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	src = t.TempDir()
+	git(t, src, "init", "-q", "-b", "main")
+	git(t, src, "config", "user.email", "dev@example.com")
+	git(t, src, "config", "user.name", "Dev")
+	stackCommit(t, src, "README")
+	git(t, src, "checkout", "-q", "-b", "1_x")
+	stackCommit(t, src, "one.txt")
+	git(t, src, "checkout", "-q", "-b", "2_x")
+	stackCommit(t, src, "two.txt")
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	git(t, src, "clone", "-q", "--bare", src, bare)
+	git(t, src, "remote", "add", "origin", bare)
+
+	ws, err := newWorktree(t.Context(), worktreeSpec{
+		workDir: t.TempDir(), url: bare, base: "1_x", branch: "2_x",
+		gitName: "schmeide[bot]", gitEmail: "bot@example.com", id: "2", repoID: "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ws.Close() })
+	if err := ws.Resume(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	return src, ws
+}
+
+// stackCommit commits a new file name in dir.
+func stackCommit(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "add", "-A")
+	git(t, dir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", name)
+}
+
+// rebaseBottom moves main on and rebases 1_x onto it, as a bottom that
+// restacked after its own bottom merged, and force-pushes both.
+func rebaseBottom(t *testing.T, src string) {
+	t.Helper()
+	git(t, src, "checkout", "-q", "main")
+	stackCommit(t, src, "early.txt")
+	git(t, src, "checkout", "-q", "1_x")
+	git(t, src, "-c", "commit.gpgsign=false", "rebase", "-q", "main")
+	git(t, src, "push", "-q", "--force", "origin", "main", "1_x")
+}
+
+func TestMergeWhenGreenRestacksAfterTheBottomIsRebasedAndMerged(t *testing.T) {
+	// Between two polls 1_x is rebased and merged with a merge commit, so
+	// the 1_x that 2_x was built on is not on main, but 1_x's tip is.
+	src, ws := newStackRemote(t)
+	rebaseBottom(t, src)
+	git(t, src, "checkout", "-q", "main")
+	git(t, src, "-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "merge 1_x", "1_x")
+	git(t, src, "push", "-q", "origin", "main")
+	trunk := git(t, src, "rev-parse", "main")
+
+	gh := newStackForge(0, "success")
+	gh.keep = true
+	gh.pull(2, "1_x")
+	gh.pulls[0].State = "closed"
+	out := (&Runner{}).mergeWhenGreen(t.Context(), ws, gh, 2, "1_x", gh.pulls[1].HTMLURL, time.Minute, nil)
+	if out.state != StateMerged {
+		t.Fatalf("outcome = %+v, want merged", out)
+	}
+	if got := gh.base(2); got != "main" {
+		t.Errorf("pull 2 targets %s, want main", got)
+	}
+	git(t, src, "fetch", "-q", "origin")
+	if parent := git(t, src, "rev-parse", "origin/2_x^"); parent != trunk {
+		t.Errorf("2_x's parent = %s, want main's head %s: the branch was not rebased", parent, trunk)
+	}
+}
+
+func TestMergeWhenGreenRefusesAStackOnARebasedPullThatClosed(t *testing.T) {
+	// 1_x is rebased, then its pull request closes without merging.
+	src, ws := newStackRemote(t)
+	rebaseBottom(t, src)
+
+	gh := newStackForge(0, "success")
+	gh.keep = true
+	gh.pull(2, "1_x")
+	gh.pulls[0].State = "closed"
+	out := (&Runner{}).mergeWhenGreen(t.Context(), ws, gh, 2, "1_x", gh.pulls[1].HTMLURL, time.Minute, nil)
+	if out.state != StateMergeFailed || !strings.Contains(out.detail, "retarget it to main") {
+		t.Fatalf("outcome = %+v, want merge failed asking a person to retarget", out)
+	}
+	if got := gh.Merged(); len(got) != 0 {
+		t.Fatalf("merged %v, want nothing", got)
 	}
 }

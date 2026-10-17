@@ -342,7 +342,11 @@ func waitForStack(ctx context.Context, ws Workspace, gh forge.Forge, issue int, 
 			// first, which leaves the base this branch built on off trunk.
 			merged := ok && parent.MergedAt != ""
 			if !merged {
-				if merged, err = ws.BaseMerged(ctx, trunk); err != nil {
+				number := 0
+				if ok {
+					number, _ = pullNumber(parent.HTMLURL)
+				}
+				if merged, err = ws.BaseMerged(ctx, trunk, number); err != nil {
 					return fmt.Errorf("could not tell whether %s merged into %s: %w", base, trunk, err)
 				}
 			}
