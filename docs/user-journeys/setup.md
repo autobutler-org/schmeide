@@ -573,8 +573,9 @@ in.
 
 - The runner creates `schmeide-work/` (the default `--work-dir`) for clones
   and worktrees.
-- The registration does not expire. A stopped runner stays listed, and its
-  steward keeps their jobs (JN-POOL-003).
+- The runner publishes its registration again every minute. Three minutes
+  after a runner stops, it is no longer listed, and its steward's next job goes
+  to the pool (JN-POOL-008).
 - Covered by `TestRunnerOnlyTakesItsStewardsJobs` and
   `TestTrackerRecordsRegisteredRunners`.
 

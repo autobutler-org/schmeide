@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/nats-io/nats.go"
@@ -21,7 +23,8 @@ import (
 
 const (
 	// RegisterSubjectPrefix plus a steward is the subject a runner announces
-	// itself on when it starts. The message is a Registration.
+	// itself on when it starts, and again every RegistrationInterval. The
+	// message is a Registration.
 	RegisterSubjectPrefix = "schmeide.runners."
 	// StatusSubjectPrefix replaces "schmeide.jobs." in a job's subject to give
 	// the subject its Status messages are published on.
@@ -31,6 +34,15 @@ const (
 	// data directory. It is the history a restarted control node or runner
 	// loads.
 	StatusStream = "SCHMEIDE_STATUS"
+
+	// RegistrationInterval is how often a runner publishes its Registration
+	// again while it runs.
+	RegistrationInterval = time.Minute
+	// RegistrationTTL is how long a Registration counts after it was stored.
+	// A runner that has not refreshed it within this time is no longer
+	// registered: its steward's next job goes to the pool, and `schmeide
+	// status` stops listing it.
+	RegistrationTTL = 3 * RegistrationInterval
 )
 
 // State is where a job stands. Gate failed, PR opened, failed, review failed,
@@ -92,13 +104,43 @@ type Registration struct {
 
 // Tracker records what runners report: who registered and where each job
 // stands. Registrations and statuses are stored on StatusStream, and Track
-// loads that history before it returns.
+// loads that history before it returns. A registration counts for
+// RegistrationTTL after it was stored.
 type Tracker struct {
 	stream  jetstream.Stream
 	issues  jetstream.KeyValue
 	mu      sync.Mutex
-	runners []Registration
+	runners []liveRegistration
 	jobs    map[string]Status
+	// now is the clock. Nil means time.Now. Tests set it with setClock.
+	now func() time.Time
+}
+
+// liveRegistration is a Registration and when it was stored.
+type liveRegistration struct {
+	Registration
+
+	stored time.Time
+}
+
+// setClock replaces the tracker's clock.
+func (t *Tracker) setClock(now func() time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.now = now
+}
+
+// live drops registrations older than RegistrationTTL and returns the rest.
+// The caller holds t.mu.
+func (t *Tracker) live() []liveRegistration {
+	now := time.Now()
+	if t.now != nil {
+		now = t.now()
+	}
+	t.runners = slices.DeleteFunc(t.runners, func(r liveRegistration) bool {
+		return now.Sub(r.stored) >= RegistrationTTL
+	})
+	return t.runners
 }
 
 // Track records runner registrations and job statuses. Messages already
@@ -151,7 +193,7 @@ func (t *Tracker) replay(ctx context.Context, stream jetstream.Stream, log *slog
 		if err != nil {
 			return fmt.Errorf("load status history: %w", err)
 		}
-		t.observe(log, msg.Sequence, msg.Subject, msg.Data)
+		t.observe(log, msg.Sequence, msg.Time, msg.Subject, msg.Data)
 	}
 	return nil
 }
@@ -168,7 +210,7 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 			log.Error("dropping a status without metadata", "subject", msg.Subject(), "err", err)
 			return
 		}
-		t.observe(log, meta.Sequence.Stream, msg.Subject(), msg.Data())
+		t.observe(log, meta.Sequence.Stream, meta.Timestamp, msg.Subject(), msg.Data())
 	})
 	if err != nil {
 		return fmt.Errorf("follow status stream: %w", err)
@@ -176,21 +218,36 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 	return nil
 }
 
-func (t *Tracker) observe(log *slog.Logger, seq uint64, subject string, data []byte) {
+func (t *Tracker) observe(log *slog.Logger, seq uint64, stored time.Time, subject string, data []byte) {
 	switch {
 	case strings.HasPrefix(subject, RegisterSubjectPrefix):
-		t.observeRegistration(log, subject, data)
+		t.observeRegistration(log, stored, subject, data)
 	case strings.HasPrefix(subject, StatusSubjectPrefix):
 		t.observeStatus(log, seq, subject, data)
 	}
 }
 
-func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []byte) {
+func (t *Tracker) observeRegistration(log *slog.Logger, stored time.Time, subject string, data []byte) {
 	var reg Registration
 	// The subject, not the payload, is what NATS permissions can pin to a
 	// steward, so the two must agree.
 	if err := json.Unmarshal(data, &reg); err != nil || RegisterSubjectPrefix+reg.Steward != subject {
 		log.Warn("dropping a malformed runner registration", "subject", subject, "err", err)
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// A refresh of an unchanged, live registration is not logged again.
+	same := slices.ContainsFunc(t.live(), func(r liveRegistration) bool {
+		return reflect.DeepEqual(r.Registration, reg)
+	})
+	// A runner registers again on an interval and on a restart; keep one
+	// entry per steward and host, the latest.
+	t.runners = slices.DeleteFunc(t.runners, func(r liveRegistration) bool {
+		return r.Steward == reg.Steward && r.Host == reg.Host
+	})
+	t.runners = append(t.runners, liveRegistration{Registration: reg, stored: stored})
+	if same {
 		return
 	}
 	log.Info("runner registered", "steward", reg.Steward, "host", reg.Host, "harnesses", strings.Join(reg.Harnesses, ","), "pool", reg.Pool, "version", reg.Version)
@@ -199,13 +256,6 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 		log.Warn("runner version differs from the control node; upgrade one so they match",
 			"steward", reg.Steward, "host", reg.Host, "runner_version", reg.Version, "control_version", release.Version)
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	// A restarted runner registers again; keep one entry per steward and host.
-	t.runners = slices.DeleteFunc(t.runners, func(r Registration) bool {
-		return r.Steward == reg.Steward && r.Host == reg.Host
-	})
-	t.runners = append(t.runners, reg)
 }
 
 func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, data []byte) {
@@ -267,13 +317,13 @@ func (t *Tracker) lastSeq(ctx context.Context) (uint64, error) {
 	return info.State.LastSeq, nil
 }
 
-// hasRunner reports whether the steward has at least one registration.
-// Registrations are not expired: a runner that stops stays registered.
+// hasRunner reports whether the steward has at least one live registration.
 func (t *Tracker) hasRunner(steward string) bool {
 	return t.registered(steward, false)
 }
 
-// poolRunner reports whether the steward has a registration with the pool flag.
+// poolRunner reports whether the steward has a live registration with the
+// pool flag.
 func (t *Tracker) poolRunner(steward string) bool {
 	return t.registered(steward, true)
 }
@@ -281,7 +331,7 @@ func (t *Tracker) poolRunner(steward string) bool {
 func (t *Tracker) registered(steward string, poolOnly bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, r := range t.runners {
+	for _, r := range t.live() {
 		if r.Steward == steward && (!poolOnly || r.Pool) {
 			return true
 		}
@@ -289,11 +339,15 @@ func (t *Tracker) registered(steward string, poolOnly bool) bool {
 	return false
 }
 
-// Runners returns the registered runners, oldest registration first.
+// Runners returns the live registrations, least recently refreshed first.
 func (t *Tracker) Runners() []Registration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return slices.Clone(t.runners)
+	runners := []Registration{}
+	for _, r := range t.live() {
+		runners = append(runners, r.Registration)
+	}
+	return runners
 }
 
 // JobStatus returns the latest status reported for the job on the given
@@ -335,7 +389,7 @@ func ReadStatus(ctx context.Context, js jetstream.JetStream) (Snapshot, error) {
 	if err := t.replay(ctx, stream, slog.New(slog.DiscardHandler), stream.CachedInfo().State); err != nil {
 		return snap, err
 	}
-	snap.Runners = append(snap.Runners, t.runners...)
+	snap.Runners = append(snap.Runners, t.Runners()...)
 	for subject, status := range t.jobs {
 		if !status.State.final() {
 			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail})

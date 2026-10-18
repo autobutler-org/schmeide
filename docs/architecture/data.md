@@ -57,7 +57,7 @@ All of `--data-dir` survives, and `Run` rebuilds the in-memory state from it bef
 | --- | --- | --- |
 | Queued and in-flight jobs | yes | `SCHMEIDE_JOBS` and the durable consumers. A held job is redelivered when its lease lapses. |
 | Per-issue dedupe | yes | `SCHMEIDE_ISSUES`. |
-| Runner registrations, used for pool routing | yes | Replayed from `SCHMEIDE_STATUS` by `Queue.Track`. |
+| Runner registrations, used for pool routing | yes | Replayed from `SCHMEIDE_STATUS` by `Queue.Track`, with their stored times, so one older than `RegistrationTTL` is already expired after the restart. |
 | Latest job states for `schmeide status` | yes | Replayed from `SCHMEIDE_STATUS`. |
 | Attempt counts | yes | The `attempts` field of the last status per job. |
 | Stage records | yes | `SCHMEIDE_STAGES`. |
@@ -107,7 +107,9 @@ issue a duplicate.
 ### Registration and status (`control.Registration`, `control.Status`)
 
 `Registration` on `schmeide.runners.<steward>`: `steward`, `harnesses` (names that passed `Check`), `host`,
-`pool`, `version`. The tracker keeps one per (steward, host). Registrations are never expired.
+`pool`, `version`. A runner publishes it at startup and every `RegistrationInterval` (1 minute). The tracker keeps
+the latest per (steward, host) with the time JetStream stored it, and counts it for `RegistrationTTL` (3 minutes)
+from then. An older registration is dropped from pool routing, pool token minting, and `schmeide status`.
 
 `Status` on `schmeide.status.<steward or _pool>.<repo_id>.<issue>`: `state`, `detail` (PR URL or the reason),
 `attempts` (failed work outcomes so far, omitted when zero).

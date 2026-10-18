@@ -7,9 +7,11 @@ steward has no registered runner. Implemented in `internal/control/queue.go`
 [../GLOSSARY.md](../GLOSSARY.md#pool).
 
 Whether a job goes to the pool is decided once, when the control node
-publishes it: a steward with no registration on record gets their job on the
-pool. A registration is kept until the control node's data directory is lost,
-even after that runner stops.
+publishes it: a steward with no live registration gets their job on the pool.
+A runner publishes its registration at startup and every minute
+(`control.RegistrationInterval`), and a registration is live for three minutes
+(`control.RegistrationTTL`) after it was stored. A runner that stops therefore
+stops counting within three minutes.
 
 ---
 
@@ -62,10 +64,10 @@ started a runner against this control node.
 
 ---
 
-### JN-POOL-003: A steward with a registered runner keeps the job
+### JN-POOL-003: A steward with a running runner keeps the job
 
-**Preconditions:** `bob` started a runner once (it registered), and that
-runner is now stopped. alice runs a pool runner.
+**Preconditions:** `bob` runs a runner without `--pool`. alice runs a pool
+runner.
 
 **Steps:**
 
@@ -73,13 +75,11 @@ runner is now stopped. alice runs a pool runner.
 
 **Expected result:**
 
-- alice's pool runner does not take it. The job waits on bob's queue.
-- When bob starts a runner, it takes the job.
+- alice's pool runner does not take it. bob's runner takes it.
 
 **Notes:**
 
-- A registration does not expire, so a stopped runner still counts.
-- Covered by `TestRegisteredStewardKeepsTheJobFromThePool`.
+- Covered by `internal/runner` `TestRegisteredStewardKeepsTheJobFromThePool`.
 
 ---
 
@@ -170,3 +170,37 @@ own jobs are both waiting.
   registered with `--pool`. A runner that pulls a pool job without it gets no
   token and hands the job back.
 - Covered by `TestPoolJobTokenRequiresThePoolFlag`.
+
+---
+
+### JN-POOL-008: A stopped runner's steward falls back to the pool
+
+**Preconditions:** `bob` started a runner, which registered, and then stopped
+it. alice runs a pool runner.
+
+**Steps:**
+
+1. Wait at least three minutes after bob's runner stopped.
+2. Run `schmeide status` as bob.
+3. Assign an issue to `bob` and add `schmeide:ready`.
+
+**Expected result:**
+
+- Step 2 no longer lists bob's runner.
+- Step 3: the job is published on `schmeide.jobs._pool.<repo id>.<issue>`,
+  and alice's pool runner takes it.
+- An issue made ready within three minutes of the stop still goes to bob's
+  queue and waits for his next runner.
+- A control node restart does not bring the registration back: its age comes
+  from when it was stored.
+
+**Notes:**
+
+- The control node logs nothing when a registration expires. The next
+  registration from that host logs `msg="runner registered"` again.
+- Requires runners that re-publish their registration every
+  `control.RegistrationInterval`; a runner that registers only at startup
+  falls out of routing three minutes after it starts.
+- Covered by `internal/control` `TestRegistrationExpiresWithoutRefresh`,
+  `TestExpiredRegistrationSendsTheNextJobToThePool`, and
+  `TestRestartKeepsOnlyLiveRegistrations`.

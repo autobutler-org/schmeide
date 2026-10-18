@@ -167,7 +167,7 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded; a registration refresh adds one message per runner per minute) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, `History: 1`, `MaxValueSize` 4 KiB | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
@@ -209,9 +209,10 @@ It may subscribe only below `_INBOX_<steward>.>` (`InboxPrefix`). Runners and `s
 
 `Queue.Publish` decides where the job goes and whether it is new.
 
-1. `job.Pool` is set when the tracker is running and `Tracker.hasRunner(steward)` is false. Registrations never
-   expire, so a steward whose runner registered once, even long ago, keeps getting jobs on its own subject.
-   Until `Track` has run there is no tracker and the job stays on the steward's subject.
+1. `job.Pool` is set when the tracker is running and `Tracker.hasRunner(steward)` is false: the steward has no
+   live registration, one stored within `RegistrationTTL` (3 minutes). A steward whose runner stopped, or never
+   refreshed its registration, gets its next job on the pool subject. Until `Track` has run there is no tracker and
+   the job stays on the steward's subject.
 2. The issue key is `<repo_id>.<issue>`. When a record exists and its state is not `gate_failed` or `failed`
    (`State.failure`), the delivery is a duplicate: an unfinished job, or one that ended with a pull request
    (`pr_opened`, `review_failed`, `merged`, `queued`, `merge_failed`), blocks a new job for that issue whoever
@@ -229,15 +230,23 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 
 ## Runner registration and status
 
-A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` once
-at startup and flushes. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
-state change.
+A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` at
+startup and flushes, and is expected to publish it again every `RegistrationInterval` (1 minute) while it runs. It
+publishes a `Status{state, detail, attempts}` on its job's status subject at every state change.
+
+A registration is live for `RegistrationTTL` (3 minutes, three intervals) after JetStream stored it. The age comes
+from the stored message's timestamp, not from when the tracker saw it, so a control node restart does not refresh
+a stale registration. `Tracker.live` drops registrations past the TTL on each read; `hasRunner`, `poolRunner`
+(pool routing and pool token minting), `Runners`, and the `schmeide status` snapshot see only live ones. Nothing is
+logged when a registration expires.
 
 `Tracker` (`status.go`) keeps the registrations and the latest status per job in memory:
 
 - `observeRegistration` drops a registration whose payload steward does not match the subject, since only the
-  subject is pinned by NATS permissions. It keeps one entry per (steward, host). It logs a warning when
-  `release.Skewed(runner version, control version)`, and still accepts the runner.
+  subject is pinned by NATS permissions. It keeps one entry per (steward, host), the latest, with the time it was
+  stored. A refresh that matches a live entry exactly is not logged. A new or changed registration, or one that
+  arrives after the old one expired, logs `msg="runner registered"`, and a warning when
+  `release.Skewed(runner version, control version)`; the runner is still accepted.
 - `observeStatus` stores the status and, for a final state (`State.final`: `pr_opened`, `review_failed`,
   `merged`, `queued`, `merge_failed`, `gate_failed`, `failed`), calls `Tracker.finish`, which writes the state
   into the issue record when the record still names that subject, is not already finished, and the status

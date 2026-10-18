@@ -329,3 +329,83 @@ func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
 		t.Errorf("jobs = %+v, want only the working and reviewing jobs", got.Jobs)
 	}
 }
+
+// advance moves the tracker's clock d past the real time.
+func advance(tracker *Tracker, d time.Duration) {
+	tracker.setClock(func() time.Time { return time.Now().Add(d) })
+}
+
+func TestRegistrationExpiresWithoutRefresh(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop", Pool: true}
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+
+	advance(tracker, RegistrationTTL-time.Second)
+	if !tracker.hasRunner("alice") || !tracker.poolRunner("alice") || len(tracker.Runners()) != 1 {
+		t.Fatalf("registration expired before its TTL: runners = %+v", tracker.Runners())
+	}
+	advance(tracker, RegistrationTTL+time.Second)
+	if tracker.hasRunner("alice") || tracker.poolRunner("alice") {
+		t.Error("an expired registration still counts as a runner")
+	}
+	if got := tracker.Runners(); len(got) != 0 {
+		t.Errorf("runners = %+v, want none once expired", got)
+	}
+
+	// A refresh brings it back.
+	tracker.setClock(time.Now)
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+	if got := tracker.Runners(); !reflect.DeepEqual(got, []Registration{alice}) {
+		t.Errorf("runners after a refresh = %+v, want %+v", got, []Registration{alice})
+	}
+}
+
+func TestExpiredRegistrationSendsTheNextJobToThePool(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"fake"}, Host: "h"})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+	first := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	second := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), first); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	advance(tracker, RegistrationTTL+time.Second)
+	if created, err := q.Publish(t.Context(), second); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	got := jobs(t, q)
+	if len(got) != 2 || got[0].Pool || !got[1].Pool {
+		t.Fatalf("jobs = %+v, want the first on the steward subject and the second pooled", got)
+	}
+	if got[1].Subject() != jobSubjectPrefix+PoolName+".7.2" {
+		t.Errorf("second job subject = %s, want the pool subject", got[1].Subject())
+	}
+}
+
+func TestRestartKeepsOnlyLiveRegistrations(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
+	startFakeRunner(t, q).publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+
+	tracker = startTracker(t, restartQueue(t, q, dir))
+	if got := tracker.Runners(); !reflect.DeepEqual(got, []Registration{alice}) {
+		t.Errorf("runners right after a restart = %+v, want %+v", got, []Registration{alice})
+	}
+	// The registration's age comes from when it was stored, not from the
+	// replay, so a restart does not refresh it.
+	advance(tracker, RegistrationTTL+time.Second)
+	if got := tracker.Runners(); len(got) != 0 {
+		t.Errorf("runners = %+v, want none once the stored registration is older than the TTL", got)
+	}
+}
