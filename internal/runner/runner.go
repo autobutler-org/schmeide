@@ -14,6 +14,9 @@
 // config keys session_timeout and gate_timeout override those flags. A
 // timeout cancels that process group, fails the job, and comments on the
 // issue. The comment does not include the command's output.
+// Before every push it scans the lines the branch adds for credentials,
+// including the job's own installation token and the runner's NATS token, and
+// it revokes each delivery's installation token when the delivery ends.
 package runner
 
 import (
