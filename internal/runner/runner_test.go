@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -72,6 +73,8 @@ type world struct {
 	maxAttempts int
 	// ackWait and stuckAfter override the runner's delivery lease settings.
 	ackWait, stuckAfter time.Duration
+	// logs, when set, receives the runner's log. Nil discards it.
+	logs io.Writer
 }
 
 func newWorld(t *testing.T) *world {
@@ -204,12 +207,32 @@ func (w *world) runnerWith(t *testing.T, steward string, h harness.Harness, pool
 		StuckAfter:   w.stuckAfter,
 		RetryDelay:   10 * time.Millisecond,
 		MaxAttempts:  w.maxAttempts,
-	}, slog.New(slog.DiscardHandler))
+	}, w.logger())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Close)
 	return r, workDir
+}
+
+// logger is the runner's logger: a text log into w.logs, or a discarding one.
+func (w *world) logger() *slog.Logger {
+	if w.logs == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return slog.New(slog.NewTextHandler(w.logs, nil))
+}
+
+// awaitRevoked waits until the job's token has been revoked n times.
+func (w *world) awaitRevoked(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for w.gh.Revoked() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("token revoked %d times, want %d; calls %v", w.gh.Revoked(), n, w.gh.Calls())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // start runs a runner for the steward until the test ends and returns it
@@ -895,6 +918,66 @@ func TestFailedJobIsRetried(t *testing.T) {
 	}
 }
 
+// TestJobEndRevokesItsToken checks that the job's installation token is
+// revoked once the job has reached a final state, after every other GitHub
+// call the job makes, for a pull request and for a gate failure alike.
+func TestJobEndRevokesItsToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{name: "pull request opened", files: map[string]string{"fix.txt": "x"}, want: "[claimed working reviewing pr_opened]"},
+		{name: "gate failed", files: map[string]string{"broken": "x"}, want: "[claimed working gate_failed]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newWorld(t)
+			h, _ := writes(tt.files)
+			w.start(t, "alice", h)
+			w.publish(t, "alice", 7)
+			if got := fmt.Sprint(w.await(t, "alice", 7)); got != tt.want {
+				t.Fatalf("states = %s, want %s", got, tt.want)
+			}
+			w.awaitRevoked(t, 1)
+			calls := w.gh.Calls()
+			if last := calls[len(calls)-1]; last != "DELETE /installation/token" {
+				t.Errorf("last GitHub call = %q, want the revoke; calls %v", last, calls)
+			}
+		})
+	}
+}
+
+// TestFailedRevokeIsLoggedAndKeepsTheOutcome makes GitHub refuse the revoke.
+// The job still opens its pull request and comments, and the runner logs the
+// refusal.
+func TestFailedRevokeIsLoggedAndKeepsTheOutcome(t *testing.T) {
+	w := newWorld(t)
+	var logs lockedBuffer
+	w.logs = &logs
+	w.gh.FailRevoke(http.StatusBadGateway)
+	h, _ := writes(map[string]string{"fix.txt": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
+		t.Fatalf("states = %s, want %s", got, want)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "could not revoke the job's token") {
+		if time.Now().After(deadline) {
+			t.Fatalf("log = %q, want the failed revoke", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if strings.Contains(logs.String(), testToken) {
+		t.Error("the log carries the token")
+	}
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 1 || len(comments["7"]) != 1 {
+		t.Errorf("pulls %+v, comments %q; want the pull request and its comment", pulls, comments["7"])
+	}
+}
+
 func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	w := newWorld(t)
 	var sessions atomic.Int32
@@ -913,6 +996,10 @@ func TestFailedJobIsFinalAfterMaxAttempts(t *testing.T) {
 	time.Sleep(3 * pollWait)
 	if got := sessions.Load(); got != defaultMaxAttempts {
 		t.Errorf("sessions = %d, want %d: the retries are bounded", got, defaultMaxAttempts)
+	}
+	// Each delivery mints its own token, so each one is revoked.
+	if got := w.gh.Revoked(); got != defaultMaxAttempts {
+		t.Errorf("tokens revoked = %d, want one per delivery, %d", got, defaultMaxAttempts)
 	}
 	pulls, comments := w.gh.Snapshot()
 	if len(pulls) != 0 {

@@ -86,17 +86,32 @@ longer than the longest legitimate phase; in particular, account for
 
 ## Secret scan before push
 
-Before `git push`, the runner scans the tracked files in the job's worktree for
-credential-shaped literals: PEM private keys, GitHub tokens, GitLab tokens, AWS
-access keys, and JWTs. If it finds one, it refuses the push and `git push`
-does not run.
+Before `git push`, the runner scans the lines the job's branch adds relative to
+its base for credential-shaped literals: PEM private keys, GitHub tokens
+(including `ghs_` installation tokens), GitLab tokens, AWS access keys, JWTs,
+Anthropic API keys, and xAI API keys. It also looks for the job's installation
+token and the runner's NATS token verbatim. If it finds one, it refuses the push
+and `git push` does not run. A literal that is already on the base is not the
+job's and does not block the push.
 
 The error names each file, the line, and the kind, for example
 `refusing to push: config.go:12 contains a GitHub token`. It does not include
-the secret. A line containing `schmeide:allow-secret` is skipped. The scan
-reads files only: it does not look at the process environment.
+the secret. A line containing `schmeide:allow-secret` is skipped, except when
+it holds one of the runner's own tokens verbatim, which is reported as a
+`runner credential`. The scan reads git output only: it does not look at the
+process environment.
 
 A refused push is a failed work outcome, so it counts as an attempt.
+
+## Token revocation
+
+When a delivery ends, the runner revokes the delivery's installation token with
+`DELETE /installation/token`. That happens after a final state, a retry, a
+stuck-job drop, and a shutdown hand-back. If GitHub refuses the call or cannot
+be reached within 30 seconds, the runner logs
+`could not revoke the job's token; it expires within the hour` and nothing else
+changes: the job's state, its issue comment, and its acknowledgment stand, and
+the token stays valid until GitHub expires it.
 
 ## Branches
 

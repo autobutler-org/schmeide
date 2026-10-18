@@ -165,7 +165,8 @@ gate takes.
 
 **Preconditions:** The session commits a file with a credential-shaped
 literal, for example a line with `ghp_` followed by 36 characters in
-`config.go`.
+`config.go`, or the job's installation token or the runner's NATS token
+verbatim.
 
 **Steps:**
 
@@ -180,13 +181,23 @@ literal, for example a line with `ghp_` followed by 36 characters in
 
 **Notes:**
 
-- The scan reads tracked files in the worktree and looks for PEM private
-  keys, GitHub tokens, GitLab tokens, AWS access keys, and JWTs. It does not
-  read the environment.
+- The scan reads only the lines the branch adds relative to its base
+  (`git diff -U0 -M <base>...HEAD`) and looks for PEM private keys, GitHub
+  tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), GitLab tokens,
+  AWS access keys, JWTs, Anthropic API keys (`sk-ant-`), and xAI API keys
+  (`xai-`). It does not read the environment.
+- The job's installation token and the runner's NATS token are refused
+  verbatim, as "contains a runner credential", even on a line marked
+  `schmeide:allow-secret`.
+- A literal already on the base, or carried over by a rename, does not block
+  the push.
 - Several findings are joined with "; ".
 - The same scan runs before a restack push (JN-MERGE-018).
-- Covered by `TestPushStopsForPrivateKeyWithoutRevealingIt` and
-  `TestScanReportsEachCredentialShape`.
+- Covered by `TestPushStopsForPrivateKeyWithoutRevealingIt`,
+  `TestPushRefusesTheJobsCredentialsAndNewTokenShapes`, and
+  `TestPushIgnoresALiteralAlreadyOnTheBase` in `internal/runner`, and
+  `TestScanReportsEachCredentialShape`, `TestScanDiffOnAddedLines`, and
+  `TestScanDiffReadsOnlyTheBranchsAddedLines` in `internal/secretscan`.
 
 ---
 
@@ -464,3 +475,36 @@ the runner's checkout does not contain.
 **Notes:**
 
 - No automated test.
+
+---
+
+### JN-FAIL-020: The job's installation token is revoked when the delivery ends
+
+**Preconditions:** A runner is connected and the control node can mint
+installation tokens.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Let the job reach any end: a pull request, a gate failure, a failed attempt
+   that is retried, or a final failure.
+
+**Expected result:**
+
+- After the outcome comment and the acknowledgment, the runner calls
+  `DELETE /installation/token` with the delivery's token. The token stops
+  working at once instead of at the end of its hour.
+- Each delivery mints its own token, so a job retried three times revokes three
+  tokens.
+- If GitHub refuses the revoke, the runner log has "could not revoke the job's
+  token; it expires within the hour" with the repo and issue. The job's state,
+  its issue comment, and its acknowledgment are unchanged.
+
+**Notes:**
+
+- Implemented by `github.RevokeToken` (`internal/runner/github.go`) and
+  `Runner.revoke` (`internal/runner/runner.go`).
+- Covered by `TestJobEndRevokesItsToken`,
+  `TestFailedRevokeIsLoggedAndKeepsTheOutcome`, and
+  `TestFailedJobIsFinalAfterMaxAttempts` in `internal/runner`, and
+  `TestRevokeToken` in `internal/testutil/fakegh`.
