@@ -69,6 +69,16 @@ A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
 
+## Registration refresh
+
+A runner re-publishes its registration every minute while `Run` runs
+(`Runner.keepRegistered` in `internal/runner/runner.go`). A publish that fails
+logs `could not report to the control node` with the subject and is retried on
+the next tick. A runner that cannot reach the control node for three minutes
+(`control.RegistrationTTL`) stops counting as registered: its steward's next
+job goes to the pool and `schmeide status` stops listing it, until a refresh
+gets through again. Nothing is commented on any issue.
+
 ## Delivery heartbeats and stuck jobs
 
 `--ack-wait` defaults to 5 minutes. It is the JetStream delivery lease: while
