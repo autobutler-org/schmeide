@@ -68,7 +68,8 @@ flowchart TD
     replay -- yes --> r200["200 replay<br/>(nothing published)"]
     replay -- no --> rate{"under --webhook-rate<br/>this minute?"}
     rate -- no --> r429["429"]
-    rate -- yes --> body["read body, cap 25 MiB"]
+    rate -- yes --> body["read body: 1 MiB for issues,<br/>64 KiB for other events"]
+    body -- "over the cap" --> r413["413"]
     body --> sig{"X-Hub-Signature-256<br/>matches?"}
     sig -- no --> r401["401"]
     sig -- yes --> ev{"X-GitHub-Event = issues?"}
@@ -88,6 +89,11 @@ flowchart TD
   repeated delivery id costs nothing. A delivery id is remembered only after a successful outcome
   (`webhookGate.remember`), so a failed delivery can be redelivered. An empty id is never a replay. Both the
   rate limit and the id memory are in memory and reset on restart. `Queue.Publish` dedupes across restarts.
+- The body cap depends on the `X-GitHub-Event` header, which is read first: 1 MiB (`maxIssuesWebhookBytes`) for
+  `issues`, 64 KiB (`maxOtherWebhookBytes`) for anything else. GitHub caps an issue body at 65,536 characters, so a
+  real `issues` payload is far smaller. The body is read before its signature can be checked, so the cap bounds the
+  memory an unsigned request can hold. A body over the cap answers 413 "a <event> payload may be at most <n>
+  bytes", is logged as `msg="webhook rejected"` with the event, and publishes nothing.
 - The HTTP server sets `ReadHeaderTimeout` 10s and `ReadTimeout` 30s (`newWebhookServer`).
 - `VerifySignature` is an HMAC-SHA256 over the raw body, compared with `hmac.Equal`.
 - `JobFromIssuesEvent` builds a `Job` only for actions `labeled` and `assigned` (`jobActions`). Edits and reopens
@@ -103,6 +109,18 @@ flowchart TD
 `--runner-tokens` with `runnerPermissions(steward)`, plus the control user, which has no permission limits.
 Logging and signal handling of the embedded server are off (`NoLog`, `NoSigs`). There is no NATS account
 configuration, so everything is in the default global account.
+
+The server bounds what a steward's token can do to the control node:
+
+- `MaxPayload` is 512 KiB (`maxPayloadBytes`). It applies to every connection, the control node's own included, so
+  it must hold the largest job: a 65,536-character issue body whose every character `json.Marshal` escapes to six
+  bytes stays under 400 KiB. A runner's client refuses a larger publish with `nats: maximum payload exceeded`.
+- `MaxConn` is 16 (`maxConnectionsPerSteward`) per steward in `--runner-tokens`, plus one for the in-process
+  connection (`maxConnections`). NATS without operator JWTs has no per-user connection limit, so the stewards share
+  that total; a client past it fails with `nats: server maximum connections exceeded`.
+- The `SCHMEIDE_STAGES` bucket keeps one revision per key (`History: 1`) and refuses a value over 4 KiB
+  (`maxStageValueBytes`). A runner logs a refused stage write as `could not record the job's stage` and goes on.
+- `SCHMEIDE_STATUS` has no limits yet; a steward can still grow it (#210).
 
 ```mermaid
 flowchart LR
@@ -151,7 +169,7 @@ flowchart LR
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
 | `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
-| `SCHMEIDE_STAGES` (`StageBucket`) | KV, default config | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
+| `SCHMEIDE_STAGES` (`StageBucket`) | KV, `History: 1`, `MaxValueSize` 4 KiB | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
 
 The status stream subjects are the same subjects runners have always published on. The stream captures them, so

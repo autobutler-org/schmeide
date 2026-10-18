@@ -38,7 +38,7 @@ flowchart LR
 | `SCHMEIDE_JOBS` stream | `control.Queue.Publish` | runner consumers, `tokenFor`, `seedIssues` | Until 100,000 later jobs push it out (`MaxMsgs`, discard oldest). Acked jobs are not removed: the stream has the default limits retention. |
 | `SCHMEIDE_STATUS` stream | runners (registration, status) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
 | `SCHMEIDE_ISSUES` KV | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` | Forever, one key per issue ever made a job. Overwritten when a failed job's issue gets a new job. |
-| `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. |
+| `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. One revision per key (`History: 1`); a value over 4 KiB (`maxStageValueBytes`) is refused. |
 | Job consumers `runner-<steward>`, `runner-_pool` | runners (`CreateOrUpdateConsumer`) | JetStream | Durable, in `--data-dir`, until deleted by hand. |
 | `--work-dir` bare clones | runner (`newWorktree`) | runner | Until the operator deletes the directory. |
 | `--work-dir` worktrees | runner | runner, harness, gate | One job attempt. Removed by `Workspace.Close`. A leftover is replaced on the next attempt. |
@@ -115,6 +115,9 @@ issue a duplicate.
 ### Job stage record
 
 `runner.stage` in bucket `SCHMEIDE_STAGES`. Key: the job subject without `schmeide.jobs.`, so `<steward or _pool>.<repo_id>.<issue>`.
+The bucket keeps only the latest record per key and refuses a record over 4 KiB, so a steward's token cannot grow
+it without bound per key. Every NATS message, a stage record included, is also capped at 512 KiB by the server's
+`MaxPayload`.
 
 | Field | Set from |
 | --- | --- |

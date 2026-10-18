@@ -51,6 +51,20 @@ network with no other tenants, set `SCHMEIDE_ALLOW_PLAINTEXT_NATS=true`
 (`--allow-plaintext-nats true`): the control node then starts and logs a
 warning instead.
 
+## Limits
+
+The control node bounds what one request or one steward token can cost it.
+None of these is configurable.
+
+- Webhook bodies: 1 MiB for an `issues` event and 64 KiB for any other event,
+  chosen by the `X-GitHub-Event` header before the body is read. A larger body
+  answers 413. Subscribe the App to issues events only.
+- NATS messages: 512 KiB each, for every connection.
+- NATS connections: 16 per steward in `SCHMEIDE_RUNNER_TOKENS`, plus one for
+  the control node itself, shared by all stewards. A runner holds one
+  connection; `schmeide status` and `schmeide doctor` hold one briefly.
+- Stage records: one revision per job, at most 4 KiB each.
+
 ## Persistent storage
 
 `SCHMEIDE_DATA_DIR` holds JetStream's files: the job queue, the per-issue

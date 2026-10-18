@@ -289,18 +289,40 @@ func webhookHandler(q *Queue, policy WebhookPolicy, published *int) http.Handler
 }
 
 func TestOversizedWebhookPublishesNothing(t *testing.T) {
-	body := make([]byte, maxWebhookBytes+1)
-	q := startQueue(t)
-	var published int
-	h := webhookHandler(q, WebhookPolicy{}, &published)
-	if got := deliver(t, h, delivery{body: body, signature: sign(body)}); got != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", got, http.StatusBadRequest)
+	// Trailing whitespace keeps the payload valid JSON at any size.
+	pad := func(body []byte, size int) []byte {
+		return append(bytes.Clone(body), bytes.Repeat([]byte(" "), size-len(body))...)
 	}
-	if published != 0 {
-		t.Errorf("Publish calls = %d, want 0", published)
-	}
-	if got := jobs(t, q); len(got) != 0 {
-		t.Errorf("jobs = %+v, want none", got)
+	ready := payload(t, "issues_assigned_labeled.json")
+	for _, tt := range []struct {
+		name  string
+		event string
+		body  []byte
+		want  int
+	}{
+		{name: "issues event over its cap", event: "issues", body: pad(ready, maxIssuesWebhookBytes+1), want: http.StatusRequestEntityTooLarge},
+		{name: "other event over its cap", event: "push", body: pad([]byte("{}"), maxOtherWebhookBytes+1), want: http.StatusRequestEntityTooLarge},
+		{name: "issues event at another event's cap", event: "issues", body: pad(ready, maxOtherWebhookBytes+1), want: http.StatusAccepted},
+		{name: "issues event at its cap", event: "issues", body: pad(ready, maxIssuesWebhookBytes), want: http.StatusAccepted},
+		{name: "other event at its cap", event: "ping", body: pad([]byte("{}"), maxOtherWebhookBytes), want: http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := startQueue(t)
+			var published int
+			h := webhookHandler(q, WebhookPolicy{}, &published)
+			if got := deliver(t, h, delivery{event: tt.event, body: tt.body, signature: sign(tt.body)}); got != tt.want {
+				t.Errorf("status = %d, want %d", got, tt.want)
+			}
+			if tt.want != http.StatusRequestEntityTooLarge {
+				return
+			}
+			if published != 0 {
+				t.Errorf("Publish calls = %d, want 0", published)
+			}
+			if got := jobs(t, q); len(got) != 0 {
+				t.Errorf("jobs = %+v, want none", got)
+			}
+		})
 	}
 }
 
@@ -1242,5 +1264,95 @@ func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("hubot published to %s", subject)
 		}
+	}
+}
+
+func TestStageBucketBoundsWhatAStewardStores(t *testing.T) {
+	q := startQueue(t)
+	octocat, _ := connectAs(t, q, "octocat", "octocat-token")
+	js, err := jetstream.New(octocat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	stages, err := js.KeyValue(ctx, StageBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := stages.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.History() != 1 {
+		t.Errorf("stage history = %d, want 1", status.History())
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", bytes.Repeat([]byte("x"), maxStageValueBytes)); err != nil {
+		t.Fatalf("a stage record at the cap was refused: %v", err)
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", bytes.Repeat([]byte("x"), maxStageValueBytes+1)); err == nil {
+		t.Error("a stage record over the cap was stored")
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", []byte(`{"stage":"pr_opened"}`)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := q.js.Stream(ctx, "KV_"+StageBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs := info.CachedInfo().State.Msgs; msgs != 1 {
+		t.Errorf("stage bucket holds %d messages for one key, want 1", msgs)
+	}
+}
+
+func TestStewardConnectionsAreLimited(t *testing.T) {
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	q, err := StartQueue(t.Context(), QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(q.Close)
+
+	connect := func() (*nats.Conn, error) {
+		return nats.Connect("nats://"+addr, nats.UserInfo("octocat", "octocat-token"), nats.NoReconnect())
+	}
+	limit := maxConnections(len(testRunnerTokens))
+	// The control node's own in-process connection is one of them.
+	for i := 1; i < limit; i++ {
+		nc, err := connect()
+		if err != nil {
+			t.Fatalf("connection %d of %d refused: %v", i+1, limit, err)
+		}
+		t.Cleanup(nc.Close)
+	}
+	if nc, err := connect(); err == nil {
+		nc.Close()
+		t.Errorf("connection %d was accepted, want the limit of %d to hold", limit+1, limit)
+	}
+}
+
+func TestStewardPayloadIsLimited(t *testing.T) {
+	q := startQueue(t)
+	octocat, _ := connectAs(t, q, "octocat", "octocat-token")
+	if got := octocat.MaxPayload(); got != maxPayloadBytes {
+		t.Errorf("max payload = %d, want %d", got, maxPayloadBytes)
+	}
+	big := bytes.Repeat([]byte("x"), maxPayloadBytes+1)
+	if err := octocat.Publish(StatusSubjectPrefix+"octocat.7.1", big); !errors.Is(err, nats.ErrMaxPayload) {
+		t.Errorf("publish over the cap = %v, want ErrMaxPayload", err)
+	}
+	// The largest job an issue can make still fits: GitHub caps an issue
+	// body at 65,536 characters, and json.Marshal escapes each '<' as six bytes.
+	job := Job{
+		Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1,
+		Title: strings.Repeat("<", 256), Body: strings.Repeat("<", 65536),
+	}
+	if _, err := q.Publish(t.Context(), job); err != nil {
+		t.Errorf("Publish of the largest job = %v", err)
 	}
 }

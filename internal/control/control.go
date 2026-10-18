@@ -15,9 +15,14 @@ import (
 )
 
 const (
-	// maxWebhookBytes is GitHub's cap on a webhook payload. A lower cap would
-	// drop valid deliveries.
-	maxWebhookBytes = 25 << 20
+	// maxIssuesWebhookBytes caps an issues event's body. GitHub caps an issue
+	// body at 65,536 characters, so a real issues payload is far smaller. The
+	// body is read before its signature can be checked, so the cap bounds
+	// what an unsigned request can make the control node hold in memory.
+	maxIssuesWebhookBytes = 1 << 20
+	// maxOtherWebhookBytes caps every other event's body. Only issues events
+	// make jobs; the rest are verified and ignored.
+	maxOtherWebhookBytes = 64 << 10
 	// webhookReadHeaderTimeout bounds how long a client may take to send headers.
 	webhookReadHeaderTimeout = 10 * time.Second
 	// webhookReadTimeout bounds how long a client may take to send the whole
@@ -78,7 +83,7 @@ type Config struct {
 	AllowPlaintextNATS string
 }
 
-// Handler is the webhook endpoint. It caps the body, rate-limits requests,
+// Handler is the webhook endpoint. It caps the body by event, rate-limits requests,
 // drops replays of an X-Github-Delivery id, hands the delivery to Intake, and
 // maps the outcome to a status code.
 func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
@@ -101,12 +106,23 @@ func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
 			http.Error(w, errRateLimited.Error(), http.StatusTooManyRequests)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBytes))
+		event := r.Header.Get("X-Github-Event")
+		limit := int64(maxOtherWebhookBytes)
+		if event == "issues" {
+			limit = maxIssuesWebhookBytes
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			log.Warn("webhook rejected", "delivery", delivery, "event", event, "err", fmt.Errorf("payload is larger than %d bytes", limit))
+			http.Error(w, fmt.Sprintf("a %s payload may be at most %d bytes", event, limit), http.StatusRequestEntityTooLarge)
+			return
+		}
 		if err != nil {
 			http.Error(w, "could not read the payload", http.StatusBadRequest)
 			return
 		}
-		outcome, err := in.Handle(r.Context(), r.Header.Get("X-Github-Event"), r.Header.Get("X-Hub-Signature-256"), body)
+		outcome, err := in.Handle(r.Context(), event, r.Header.Get("X-Hub-Signature-256"), body)
 		switch {
 		case errors.Is(err, ErrBadSignature):
 			log.Warn("webhook rejected", "delivery", delivery, "err", err)
