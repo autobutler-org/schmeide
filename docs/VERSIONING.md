@@ -22,9 +22,10 @@ schmeide version
 
 ## Runner and control node skew
 
-A runner sends its version in the registration it publishes when it starts.
-When the control node sees a registration, it compares that version with its
-own. If both are semantic versions (`v1.2.0`, not `dev` or a bare commit
+A runner sends its version in the registration it publishes when it starts
+and again every minute while it runs. Each time the control node sees a
+registration, it compares that version with its own, so a skewed runner's
+warning repeats once a minute. If both are semantic versions (`v1.2.0`, not `dev` or a bare commit
 hash) and they differ, the control node logs a warning naming the steward,
 host, and both versions. It still accepts the runner. Upgrade whichever side
 is behind so the two match.
