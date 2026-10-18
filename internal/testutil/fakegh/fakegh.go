@@ -86,6 +86,12 @@ type Server struct {
 	blockedBy   map[int][]Issue
 	// approvals is the required approving review count by protected branch.
 	approvals map[string]int
+	// revoked is how many DELETE /installation/token calls landed. The fake
+	// keeps accepting the token afterward: a runner test reuses one token for
+	// every delivery, where GitHub would see a fresh one each time.
+	revoked int
+	// revokeStatus, when set, is the error status every revoke call returns.
+	revokeStatus int
 }
 
 // New starts a fake for repo ("owner/name") that accepts only token. It is
@@ -156,6 +162,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
+	if r.Method == http.MethodDelete && r.URL.Path == "/installation/token" {
+		if s.revokeStatus != 0 {
+			writeError(w, s.revokeStatus, http.StatusText(s.revokeStatus), "https://docs.github.com/rest/apps/installations#revoke-an-installation-access-token")
+			return
+		}
+		s.revoked++
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method == http.MethodPost && r.URL.Path == "/graphql" {
 		// ponytail: every GraphQL query gets one answer, a pull request on
 		// main whose branch has no merge queue.
@@ -346,6 +361,21 @@ func (s *Server) FailMerge(status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mergeStatus = status
+}
+
+// FailRevoke makes every DELETE /installation/token call return status, and
+// leaves the token usable.
+func (s *Server) FailRevoke(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revokeStatus = status
+}
+
+// Revoked reports how many times the token was revoked.
+func (s *Server) Revoked() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revoked
 }
 
 // OnPR sets a function called, with the fake locked, after a pull request

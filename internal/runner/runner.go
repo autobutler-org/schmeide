@@ -573,6 +573,10 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}}
+	// Every delivery mints its own token, so it is revoked however this
+	// delivery ends: a final state, a retry, a hand-back, or a shutdown. That
+	// runs after the outcome comment, the last call that needs it.
+	defer r.revoke(ctx, gh, job)
 	out := r.work(workCtx, gh, job, token)
 	if errors.Is(context.Cause(workCtx), errJobStuck) {
 		return
@@ -618,6 +622,15 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	if err := msg.Ack(); err != nil {
 		r.log.Error("could not acknowledge the job; it will be redelivered", "repo", job.Repo, "issue", job.Issue, "err", err)
+	}
+}
+
+// revoke revokes the delivery's installation token. It runs on a context
+// that a shutdown does not cancel. A failure is logged and changes nothing
+// else: the token then expires on its own within the hour.
+func (r *Runner) revoke(ctx context.Context, gh github, job control.Job) {
+	if err := gh.RevokeToken(context.WithoutCancel(ctx)); err != nil {
+		r.log.Warn("could not revoke the job's token; it expires within the hour", "repo", job.Repo, "issue", job.Issue, "err", err)
 	}
 }
 
