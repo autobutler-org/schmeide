@@ -2,10 +2,25 @@ package control
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"sync/atomic"
 )
+
+// ErrPlaintextNATS is returned when NATS would listen beyond loopback in
+// plain text without --allow-plaintext-nats.
+var ErrPlaintextNATS = errors.New("NATS would listen beyond loopback without TLS, so steward tokens and every job's GitHub token would cross the network in plain text")
+
+// checkNATSTransport refuses a NATS listener that other machines can reach
+// unless it serves TLS or the operator allowed plain text.
+func checkNATSTransport(addr string, tls, allowPlaintext bool) error {
+	if tls || allowPlaintext || !listensBeyondLoopback(addr) {
+		return nil
+	}
+	return fmt.Errorf("--nats-addr %s: %w; set --nats-tls-cert-file and --nats-tls-key-file, "+
+		"listen on loopback (127.0.0.1:4222), or pass --allow-plaintext-nats true to accept the risk", addr, ErrPlaintextNATS)
+}
 
 // natsTLSConfig serves the certificate and key in certFile and keyFile. The
 // pair is loaded once here, so a bad pair fails startup. After that, every

@@ -73,6 +73,9 @@ type Config struct {
 	// NATS listener serves. Both or neither are set.
 	NATSTLSCertFile string
 	NATSTLSKeyFile  string
+	// AllowPlaintextNATS is "true" when NATS may listen beyond loopback
+	// without TLS. Empty means false.
+	AllowPlaintextNATS string
 }
 
 // Handler is the webhook endpoint. It caps the body, rate-limits requests,
@@ -143,6 +146,19 @@ func parseDeliveryTTL(value string) (time.Duration, error) {
 	return d, nil
 }
 
+// parseAllowPlaintextNATS reads the --allow-plaintext-nats value. Empty
+// means false.
+func parseAllowPlaintextNATS(value string) (bool, error) {
+	if strings.TrimSpace(value) == "" {
+		return false, nil
+	}
+	allow, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("allow plaintext nats %q is not true or false; pass --allow-plaintext-nats or set SCHMEIDE_ALLOW_PLAINTEXT_NATS", value)
+	}
+	return allow, nil
+}
+
 // Run starts the embedded NATS server and the webhook listener and blocks
 // until ctx is canceled or either one fails.
 func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
@@ -162,6 +178,14 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	allowPlaintext, err := parseAllowPlaintextNATS(cfg.AllowPlaintextNATS)
+	if err != nil {
+		return err
+	}
+	natsTLS := cfg.NATSTLSCertFile != ""
+	if err := checkNATSTransport(cfg.NATSAddr, natsTLS, allowPlaintext); err != nil {
+		return err
+	}
 	pemBytes, err := os.ReadFile(cfg.GitHubAppPrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("read the GitHub App private key: %w", err)
@@ -172,9 +196,8 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	minter := TokenMinter{AppID: cfg.GitHubAppID, Key: key, APIURL: cfg.GitHubAPIURL}
 
-	natsTLS := cfg.NATSTLSCertFile != ""
 	if !natsTLS && listensBeyondLoopback(cfg.NATSAddr) {
-		log.Warn("NATS listens beyond loopback without TLS; runner tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file", "nats", cfg.NATSAddr)
+		log.Warn("NATS listens beyond loopback without TLS because --allow-plaintext-nats is set; steward tokens and job tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file", "nats", cfg.NATSAddr)
 	}
 	queue, err := StartQueue(ctx, QueueOptions{
 		Addr:         cfg.NATSAddr,

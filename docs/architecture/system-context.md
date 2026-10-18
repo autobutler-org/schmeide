@@ -72,8 +72,9 @@ Every connection below is opened by the left-hand side. Nothing connects in to a
 
 The webhook listener is plain HTTP and the startup log says it must sit behind a TLS-terminating proxy. NATS
 serves TLS itself, because a NATS client starts in plain text and upgrades after the server greeting, so a TLS
-proxy cannot sit in front of it. Without TLS, `control.Run` logs a warning when `--nats-addr` listens beyond
-loopback (`listensBeyondLoopback` in `internal/control/tls.go`).
+proxy cannot sit in front of it. Without TLS, `control.Run` refuses to start when `--nats-addr` listens beyond
+loopback (`checkNATSTransport` and `listensBeyondLoopback` in `internal/control/tls.go`), unless
+`--allow-plaintext-nats true` is set, in which case it starts and logs a warning.
 
 ## What lives where
 

@@ -28,7 +28,8 @@ the table in `controlSettings`.
 | `--webhook-rate` | `1000` | Requests per minute. Must be positive. |
 | `--delivery-ttl` | `10m` | How long an `X-Github-Delivery` id is remembered. Must be positive. |
 | `--nats-addr` | `127.0.0.1:4222` | Runners connect here. |
-| `--nats-tls-cert-file`, `--nats-tls-key-file` | none | Both or neither. |
+| `--nats-tls-cert-file`, `--nats-tls-key-file` | none | Both or neither. Required when `--nats-addr` is beyond loopback, unless `--allow-plaintext-nats`. |
+| `--allow-plaintext-nats` | `false` | `true` lets NATS listen beyond loopback without TLS, with a warning. |
 | `--runner-tokens` | required | `<login>:<token>,...`, one per steward. |
 | `--data-dir` | `schmeide-data` | JetStream store directory. The image sets `SCHMEIDE_DATA_DIR=/data`. |
 | `--webhook-secret` | required | |
@@ -41,9 +42,10 @@ the table in `controlSettings`.
 
 `Run` in `internal/control/control.go` starts things in this order, and any failure stops startup:
 
-1. Parse the allowlist, runner tokens, webhook rate, and delivery TTL. Read and parse the App private key
-   (`ParsePrivateKey` accepts PKCS#1 or PKCS#8 RSA).
-2. Warn when NATS has no TLS and `--nats-addr` is beyond loopback.
+1. Parse the allowlist, runner tokens, webhook rate, delivery TTL, and `--allow-plaintext-nats`.
+2. Refuse to start (`ErrPlaintextNATS`) when NATS has no TLS, `--nats-addr` is beyond loopback, and
+   `--allow-plaintext-nats` is not `true` (`checkNATSTransport`). With it, log a warning instead. Then read and
+   parse the App private key (`ParsePrivateKey` accepts PKCS#1 or PKCS#8 RSA).
 3. `StartQueue`: start the embedded NATS server, connect in-process as `_schmeide_control` with a random
    password (`rand.Text()`), open the `SCHMEIDE_ISSUES` and `SCHMEIDE_STAGES` buckets and the `SCHMEIDE_JOBS`
    stream (`Queue.openJobs`).
@@ -281,3 +283,10 @@ startup), sets TLS 1.2 minimum, and installs a `GetCertificate` that reloads bot
 failed reload, such as a half-written renewal, serves the last pair that loaded. The in-process control
 connection never uses TLS. Runners verify the certificate against the system roots; there is no client
 certificate. Setting only one of the two files is a startup error.
+
+Without the pair, `checkNATSTransport` (in `internal/control/tls.go`) refuses a `--nats-addr` that
+`listensBeyondLoopback` reports as reachable from another machine: any host that is not a loopback IP or
+`localhost`, including an empty host (`:4222`). `Run` returns `ErrPlaintextNATS` before it reads the App key or
+touches the data directory, and `schmeide control` exits 1. `--allow-plaintext-nats true` skips the refusal; the
+control node then logs `NATS listens beyond loopback without TLS because --allow-plaintext-nats is set; steward
+tokens and job tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file` at WARN.

@@ -475,7 +475,10 @@ func TestRejectedDeliveryIDIsNotRemembered(t *testing.T) {
 	}
 }
 
-func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
+// runConfig is a Config that Run accepts, with a fresh GitHub App key and a
+// free loopback NATS port.
+func runConfig(t *testing.T) Config {
+	t.Helper()
 	dir := t.TempDir()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -494,32 +497,40 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 	if err := natsLn.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return Config{
+		HTTPAddr:                "127.0.0.1:0",
+		NATSAddr:                natsAddr,
+		RunnerTokens:            "octocat:t",
+		DataDir:                 filepath.Join(dir, "data"),
+		WebhookSecret:           testSecret,
+		ReadyLabel:              DefaultReadyLabel,
+		AllowedOrgs:             "autobutler-org",
+		GitHubAppID:             "12345",
+		GitHubAppPrivateKeyFile: keyPath,
+		GitHubAPIURL:            DefaultGitHubAPIURL,
+		WebhookRate:             "1000",
+		DeliveryTTL:             "10m",
+	}
+}
 
+// runUntilLogged runs the control node until its log contains every one of
+// want, then cancels it and checks that it shuts down cleanly.
+func runUntilLogged(t *testing.T, cfg Config, want ...string) string {
+	t.Helper()
 	var logs lockedBuffer
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
-	go func() {
-		done <- Run(ctx, Config{
-			HTTPAddr:                "127.0.0.1:0",
-			NATSAddr:                natsAddr,
-			RunnerTokens:            "octocat:t",
-			DataDir:                 filepath.Join(dir, "data"),
-			WebhookSecret:           testSecret,
-			ReadyLabel:              DefaultReadyLabel,
-			AllowedOrgs:             "autobutler-org",
-			GitHubAppID:             "12345",
-			GitHubAppPrivateKeyFile: keyPath,
-			GitHubAPIURL:            DefaultGitHubAPIURL,
-			WebhookRate:             "1000",
-			DeliveryTTL:             "10m",
-		}, slog.New(slog.NewTextHandler(&logs, nil)))
-	}()
+	go func() { done <- Run(ctx, cfg, slog.New(slog.NewTextHandler(&logs, nil))) }()
 
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		text := logs.String()
-		if strings.Contains(text, "plain HTTP") && strings.Contains(text, "TLS-terminating proxy") && strings.Contains(text, "http://") {
+		found := true
+		for _, w := range want {
+			found = found && strings.Contains(text, w)
+		}
+		if found {
 			break
 		}
 		select {
@@ -528,7 +539,7 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("startup log = %q, want plain HTTP behind a TLS-terminating proxy", logs.String())
+			t.Fatalf("startup log = %q, want %q", logs.String(), want)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -541,6 +552,32 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
+	return logs.String()
+}
+
+func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
+	runUntilLogged(t, runConfig(t), "plain HTTP", "TLS-terminating proxy", "http://")
+}
+
+func TestRunRefusesPlaintextNATSBeyondLoopback(t *testing.T) {
+	cfg := runConfig(t)
+	_, port, _ := net.SplitHostPort(cfg.NATSAddr)
+	cfg.NATSAddr = net.JoinHostPort("0.0.0.0", port)
+	err := Run(t.Context(), cfg, slog.New(slog.DiscardHandler))
+	if !errors.Is(err, ErrPlaintextNATS) {
+		t.Fatalf("Run = %v, want ErrPlaintextNATS", err)
+	}
+	if _, statErr := os.Stat(cfg.DataDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Run created the data directory before refusing: %v", statErr)
+	}
+}
+
+func TestRunServesPlaintextNATSWhenAllowed(t *testing.T) {
+	cfg := runConfig(t)
+	_, port, _ := net.SplitHostPort(cfg.NATSAddr)
+	cfg.NATSAddr = net.JoinHostPort("0.0.0.0", port)
+	cfg.AllowPlaintextNATS = "true"
+	runUntilLogged(t, cfg, "NATS listens beyond loopback without TLS", "control node started")
 }
 
 // lockedBuffer is a bytes.Buffer safe for one writer and one reader.

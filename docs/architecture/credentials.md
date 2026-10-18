@@ -158,8 +158,10 @@ the Claude Code harness and `--grok-args` only Grok. Details and the opt-in are 
 `--nats-tls-cert-file` and `--nats-tls-key-file` are read by `natsTLSConfig` at startup (a bad pair fails startup)
 and again on every TLS handshake, so a renewed certificate is served without a restart. A failed reload keeps the
 last good pair. Runners verify the server certificate against the system roots (`SSL_CERT_FILE` for a private CA
-on Linux). There are no client certificates; the steward token is the client credential, which is why NATS
-beyond loopback without TLS logs a warning. The webhook listener has no TLS of its own and relies on the proxy in
+on Linux). There are no client certificates; the steward token is the client credential, so `control.Run` refuses
+to start when NATS listens beyond loopback without TLS (`checkNATSTransport` in `internal/control/tls.go`, which
+returns `ErrPlaintextNATS`). `--allow-plaintext-nats true` is the operator's explicit opt-in to plain text; with it
+the control node starts and logs a warning. The webhook listener has no TLS of its own and relies on the proxy in
 front of it.
 
 ## Secret scan before push
