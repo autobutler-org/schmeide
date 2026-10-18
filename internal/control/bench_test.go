@@ -47,7 +47,7 @@ func BenchmarkWebhookIntake(b *testing.B) {
 }
 
 // BenchmarkStatusStore records 100 job statuses on the in-process queue, lets
-// a Tracker apply them, and measures listing them with ReadStatus.
+// a Tracker apply them, and measures listing them with Tracker.Snapshot.
 func BenchmarkStatusStore(b *testing.B) {
 	const jobCount = 100
 	q, err := StartQueue(b.Context(), QueueOptions{DataDir: b.TempDir(), RunnerTokens: testRunnerTokens})
@@ -78,10 +78,7 @@ func BenchmarkStatusStore(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		snap, err := ReadStatus(b.Context(), q.js)
-		if err != nil {
-			b.Fatal(err)
-		}
+		snap := tracker.Snapshot("octocat")
 		if len(snap.Jobs) != jobCount {
 			b.Fatalf("listed %d jobs, want %d", len(snap.Jobs), jobCount)
 		}

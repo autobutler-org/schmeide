@@ -15,9 +15,14 @@ import (
 )
 
 const (
-	// maxWebhookBytes is GitHub's cap on a webhook payload. A lower cap would
-	// drop valid deliveries.
-	maxWebhookBytes = 25 << 20
+	// maxIssuesWebhookBytes caps an issues event's body. GitHub caps an issue
+	// body at 65,536 characters, so a real issues payload is far smaller. The
+	// body is read before its signature can be checked, so the cap bounds
+	// what an unsigned request can make the control node hold in memory.
+	maxIssuesWebhookBytes = 1 << 20
+	// maxOtherWebhookBytes caps every other event's body. Only issues events
+	// make jobs; the rest are verified and ignored.
+	maxOtherWebhookBytes = 64 << 10
 	// webhookReadHeaderTimeout bounds how long a client may take to send headers.
 	webhookReadHeaderTimeout = 10 * time.Second
 	// webhookReadTimeout bounds how long a client may take to send the whole
@@ -73,9 +78,12 @@ type Config struct {
 	// NATS listener serves. Both or neither are set.
 	NATSTLSCertFile string
 	NATSTLSKeyFile  string
+	// AllowPlaintextNATS is "true" when NATS may listen beyond loopback
+	// without TLS. Empty means false.
+	AllowPlaintextNATS string
 }
 
-// Handler is the webhook endpoint. It caps the body, rate-limits requests,
+// Handler is the webhook endpoint. It caps the body by event, rate-limits requests,
 // drops replays of an X-Github-Delivery id, hands the delivery to Intake, and
 // maps the outcome to a status code.
 func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
@@ -98,12 +106,23 @@ func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
 			http.Error(w, errRateLimited.Error(), http.StatusTooManyRequests)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBytes))
+		event := r.Header.Get("X-Github-Event")
+		limit := int64(maxOtherWebhookBytes)
+		if event == "issues" {
+			limit = maxIssuesWebhookBytes
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			log.Warn("webhook rejected", "delivery", delivery, "event", event, "err", fmt.Errorf("payload is larger than %d bytes", limit))
+			http.Error(w, fmt.Sprintf("a %s payload may be at most %d bytes", event, limit), http.StatusRequestEntityTooLarge)
+			return
+		}
 		if err != nil {
 			http.Error(w, "could not read the payload", http.StatusBadRequest)
 			return
 		}
-		outcome, err := in.Handle(r.Context(), r.Header.Get("X-Github-Event"), r.Header.Get("X-Hub-Signature-256"), body)
+		outcome, err := in.Handle(r.Context(), event, r.Header.Get("X-Hub-Signature-256"), body)
 		switch {
 		case errors.Is(err, ErrBadSignature):
 			log.Warn("webhook rejected", "delivery", delivery, "err", err)
@@ -143,6 +162,19 @@ func parseDeliveryTTL(value string) (time.Duration, error) {
 	return d, nil
 }
 
+// parseAllowPlaintextNATS reads the --allow-plaintext-nats value. Empty
+// means false.
+func parseAllowPlaintextNATS(value string) (bool, error) {
+	if strings.TrimSpace(value) == "" {
+		return false, nil
+	}
+	allow, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("allow plaintext nats %q is not true or false; pass --allow-plaintext-nats or set SCHMEIDE_ALLOW_PLAINTEXT_NATS", value)
+	}
+	return allow, nil
+}
+
 // Run starts the embedded NATS server and the webhook listener and blocks
 // until ctx is canceled or either one fails.
 func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
@@ -162,6 +194,14 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	allowPlaintext, err := parseAllowPlaintextNATS(cfg.AllowPlaintextNATS)
+	if err != nil {
+		return err
+	}
+	natsTLS := cfg.NATSTLSCertFile != ""
+	if err := checkNATSTransport(cfg.NATSAddr, natsTLS, allowPlaintext); err != nil {
+		return err
+	}
 	pemBytes, err := os.ReadFile(cfg.GitHubAppPrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("read the GitHub App private key: %w", err)
@@ -172,9 +212,8 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	minter := TokenMinter{AppID: cfg.GitHubAppID, Key: key, APIURL: cfg.GitHubAPIURL}
 
-	natsTLS := cfg.NATSTLSCertFile != ""
 	if !natsTLS && listensBeyondLoopback(cfg.NATSAddr) {
-		log.Warn("NATS listens beyond loopback without TLS; runner tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file", "nats", cfg.NATSAddr)
+		log.Warn("NATS listens beyond loopback without TLS because --allow-plaintext-nats is set; steward tokens and job tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file", "nats", cfg.NATSAddr)
 	}
 	queue, err := StartQueue(ctx, QueueOptions{
 		Addr:         cfg.NATSAddr,
@@ -192,6 +231,9 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	if _, err := queue.Track(log); err != nil {
 		return fmt.Errorf("track runners and job states: %w", err)
+	}
+	if err := queue.ServeStatus(log); err != nil {
+		return fmt.Errorf("serve status queries: %w", err)
 	}
 
 	mux := http.NewServeMux()

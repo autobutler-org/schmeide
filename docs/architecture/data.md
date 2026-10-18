@@ -36,9 +36,9 @@ flowchart LR
 | Store | Owner (writes) | Readers | Lifetime |
 | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` stream | `control.Queue.Publish` | runner consumers, `tokenFor`, `seedIssues` | Until 100,000 later jobs push it out (`MaxMsgs`, discard oldest). Acked jobs are not removed: the stream has the default limits retention. |
-| `SCHMEIDE_STATUS` stream | runners (registration, status) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
+| `SCHMEIDE_STATUS` stream | runners (registration, status) | `control.Tracker` (which answers `schmeide status` queries), runners (attempt count, by direct get on their own and pool job subjects) | Unbounded. Every registration and status since the data directory was created. |
 | `SCHMEIDE_ISSUES` KV | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` | Forever, one key per issue ever made a job. Overwritten when a failed job's issue gets a new job. |
-| `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. |
+| `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. One revision per key (`History: 1`); a value over 4 KiB (`maxStageValueBytes`) is refused. |
 | Job consumers `runner-<steward>`, `runner-_pool` | runners (`CreateOrUpdateConsumer`) | JetStream | Durable, in `--data-dir`, until deleted by hand. |
 | `--work-dir` bare clones | runner (`newWorktree`) | runner | Until the operator deletes the directory. |
 | `--work-dir` worktrees | runner | runner, harness, gate | One job attempt. Removed by `Workspace.Close`. A leftover is replaced on the next attempt. |
@@ -57,7 +57,7 @@ All of `--data-dir` survives, and `Run` rebuilds the in-memory state from it bef
 | --- | --- | --- |
 | Queued and in-flight jobs | yes | `SCHMEIDE_JOBS` and the durable consumers. A held job is redelivered when its lease lapses. |
 | Per-issue dedupe | yes | `SCHMEIDE_ISSUES`. |
-| Runner registrations, used for pool routing | yes | Replayed from `SCHMEIDE_STATUS` by `Queue.Track`. |
+| Runner registrations, used for pool routing | yes | Replayed from `SCHMEIDE_STATUS` by `Queue.Track`, with their stored times, so one older than `RegistrationTTL` is already expired after the restart. |
 | Latest job states for `schmeide status` | yes | Replayed from `SCHMEIDE_STATUS`. |
 | Attempt counts | yes | The `attempts` field of the last status per job. |
 | Stage records | yes | `SCHMEIDE_STAGES`. |
@@ -107,7 +107,9 @@ issue a duplicate.
 ### Registration and status (`control.Registration`, `control.Status`)
 
 `Registration` on `schmeide.runners.<steward>`: `steward`, `harnesses` (names that passed `Check`), `host`,
-`pool`, `version`. The tracker keeps one per (steward, host). Registrations are never expired.
+`pool`, `version`. A runner publishes it at startup and every `RegistrationInterval` (1 minute). The tracker keeps
+the latest per (steward, host) with the time JetStream stored it, and counts it for `RegistrationTTL` (3 minutes)
+from then. An older registration is dropped from pool routing, pool token minting, and `schmeide status`.
 
 `Status` on `schmeide.status.<steward or _pool>.<repo_id>.<issue>`: `state`, `detail` (PR URL or the reason),
 `attempts` (failed work outcomes so far, omitted when zero).
@@ -115,6 +117,9 @@ issue a duplicate.
 ### Job stage record
 
 `runner.stage` in bucket `SCHMEIDE_STAGES`. Key: the job subject without `schmeide.jobs.`, so `<steward or _pool>.<repo_id>.<issue>`.
+The bucket keeps only the latest record per key and refuses a record over 4 KiB, so a steward's token cannot grow
+it without bound per key. Every NATS message, a stage record included, is also capped at 512 KiB by the server's
+`MaxPayload`.
 
 | Field | Set from |
 | --- | --- |

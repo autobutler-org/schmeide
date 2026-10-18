@@ -46,6 +46,28 @@ const (
 	StageBucket = "SCHMEIDE_STAGES"
 )
 
+const (
+	// maxStageValueBytes caps one stage record. A record is a stage name, a
+	// branch, a base, a pull request URL, a time, and a round: a few hundred
+	// bytes.
+	maxStageValueBytes = 4 << 10
+	// maxPayloadBytes caps every NATS message, a steward's or the control
+	// node's own. The largest message is a job: GitHub caps an issue body at
+	// 65,536 characters, and json.Marshal writes each '<', '>', or '&' as six
+	// bytes, so a job stays under 400 KiB.
+	maxPayloadBytes = 512 << 10
+	// maxConnectionsPerSteward is how many connections each steward in
+	// --runner-tokens adds to the server's connection limit. A runner holds
+	// one, and `schmeide status` and `schmeide doctor` hold one briefly.
+	maxConnectionsPerSteward = 16
+)
+
+// maxConnections is the server's connection limit for the given number of
+// stewards: maxConnectionsPerSteward each, plus the control node's own
+// in-process connection. NATS without operator JWTs has no per-user limit,
+// so the stewards share the total.
+func maxConnections(stewards int) int { return stewards*maxConnectionsPerSteward + 1 }
+
 // jobStreamMaxMsgs caps the job stream once the issue bucket has been seeded
 // from it, discarding the oldest jobs first. A runner holds a job for one
 // session: hours at most, with a heartbeat every AckWait/3 (1m40s by default).
@@ -131,6 +153,8 @@ func StartQueue(ctx context.Context, o QueueOptions) (*Queue, error) {
 		Users:      users,
 		NoSigs:     true,
 		NoLog:      true,
+		MaxPayload: maxPayloadBytes,
+		MaxConn:    maxConnections(len(o.RunnerTokens)),
 	}
 	if o.Addr != "" {
 		host, portText, err := net.SplitHostPort(o.Addr)
@@ -185,7 +209,11 @@ func (q *Queue) openJobs(ctx context.Context) error {
 	if q.issues, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: issueBucket}); err != nil {
 		return fmt.Errorf("create issue bucket: %w", err)
 	}
-	if _, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: StageBucket}); err != nil {
+	// A steward writes its own stage records. History 1 and the value cap
+	// bound what each key can hold.
+	if _, err = q.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: StageBucket, History: 1, MaxValueSize: maxStageValueBytes,
+	}); err != nil {
 		return fmt.Errorf("create stage bucket: %w", err)
 	}
 	// Create the stream without a limit if it is new; leave an existing one
@@ -239,14 +267,17 @@ func (q *Queue) seedIssues(ctx context.Context) error {
 // steward's jobs, report on them, and ask for their tokens. Every steward
 // may also use the one shared pool consumer and report a pool job's status.
 // A runner only pulls from that consumer when it was started with --pool.
-// Any steward may read the status stream, which is what `schmeide status`
-// shows: every runner's registration and every job's latest state. A steward
-// reads and writes the stage records of its own jobs and of pool jobs.
+// A steward reads the latest status of its own jobs and of pool jobs, which
+// a runner uses to restore a job's attempt count, and asks the control node
+// for its own `schmeide status` on its status query subject. It cannot read
+// other stewards' registrations or statuses. A steward reads and writes the
+// stage records of its own jobs and of pool jobs.
 func runnerPermissions(steward string) *server.Permissions {
 	consumer := JobStream + "." + ConsumerName(steward)
 	pool := JobStream + "." + ConsumerName(PoolName)
 	stages := "$KV." + StageBucket + "."
 	stageGet := "$JS.API.DIRECT.GET.KV_" + StageBucket + "." + stages
+	statusGet := "$JS.API.DIRECT.GET." + StatusStream + "." + StatusSubjectPrefix
 	return &server.Permissions{
 		Publish: &server.SubjectPermission{Allow: []string{
 			"$JS.API.CONSUMER.CREATE." + consumer + "." + JobFilter(steward),
@@ -261,8 +292,10 @@ func runnerPermissions(steward string) *server.Permissions {
 			StatusSubjectPrefix + steward + ".>",
 			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
+			StatusQuerySubjectPrefix + steward,
 			"$JS.API.STREAM.INFO." + StatusStream,
-			"$JS.API.STREAM.MSG.GET." + StatusStream,
+			statusGet + steward + ".>",
+			statusGet + PoolName + ".>",
 			"$JS.API.STREAM.INFO.KV_" + StageBucket,
 			stages + steward + ".>",
 			stages + PoolName + ".>",

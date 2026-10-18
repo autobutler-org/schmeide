@@ -11,7 +11,7 @@ token for each job a runner asks for. All of it is in `internal/control`.
 | `internal/control/guard.go` | `webhookGate`: the per-minute rate limit and the delivery-id memory |
 | `internal/control/intake.go` | `Job`, `Job.Subject`, `VerifySignature`, `JobFromIssuesEvent`, `Allowlist`, `ParseRunnerTokens`, `Intake.Handle`, `Outcome` |
 | `internal/control/queue.go` | `StartQueue`, `Queue.Publish`, `runnerPermissions`, `ServeTokens`, the job stream, the issue and stage buckets |
-| `internal/control/status.go` | `State`, `Status`, `Registration`, `Tracker` (`Queue.Track`), the `SCHMEIDE_STATUS` stream, `ReadStatus`, `StatusMain` |
+| `internal/control/status.go` | `State`, `Status`, `Registration`, `Tracker` (`Queue.Track`), the `SCHMEIDE_STATUS` stream, `Tracker.Snapshot`, `Queue.ServeStatus`, `StatusMain` |
 | `internal/control/token.go` | `TokenMinter.Mint`, `ParsePrivateKey`, the App JWT |
 | `internal/control/tls.go` | `natsTLSConfig` (cert reload per handshake), `listensBeyondLoopback` |
 
@@ -28,7 +28,8 @@ the table in `controlSettings`.
 | `--webhook-rate` | `1000` | Requests per minute. Must be positive. |
 | `--delivery-ttl` | `10m` | How long an `X-Github-Delivery` id is remembered. Must be positive. |
 | `--nats-addr` | `127.0.0.1:4222` | Runners connect here. |
-| `--nats-tls-cert-file`, `--nats-tls-key-file` | none | Both or neither. |
+| `--nats-tls-cert-file`, `--nats-tls-key-file` | none | Both or neither. Required when `--nats-addr` is beyond loopback, unless `--allow-plaintext-nats`. |
+| `--allow-plaintext-nats` | `false` | `true` lets NATS listen beyond loopback without TLS, with a warning. |
 | `--runner-tokens` | required | `<login>:<token>,...`, one per steward. |
 | `--data-dir` | `schmeide-data` | JetStream store directory. The image sets `SCHMEIDE_DATA_DIR=/data`. |
 | `--webhook-secret` | required | |
@@ -41,9 +42,10 @@ the table in `controlSettings`.
 
 `Run` in `internal/control/control.go` starts things in this order, and any failure stops startup:
 
-1. Parse the allowlist, runner tokens, webhook rate, and delivery TTL. Read and parse the App private key
-   (`ParsePrivateKey` accepts PKCS#1 or PKCS#8 RSA).
-2. Warn when NATS has no TLS and `--nats-addr` is beyond loopback.
+1. Parse the allowlist, runner tokens, webhook rate, delivery TTL, and `--allow-plaintext-nats`.
+2. Refuse to start (`ErrPlaintextNATS`) when NATS has no TLS, `--nats-addr` is beyond loopback, and
+   `--allow-plaintext-nats` is not `true` (`checkNATSTransport`). With it, log a warning instead. Then read and
+   parse the App private key (`ParsePrivateKey` accepts PKCS#1 or PKCS#8 RSA).
 3. `StartQueue`: start the embedded NATS server, connect in-process as `_schmeide_control` with a random
    password (`rand.Text()`), open the `SCHMEIDE_ISSUES` and `SCHMEIDE_STAGES` buckets and the `SCHMEIDE_JOBS`
    stream (`Queue.openJobs`).
@@ -51,7 +53,8 @@ the table in `controlSettings`.
 5. `Queue.Track`: create or update `SCHMEIDE_STATUS`, replay its whole history, then follow new messages. Only
    after the replay is `q.tracker` set, so pool routing knows which stewards have runners before the first
    webhook is accepted.
-6. Listen on `--http-addr` and serve `/webhook`.
+6. `Queue.ServeStatus`: subscribe to `schmeide.status-query.*`.
+7. Listen on `--http-addr` and serve `/webhook`.
 
 On SIGINT or SIGTERM the HTTP server gets 10 seconds to finish requests in flight, then the deferred
 `Queue.Close` stops NATS.
@@ -66,7 +69,8 @@ flowchart TD
     replay -- yes --> r200["200 replay<br/>(nothing published)"]
     replay -- no --> rate{"under --webhook-rate<br/>this minute?"}
     rate -- no --> r429["429"]
-    rate -- yes --> body["read body, cap 25 MiB"]
+    rate -- yes --> body["read body: 1 MiB for issues,<br/>64 KiB for other events"]
+    body -- "over the cap" --> r413["413"]
     body --> sig{"X-Hub-Signature-256<br/>matches?"}
     sig -- no --> r401["401"]
     sig -- yes --> ev{"X-GitHub-Event = issues?"}
@@ -86,6 +90,11 @@ flowchart TD
   repeated delivery id costs nothing. A delivery id is remembered only after a successful outcome
   (`webhookGate.remember`), so a failed delivery can be redelivered. An empty id is never a replay. Both the
   rate limit and the id memory are in memory and reset on restart. `Queue.Publish` dedupes across restarts.
+- The body cap depends on the `X-GitHub-Event` header, which is read first: 1 MiB (`maxIssuesWebhookBytes`) for
+  `issues`, 64 KiB (`maxOtherWebhookBytes`) for anything else. GitHub caps an issue body at 65,536 characters, so a
+  real `issues` payload is far smaller. The body is read before its signature can be checked, so the cap bounds the
+  memory an unsigned request can hold. A body over the cap answers 413 "a <event> payload may be at most <n>
+  bytes", is logged as `msg="webhook rejected"` with the event, and publishes nothing.
 - The HTTP server sets `ReadHeaderTimeout` 10s and `ReadTimeout` 30s (`newWebhookServer`).
 - `VerifySignature` is an HMAC-SHA256 over the raw body, compared with `hmac.Equal`.
 - `JobFromIssuesEvent` builds a `Job` only for actions `labeled` and `assigned` (`jobActions`). Edits and reopens
@@ -101,6 +110,18 @@ flowchart TD
 `--runner-tokens` with `runnerPermissions(steward)`, plus the control user, which has no permission limits.
 Logging and signal handling of the embedded server are off (`NoLog`, `NoSigs`). There is no NATS account
 configuration, so everything is in the default global account.
+
+The server bounds what a steward's token can do to the control node:
+
+- `MaxPayload` is 512 KiB (`maxPayloadBytes`). It applies to every connection, the control node's own included, so
+  it must hold the largest job: a 65,536-character issue body whose every character `json.Marshal` escapes to six
+  bytes stays under 400 KiB. A runner's client refuses a larger publish with `nats: maximum payload exceeded`.
+- `MaxConn` is 16 (`maxConnectionsPerSteward`) per steward in `--runner-tokens`, plus one for the in-process
+  connection (`maxConnections`). NATS without operator JWTs has no per-user connection limit, so the stewards share
+  that total; a client past it fails with `nats: server maximum connections exceeded`.
+- The `SCHMEIDE_STAGES` bucket keeps one revision per key (`History: 1`) and refuses a value over 4 KiB
+  (`maxStageValueBytes`). A runner logs a refused stage write as `could not record the job's stage` and goes on.
+- `SCHMEIDE_STATUS` has no limits yet; a steward can still grow it (#210).
 
 ```mermaid
 flowchart LR
@@ -128,6 +149,8 @@ flowchart LR
     c2["durable consumer runner-_pool<br/>filter: schmeide.jobs._pool and below<br/>shared by --pool runners"]
     tracker["Tracker<br/>ordered consumer"]
     tok["schmeide.token.{steward}<br/>request/reply, core NATS"]
+    sq["schmeide.status-query.{steward}<br/>request/reply, core NATS"]
+    cli["schmeide status"]
 
     intake --> issues
     intake --> js1
@@ -140,6 +163,8 @@ flowchart LR
     status --> tracker
     tracker -- "final state" --> issues
     rpub -.->|request job subject| tok
+    cli -.->|empty request| sq
+    sq -.->|"Tracker.Snapshot(steward)"| tracker
 ```
 
 ### Streams, buckets, and subjects
@@ -147,10 +172,11 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded; a registration refresh adds one message per runner per minute) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), which answers `schmeide status`; runners restoring the attempt count (direct get, own and pool subjects only) |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
-| `SCHMEIDE_STAGES` (`StageBucket`) | KV, default config | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
+| `SCHMEIDE_STAGES` (`StageBucket`) | KV, `History: 1`, `MaxValueSize` 4 KiB | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
+| `schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`) | core NATS request/reply | empty request, reply is `StatusReply` (a `Snapshot` scoped to the steward) | `schmeide status` | `Queue.ServeStatus` |
 
 The status stream subjects are the same subjects runners have always published on. The stream captures them, so
 publishers do not need JetStream acks for statuses.
@@ -176,9 +202,10 @@ for that consumer. No `MaxDeliver` is set, so JetStream redelivers without limit
 - consumer create, info, next, and ack for `runner-<steward>` with exactly its own filter, and the same for
   `runner-_pool` with the pool filter;
 - `schmeide.runners.<steward>`, `schmeide.status.<steward>.>`, and `schmeide.status._pool.>`;
-- `schmeide.token.<steward>`;
-- stream info and message get on `SCHMEIDE_STATUS` (any steward may read every registration and status, which
-  is what `schmeide status` shows);
+- `schmeide.token.<steward>` and `schmeide.status-query.<steward>`;
+- stream info on `SCHMEIDE_STATUS`, and direct get on `schmeide.status.<steward>.>` and `schmeide.status._pool.>`
+  in it, which a runner uses to restore a job's attempt count. There is no plain message get and no direct get on
+  another steward's statuses or on any registration;
 - put and direct get on `$KV.SCHMEIDE_STAGES.<steward>.>` and `$KV.SCHMEIDE_STAGES._pool.>`, and stream info on
   `KV_SCHMEIDE_STAGES`.
 
@@ -189,9 +216,10 @@ It may subscribe only below `_INBOX_<steward>.>` (`InboxPrefix`). Runners and `s
 
 `Queue.Publish` decides where the job goes and whether it is new.
 
-1. `job.Pool` is set when the tracker is running and `Tracker.hasRunner(steward)` is false. Registrations never
-   expire, so a steward whose runner registered once, even long ago, keeps getting jobs on its own subject.
-   Until `Track` has run there is no tracker and the job stays on the steward's subject.
+1. `job.Pool` is set when the tracker is running and `Tracker.hasRunner(steward)` is false: the steward has no
+   live registration, one stored within `RegistrationTTL` (3 minutes). A steward whose runner stopped, or never
+   refreshed its registration, gets its next job on the pool subject. Until `Track` has run there is no tracker and
+   the job stays on the steward's subject.
 2. The issue key is `<repo_id>.<issue>`. When a record exists and its state is not `gate_failed` or `failed`
    (`State.failure`), the delivery is a duplicate: an unfinished job, or one that ended with a pull request
    (`pr_opened`, `review_failed`, `merged`, `queued`, `merge_failed`), blocks a new job for that issue whoever
@@ -209,15 +237,22 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 
 ## Runner registration and status
 
-A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` once
-at startup and flushes. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
-state change.
+A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` at
+startup and flushes, and is expected to publish it again every `RegistrationInterval` (1 minute) while it runs. It
+publishes a `Status{state, detail, attempts}` on its job's status subject at every state change.
+
+A registration is live for `RegistrationTTL` (3 minutes, three intervals) after JetStream stored it. The age comes
+from the stored message's timestamp, not from when the tracker saw it, so a control node restart does not refresh
+a stale registration. `Tracker.live` drops registrations past the TTL on each read; `hasRunner`, `poolRunner`
+(pool routing and pool token minting), `Runners`, and the `schmeide status` snapshot see only live ones. Nothing is
+logged when a registration expires.
 
 `Tracker` (`status.go`) keeps the registrations and the latest status per job in memory:
 
 - `observeRegistration` drops a registration whose payload steward does not match the subject, since only the
-  subject is pinned by NATS permissions. It keeps one entry per (steward, host). It logs a warning when
-  `release.Skewed(runner version, control version)`, and still accepts the runner.
+  subject is pinned by NATS permissions. It keeps one entry per (steward, host), the latest, with the time it was
+  stored. Every registration, a refresh included, logs `msg="runner registered"`, and a warning when
+  `release.Skewed(runner version, control version)`; the runner is still accepted.
 - `observeStatus` stores the status and, for a final state (`State.final`: `pr_opened`, `review_failed`,
   `merged`, `queued`, `merge_failed`, `gate_failed`, `failed`), calls `Tracker.finish`, which writes the state
   into the issue record when the record still names that subject, is not already finished, and the status
@@ -227,9 +262,17 @@ After a restart, `Track` replays `SCHMEIDE_STATUS` from its first sequence befor
 registrations, latest states, and issue-record final states are rebuilt before any new webhook is published. The
 ordered consumer starts at the sequence after the replay, so no message is applied twice.
 
-`schmeide status` (`StatusMain`) connects as a steward, calls `ReadStatus`, which replays the same stream into a
-fresh read-only `Tracker` (`issues == nil`, so it never writes), and prints the registrations and every job whose
-latest state is not final. `--json` prints the `Snapshot` struct, whose JSON form is stable.
+`SCHMEIDE_STATUS` has `AllowDirect` set, so a direct get names the subject in the request subject and NATS
+permissions can limit it to the steward's own and pool job statuses.
+
+`schmeide status` (`StatusMain`) connects as a steward and sends an empty request on
+`schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`). `Queue.ServeStatus`, started by `Run` right after
+`Track`, answers with a `StatusReply`: `Tracker.Snapshot(steward)`, which holds the steward's live registrations and
+every job on `schmeide.jobs.<steward>.` whose latest state is not final, plus jobs on `schmeide.jobs._pool.` when
+the steward has a live pool registration (`poolRunner`). The subject's steward token is pinned by NATS permissions,
+so a steward can only ask about itself. `--json` prints the `Snapshot` struct, whose JSON form is stable. When no
+control node answers (`nats.ErrNoResponders`, an older control node), `schmeide status` exits 1 with "the control
+node does not answer status queries; upgrade `schmeide control` to this version".
 
 ### Job states
 
@@ -281,3 +324,10 @@ startup), sets TLS 1.2 minimum, and installs a `GetCertificate` that reloads bot
 failed reload, such as a half-written renewal, serves the last pair that loaded. The in-process control
 connection never uses TLS. Runners verify the certificate against the system roots; there is no client
 certificate. Setting only one of the two files is a startup error.
+
+Without the pair, `checkNATSTransport` (in `internal/control/tls.go`) refuses a `--nats-addr` that
+`listensBeyondLoopback` reports as reachable from another machine: any host that is not a loopback IP or
+`localhost`, including an empty host (`:4222`). `Run` returns `ErrPlaintextNATS` before it reads the App key or
+touches the data directory, and `schmeide control` exits 1. `--allow-plaintext-nats true` skips the refusal; the
+control node then logs `NATS listens beyond loopback without TLS because --allow-plaintext-nats is set; steward
+tokens and job tokens cross the network in plain text. Set --nats-tls-cert-file and --nats-tls-key-file` at WARN.

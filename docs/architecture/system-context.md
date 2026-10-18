@@ -53,7 +53,7 @@ flowchart TB
 | Control node | `schmeide control`: one process with the webhook listener and an embedded NATS server with JetStream. | Any host GitHub can reach. Published as a container image, `ghcr.io/autobutler-org/schmeide:<version>`, whose default command is `control`. | `internal/control` |
 | Runner | `schmeide runner --steward <login>`: pulls one steward's jobs and takes each to a pull request. | The steward's own machine, as a binary from `make install` or `go install`. The image does not contain git or a harness, so it cannot run a runner. | `internal/runner` and collaborators |
 | Harness | An agent CLI: Claude Code (`claude`) or the Grok CLI (`grok`). Uses the login already on the machine. | Child process of the runner, in the job's worktree. | `internal/harness` |
-| `schmeide status` | Reads registrations and unfinished job states. | Anywhere that can reach NATS with a steward token. | `internal/control/status.go` (`StatusMain`) |
+| `schmeide status` | Asks the control node for the steward's own live registrations and unfinished jobs (plus pool jobs for a pool steward). | Anywhere that can reach NATS with a steward token. | `internal/control/status.go` (`StatusMain`) |
 | `schmeide doctor` | Checks a runner machine: git, gh, disk, lint gate detection, harnesses, permission floor, control node reachability. | The runner machine. | `internal/doctor` |
 
 ## Connections
@@ -68,12 +68,13 @@ Every connection below is opened by the left-hand side. Nothing connects in to a
 | Runner | GitHub git (`--github-url`, default `https://github.com`) | HTTPS git | fetch base, push job branch | installation token as an `http.extraHeader` |
 | Runner | GitHub REST and GraphQL (`--github-api-url`) | HTTPS | pulls, comments, blocked-by, check runs, job logs, branch protection, merge, merge queue | installation token as `Bearer` |
 | Harness | its model provider | HTTPS | the session | the harness's own login (`ANTHROPIC_*`, `CLAUDE_*`, `XAI_*`, or its config under `HOME`) |
-| `schmeide status`, `schmeide doctor` | control node NATS | NATS | status replay, a token-subject ping | a steward's NATS token |
+| `schmeide status`, `schmeide doctor` | control node NATS | NATS | a status query on `schmeide.status-query.<steward>`, a token-subject ping | a steward's NATS token |
 
 The webhook listener is plain HTTP and the startup log says it must sit behind a TLS-terminating proxy. NATS
 serves TLS itself, because a NATS client starts in plain text and upgrades after the server greeting, so a TLS
-proxy cannot sit in front of it. Without TLS, `control.Run` logs a warning when `--nats-addr` listens beyond
-loopback (`listensBeyondLoopback` in `internal/control/tls.go`).
+proxy cannot sit in front of it. Without TLS, `control.Run` refuses to start when `--nats-addr` listens beyond
+loopback (`checkNATSTransport` and `listensBeyondLoopback` in `internal/control/tls.go`), unless
+`--allow-plaintext-nats true` is set, in which case it starts and logs a warning.
 
 ## What lives where
 
