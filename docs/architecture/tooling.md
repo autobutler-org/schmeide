@@ -32,11 +32,13 @@ wins over the environment. The control node also reads a `--config` file, which 
 | `make build` | `go build -ldflags "-X …/internal/release.Version=$(VERSION)" -o build/schmeide ./cmd/schmeide` |
 | `make install` | `go install` with the same ldflags, into `GOBIN` |
 | `make test` | `go test ./...` (unit and integration tests, no e2e) |
+| `make test/race` | `go test -race -covermode=atomic` over `./...`; `PKGS=` picks packages, `COVERPROFILE=` writes a profile |
+| `make test/scripts` | runs each `scripts/*_test.sh` with bash |
 | `make test/e2e` | `go test -tags e2e -count=1 ./internal/e2e`, and prints how long it took |
 | `make test/cover` | coverage profile and HTML under `build/` |
 | `make bench` | `go test -bench . -benchmem ./internal/control` (`BenchmarkWebhookIntake`, `BenchmarkStatusStore`) |
-| `make check` | `check/format` (gofmt -l), `check/tidy` (`go mod tidy -diff`), `check/vet`, `check/lint` (golangci-lint without fixing), then `test`. Changes no files. |
-| `make check/vuln` | `go tool govulncheck ./...` (not part of `check`) |
+| `make check` | `check/format` (gofmt -l), `check/tidy` (`go mod tidy -diff`), `check/vet`, `check/lint` (golangci-lint without fixing), then `test` and `test/scripts`. Changes no files. |
+| `make check/vuln` | `go tool govulncheck ./...` (needs network, so not part of `check`; the `govulncheck` CI job runs it) |
 | `make format` | `go tool golangci-lint fmt` (gci, gofumpt, goimports) |
 | `make changelog` | `CHANGELOG.md` from merged PRs, needs `gh` logged in |
 | `make watch` | rebuild on change with `air` |
@@ -59,17 +61,30 @@ review and tests carry those concerns. Comments end in a period (`godot`).
 
 ## CI workflows
 
-All four are in `.github/workflows/`. The three pull request workflows also run on `merge_group`, so they work
-with a merge queue, and cancel superseded runs for the same PR.
+Three workflows are in `.github/workflows/`. `ci.yml` and `image.yml` run on pull requests to `main` and on
+`merge_group`, so they work with a merge queue; `ci.yml` also runs on pushes to `main` and on manual dispatch.
+A newer push to a PR branch cancels the older `ci.yml` run, and pushes to `main` always run to completion
+because each one records a coverage baseline.
 
 | Workflow | Triggers | Does | Produces |
 | --- | --- | --- | --- |
-| `ci.yml` (Continuous Integration) | PR to `main`, merge group, manual | `make deps`, `make build`, `make test` | pass or fail |
-| `check.yml` (Check) | PR to `main`, merge group, manual | `make tidy` then `git diff --exit-code` on go.mod and go.sum, `make format` then `git diff --exit-code`, `make check` | pass or fail |
+| `ci.yml` (ci) | PR to `main`, merge group, push to `main`, manual | the five parallel jobs below | pass or fail per job |
 | `image.yml` (Image) | PR to `main`, merge group, manual | Buildx build of the `Dockerfile` for linux/amd64 and linux/arm64, not pushed | proof the Dockerfile builds |
 | `release.yml` (Release) | push of a `v*` tag | Buildx build for both platforms with `VERSION=<tag>`, push to GHCR | `ghcr.io/autobutler-org/schmeide:<version without v>` and `latest` |
 
-`make test/e2e` is not run by any workflow.
+Jobs of `ci.yml`:
+
+| Job | Runs | Notes |
+| --- | --- | --- |
+| `lint` | `make check/format check/tidy check/vet check/lint`, then `make build` | These fail on any change `make format` or `make tidy` would make. 15 minute timeout. |
+| `test` | `make test/race COVERPROFILE=cover.out`, then `scripts/cover-report.sh cover.out` | The whole suite under the race detector in one job. Writes the slowest packages and the coverage report to the job summary. A PR fails when its total coverage drops more than one point below the last `main` push's total; if no baseline exists (first run, expired artifact) the gate is skipped. Pushes to `main` upload the total as the `coverage-baseline` artifact. 20 minute timeout. |
+| `govulncheck` | `make check/vuln` | Uses the latest patched Go (`go-version: stable`) rather than `go.mod`'s, so standard library fixes count. |
+| `e2e` | `make test/e2e` | The journeys in [End-to-end journeys](#end-to-end-journeys). |
+| `scripts` | `make test/scripts` | Runs every `scripts/*_test.sh`. |
+
+`make check` (local) runs `check/format`, `check/tidy`, `check/vet`, `check/lint`, `test`, and `test/scripts`.
+It does not run the race tests, `check/vuln`, or e2e; those are CI jobs, so run `make test/race` or
+`make test/e2e` yourself when a change needs them.
 
 ## Version stamp and the image
 
