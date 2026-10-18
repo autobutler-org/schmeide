@@ -232,6 +232,9 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if _, err := queue.Track(log); err != nil {
 		return fmt.Errorf("track runners and job states: %w", err)
 	}
+	if err := queue.ServeStatus(log); err != nil {
+		return fmt.Errorf("serve status queries: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", Handler(Intake{

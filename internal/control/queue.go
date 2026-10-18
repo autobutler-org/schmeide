@@ -267,14 +267,17 @@ func (q *Queue) seedIssues(ctx context.Context) error {
 // steward's jobs, report on them, and ask for their tokens. Every steward
 // may also use the one shared pool consumer and report a pool job's status.
 // A runner only pulls from that consumer when it was started with --pool.
-// Any steward may read the status stream, which is what `schmeide status`
-// shows: every runner's registration and every job's latest state. A steward
-// reads and writes the stage records of its own jobs and of pool jobs.
+// A steward reads the latest status of its own jobs and of pool jobs, which
+// a runner uses to restore a job's attempt count, and asks the control node
+// for its own `schmeide status` on its status query subject. It cannot read
+// other stewards' registrations or statuses. A steward reads and writes the
+// stage records of its own jobs and of pool jobs.
 func runnerPermissions(steward string) *server.Permissions {
 	consumer := JobStream + "." + ConsumerName(steward)
 	pool := JobStream + "." + ConsumerName(PoolName)
 	stages := "$KV." + StageBucket + "."
 	stageGet := "$JS.API.DIRECT.GET.KV_" + StageBucket + "." + stages
+	statusGet := "$JS.API.DIRECT.GET." + StatusStream + "." + StatusSubjectPrefix
 	return &server.Permissions{
 		Publish: &server.SubjectPermission{Allow: []string{
 			"$JS.API.CONSUMER.CREATE." + consumer + "." + JobFilter(steward),
@@ -289,8 +292,10 @@ func runnerPermissions(steward string) *server.Permissions {
 			StatusSubjectPrefix + steward + ".>",
 			StatusSubjectPrefix + PoolName + ".>",
 			TokenSubjectPrefix + steward,
+			StatusQuerySubjectPrefix + steward,
 			"$JS.API.STREAM.INFO." + StatusStream,
-			"$JS.API.STREAM.MSG.GET." + StatusStream,
+			statusGet + steward + ".>",
+			statusGet + PoolName + ".>",
 			"$JS.API.STREAM.INFO.KV_" + StageBucket,
 			stages + steward + ".>",
 			stages + PoolName + ".>",

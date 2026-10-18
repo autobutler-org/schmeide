@@ -192,9 +192,13 @@ progress.
   `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
 - A job no runner has claimed yet is not listed either: the list comes from
   the states runners report (`claimed`, `working`, `reviewing`, `retrying`).
-- Any steward sees every runner and job.
-- A stopped runner stays listed.
-- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
+- A steward sees only their own runners and their own jobs. A steward with a
+  live `--pool` runner also sees pool jobs. Other stewards' runners, hosts,
+  versions, and job details are never shown.
+- A runner that has not refreshed its registration for three minutes is not
+  listed (JN-POOL-008).
+- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
+  `TestStatusShowsOnlyTheAskingStewardsRunnersAndJobs`, and
   `TestStatusHidesEveryFinishedRunnerState`.
 
 ---
@@ -253,6 +257,7 @@ progress.
 
 1. Run `schmeide status` with no steward.
 2. Run `schmeide status --steward octocat --nats-url nats://127.0.0.1:1`.
+3. Run it against a control node from before status queries.
 
 **Expected result:**
 
@@ -262,10 +267,13 @@ progress.
   at nats://127.0.0.1:1 as octocat: ..." and "Check that `schmeide control`
   is running, that --nats-url points at its --nats-addr, and that
   --nats-token is the token its --runner-tokens lists for octocat.".
+- Step 3: exit code 1, "schmeide status: the control node does not answer
+  status queries; upgrade `schmeide control` to this version".
 
 **Notes:**
 
-- Covered by `TestRun`.
+- Steps 1 and 2 are covered by `TestRun`; step 3 by `internal/control`
+  `TestStatusAsksTheControlNode`.
 
 ---
 

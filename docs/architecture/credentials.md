@@ -36,7 +36,7 @@ flowchart TB
 | Boundary | What crosses it | What is kept out |
 | --- | --- | --- |
 | GitHub to control node | signed webhook payloads | anything without a valid `X-Hub-Signature-256` |
-| Control node to runner | job messages, a token for each of the steward's own jobs (and pool jobs for a `--pool` runner) | the App key, the webhook secret, other stewards' jobs, tokens, and stage records |
+| Control node to runner | job messages, a token for each of the steward's own jobs (and pool jobs for a `--pool` runner) | the App key, the webhook secret, other stewards' jobs, tokens, stage records, registrations, and job statuses |
 | Runner to harness session | the brief, the worktree, the reduced environment | the job's installation token, the NATS token, `SCHMEIDE_*` settings |
 | Runner to gate | the worktree and the runner's environment | the job's installation token (it is only in git's environment) |
 | Worktree to remote | the branch's commits, whose added lines pass the secret scan | credential-shaped literals, the job's installation token, the runner's NATS token |
@@ -90,9 +90,14 @@ after the steward with the token as its password and `runnerPermissions(steward)
 same pair as `--steward` and `--nats-token`.
 
 What a stolen steward token gives: that steward's jobs (including issue text), its token subject (and so
-installation tokens for its jobs' repositories), its stage records, pool jobs and their stage records, and read
-access to every registration and status on `SCHMEIDE_STATUS`. It does not give other stewards' jobs, tokens, or
-replies. Token rotation is a control node restart with a new `--runner-tokens`.
+installation tokens for its jobs' repositories), its stage records, pool jobs and their stage records and
+statuses, its own job statuses, and its own registrations. It does not give other stewards' jobs, tokens, replies,
+registrations (host names, harnesses, versions), or job statuses (which can carry gate output): `schmeide status`
+asks the control node on `schmeide.status-query.<steward>`, and the reply holds only that steward's runners and
+jobs, plus pool jobs when the steward has a live pool runner. Stream info on `SCHMEIDE_STATUS` and
+`KV_SCHMEIDE_STAGES` stays allowed, because a runner opens both by name; stream info can list subject names, so a
+steward can still learn which stewards have registered and which repository IDs and issue numbers have statuses,
+but not what those messages say. Token rotation is a control node restart with a new `--runner-tokens`.
 
 The control node's own connection is in-process, as `_schmeide_control` with a password from `rand.Text()` that
 is never written anywhere.

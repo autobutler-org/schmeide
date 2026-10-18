@@ -11,7 +11,7 @@ token for each job a runner asks for. All of it is in `internal/control`.
 | `internal/control/guard.go` | `webhookGate`: the per-minute rate limit and the delivery-id memory |
 | `internal/control/intake.go` | `Job`, `Job.Subject`, `VerifySignature`, `JobFromIssuesEvent`, `Allowlist`, `ParseRunnerTokens`, `Intake.Handle`, `Outcome` |
 | `internal/control/queue.go` | `StartQueue`, `Queue.Publish`, `runnerPermissions`, `ServeTokens`, the job stream, the issue and stage buckets |
-| `internal/control/status.go` | `State`, `Status`, `Registration`, `Tracker` (`Queue.Track`), the `SCHMEIDE_STATUS` stream, `ReadStatus`, `StatusMain` |
+| `internal/control/status.go` | `State`, `Status`, `Registration`, `Tracker` (`Queue.Track`), the `SCHMEIDE_STATUS` stream, `Tracker.Snapshot`, `Queue.ServeStatus`, `StatusMain` |
 | `internal/control/token.go` | `TokenMinter.Mint`, `ParsePrivateKey`, the App JWT |
 | `internal/control/tls.go` | `natsTLSConfig` (cert reload per handshake), `listensBeyondLoopback` |
 
@@ -53,7 +53,8 @@ the table in `controlSettings`.
 5. `Queue.Track`: create or update `SCHMEIDE_STATUS`, replay its whole history, then follow new messages. Only
    after the replay is `q.tracker` set, so pool routing knows which stewards have runners before the first
    webhook is accepted.
-6. Listen on `--http-addr` and serve `/webhook`.
+6. `Queue.ServeStatus`: subscribe to `schmeide.status-query.*`.
+7. Listen on `--http-addr` and serve `/webhook`.
 
 On SIGINT or SIGTERM the HTTP server gets 10 seconds to finish requests in flight, then the deferred
 `Queue.Close` stops NATS.
@@ -148,6 +149,8 @@ flowchart LR
     c2["durable consumer runner-_pool<br/>filter: schmeide.jobs._pool and below<br/>shared by --pool runners"]
     tracker["Tracker<br/>ordered consumer"]
     tok["schmeide.token.{steward}<br/>request/reply, core NATS"]
+    sq["schmeide.status-query.{steward}<br/>request/reply, core NATS"]
+    cli["schmeide status"]
 
     intake --> issues
     intake --> js1
@@ -160,6 +163,8 @@ flowchart LR
     status --> tracker
     tracker -- "final state" --> issues
     rpub -.->|request job subject| tok
+    cli -.->|empty request| sq
+    sq -.->|"Tracker.Snapshot(steward)"| tracker
 ```
 
 ### Streams, buckets, and subjects
@@ -167,10 +172,11 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded; a registration refresh adds one message per runner per minute) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded; a registration refresh adds one message per runner per minute) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), which answers `schmeide status`; runners restoring the attempt count (direct get, own and pool subjects only) |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, `History: 1`, `MaxValueSize` 4 KiB | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
+| `schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`) | core NATS request/reply | empty request, reply is `StatusReply` (a `Snapshot` scoped to the steward) | `schmeide status` | `Queue.ServeStatus` |
 
 The status stream subjects are the same subjects runners have always published on. The stream captures them, so
 publishers do not need JetStream acks for statuses.
@@ -196,9 +202,10 @@ for that consumer. No `MaxDeliver` is set, so JetStream redelivers without limit
 - consumer create, info, next, and ack for `runner-<steward>` with exactly its own filter, and the same for
   `runner-_pool` with the pool filter;
 - `schmeide.runners.<steward>`, `schmeide.status.<steward>.>`, and `schmeide.status._pool.>`;
-- `schmeide.token.<steward>`;
-- stream info and message get on `SCHMEIDE_STATUS` (any steward may read every registration and status, which
-  is what `schmeide status` shows);
+- `schmeide.token.<steward>` and `schmeide.status-query.<steward>`;
+- stream info on `SCHMEIDE_STATUS`, and direct get on `schmeide.status.<steward>.>` and `schmeide.status._pool.>`
+  in it, which a runner uses to restore a job's attempt count. There is no plain message get and no direct get on
+  another steward's statuses or on any registration;
 - put and direct get on `$KV.SCHMEIDE_STAGES.<steward>.>` and `$KV.SCHMEIDE_STAGES._pool.>`, and stream info on
   `KV_SCHMEIDE_STAGES`.
 
@@ -244,8 +251,7 @@ logged when a registration expires.
 
 - `observeRegistration` drops a registration whose payload steward does not match the subject, since only the
   subject is pinned by NATS permissions. It keeps one entry per (steward, host), the latest, with the time it was
-  stored. A refresh that matches a live entry exactly is not logged. A new or changed registration, or one that
-  arrives after the old one expired, logs `msg="runner registered"`, and a warning when
+  stored. Every registration, a refresh included, logs `msg="runner registered"`, and a warning when
   `release.Skewed(runner version, control version)`; the runner is still accepted.
 - `observeStatus` stores the status and, for a final state (`State.final`: `pr_opened`, `review_failed`,
   `merged`, `queued`, `merge_failed`, `gate_failed`, `failed`), calls `Tracker.finish`, which writes the state
@@ -256,9 +262,17 @@ After a restart, `Track` replays `SCHMEIDE_STATUS` from its first sequence befor
 registrations, latest states, and issue-record final states are rebuilt before any new webhook is published. The
 ordered consumer starts at the sequence after the replay, so no message is applied twice.
 
-`schmeide status` (`StatusMain`) connects as a steward, calls `ReadStatus`, which replays the same stream into a
-fresh read-only `Tracker` (`issues == nil`, so it never writes), and prints the registrations and every job whose
-latest state is not final. `--json` prints the `Snapshot` struct, whose JSON form is stable.
+`SCHMEIDE_STATUS` has `AllowDirect` set, so a direct get names the subject in the request subject and NATS
+permissions can limit it to the steward's own and pool job statuses.
+
+`schmeide status` (`StatusMain`) connects as a steward and sends an empty request on
+`schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`). `Queue.ServeStatus`, started by `Run` right after
+`Track`, answers with a `StatusReply`: `Tracker.Snapshot(steward)`, which holds the steward's live registrations and
+every job on `schmeide.jobs.<steward>.` whose latest state is not final, plus jobs on `schmeide.jobs._pool.` when
+the steward has a live pool registration (`poolRunner`). The subject's steward token is pinned by NATS permissions,
+so a steward can only ask about itself. `--json` prints the `Snapshot` struct, whose JSON form is stable. When no
+control node answers (`nats.ErrNoResponders`, an older control node), `schmeide status` exits 1 with "the control
+node does not answer status queries; upgrade `schmeide control` to this version".
 
 ### Job states
 

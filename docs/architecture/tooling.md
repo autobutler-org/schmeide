@@ -10,7 +10,7 @@ its flags and help text. Running with no arguments or `-h` prints the command li
 | `schmeide control` | `control.Main` (`internal/control/cli.go`) | The control node. See [Control node](control-node.md). |
 | `schmeide runner` | `runner.Main` (`internal/runner/cli.go`) | A runner. See [Runner](runner.md). |
 | `schmeide doctor` | `doctor.Main` (`internal/doctor/doctor.go`) | Checks a runner machine: git, gh, free disk, lint gate detection, each harness, the permission floor, and that a control node answers on NATS. `--fix` and `--json` are supported. |
-| `schmeide status` | `control.StatusMain` (`internal/control/status.go`) | Prints registrations and unfinished jobs from `SCHMEIDE_STATUS`. `--json` for the stable `Snapshot` form. |
+| `schmeide status` | `control.StatusMain` (`internal/control/status.go`) | Asks the control node on `schmeide.status-query.<steward>` and prints the steward's own live registrations and unfinished jobs, plus pool jobs for a pool steward. `--json` for the stable `Snapshot` form. |
 | `schmeide init` | `initMain` (`cmd/schmeide/init.go`) | Writes `.schmeide/config.toml` and `.schmeide/control.conf` (mode 0600) in the current directory, and refuses to overwrite either. |
 | `schmeide completion bash\|zsh\|fish` | `completionMain` (`cmd/schmeide/completion.go`) | Prints a completion script. |
 | `schmeide version` | `versionMain` (`cmd/schmeide/version.go`) | Prints `release.Version`. |

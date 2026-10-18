@@ -196,8 +196,9 @@ it. alice runs a pool runner.
 
 **Notes:**
 
-- The control node logs nothing when a registration expires. The next
-  registration from that host logs `msg="runner registered"` again.
+- The control node logs nothing when a registration expires. It logs
+  `msg="runner registered"` for every registration it stores, each refresh
+  included.
 - Requires runners that re-publish their registration every
   `control.RegistrationInterval`; a runner that registers only at startup
   falls out of routing three minutes after it starts.

@@ -255,21 +255,32 @@ func runStatus(t *testing.T, url string, extra ...string) string {
 	return stdout.String()
 }
 
-func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
+// startStatus starts a queue that `schmeide status` can reach, with its
+// tracker and status service running.
+func startStatus(t *testing.T) (*Queue, *Tracker, string) {
+	t.Helper()
 	q, url := startQueueOverTCP(t)
 	tracker := startTracker(t, q)
+	if err := q.ServeStatus(slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	return q, tracker, url
+}
+
+func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
+	q, tracker, url := startStatus(t)
 	runner := startFakeRunner(t, q)
 
-	octocat := Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "octo-laptop"}
-	runner.publish(RegisterSubjectPrefix+"octocat", octocat)
-	queued := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
-	done := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", InstallationID: 1, Title: "t"}
+	hubot := Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "hubot-laptop"}
+	runner.publish(RegisterSubjectPrefix+"hubot", hubot)
+	queued := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot", InstallationID: 1, Title: "t"}
+	done := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "hubot", InstallationID: 1, Title: "t"}
 	runner.report(queued, StateClaimed, "")
 	runner.report(done, StatePROpened, "https://github.com/o/r/pull/3")
-	eventually(t, func() bool { _, ok := tracker.JobStatus(done.Subject()); return ok })
+	eventually(t, func() bool { _, ok := tracker.JobStatus(done.Subject()); return ok && len(tracker.Runners()) == 1 })
 
 	text := runStatus(t, url)
-	for _, want := range []string{"octocat", "octo-laptop", "claude", queued.Subject(), string(StateClaimed)} {
+	for _, want := range []string{"hubot", "hubot-laptop", "claude", queued.Subject(), string(StateClaimed)} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text output %q does not contain %q", text, want)
 		}
@@ -283,7 +294,7 @@ func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Snapshot{
-		Runners: []Registration{octocat},
+		Runners: []Registration{hubot},
 		Jobs:    []JobState{{Subject: queued.Subject(), State: StateClaimed}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -291,9 +302,69 @@ func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
 	}
 }
 
+func TestStatusShowsOnlyTheAskingStewardsRunnersAndJobs(t *testing.T) {
+	q, tracker, url := startStatus(t)
+	runner := startFakeRunner(t, q)
+
+	hubot := Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "hubot-laptop"}
+	octocat := Registration{Steward: "octocat", Harnesses: []string{"grok"}, Host: "octo-secret-host", Version: "v9"}
+	runner.publish(RegisterSubjectPrefix+"hubot", hubot)
+	runner.publish(RegisterSubjectPrefix+"octocat", octocat)
+	own := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot"}
+	theirs := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "monalisa", Pool: true}
+	runner.report(own, StateWorking, "claude")
+	runner.report(theirs, StateRetrying, "attempt 1 of 3 failed: make check: secret gate output")
+	runner.report(pooled, StateWorking, "grok")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(pooled.Subject()); return ok && len(tracker.Runners()) == 2 })
+
+	var got Snapshot
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := Snapshot{
+		Runners: []Registration{hubot},
+		Jobs:    []JobState{{Subject: own.Subject(), State: StateWorking, Detail: "claude"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--json = %+v, want only hubot's own runner and job: %+v", got, want)
+	}
+	if text := runStatus(t, url); strings.Contains(text, "octo") || strings.Contains(text, "secret") {
+		t.Errorf("text output %q shows another steward's runner or job", text)
+	}
+
+	// A pool steward also sees pool jobs, which it may take.
+	hubotPool := hubot
+	hubotPool.Pool = true
+	runner.publish(RegisterSubjectPrefix+"hubot", hubotPool)
+	eventually(t, func() bool { return tracker.poolRunner("hubot") })
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want = Snapshot{
+		Runners: []Registration{hubotPool},
+		Jobs: []JobState{
+			{Subject: pooled.Subject(), State: StateWorking, Detail: "grok"},
+			{Subject: own.Subject(), State: StateWorking, Detail: "claude"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--json for a pool steward = %+v, want %+v", got, want)
+	}
+}
+
+func TestStatusAsksTheControlNode(t *testing.T) {
+	// No status service: an older control node, or none at all.
+	_, url := startQueueOverTCP(t)
+	var stdout, stderr bytes.Buffer
+	code := StatusMain([]string{"--steward", "hubot", "--nats-token", "hubot-token", "--nats-url", url}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "upgrade") {
+		t.Errorf("exit code = %d, stderr = %q; want 1 and advice to upgrade the control node", code, stderr.String())
+	}
+}
+
 func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
-	q, url := startQueueOverTCP(t)
-	startTracker(t, q)
+	_, _, url := startStatus(t)
 	if got := runStatus(t, url); !strings.Contains(got, "No queued or running jobs.") {
 		t.Errorf("output = %q, want it to say there are no jobs", got)
 	}
@@ -303,12 +374,11 @@ func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
 }
 
 func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
-	q, url := startQueueOverTCP(t)
-	tracker := startTracker(t, q)
+	q, tracker, url := startStatus(t)
 	runner := startFakeRunner(t, q)
 
 	job := func(issue int) Job {
-		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "octocat", InstallationID: 1, Title: "t"}
+		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "hubot", InstallationID: 1, Title: "t"}
 	}
 	states := []State{StateWorking, StateReviewing, StateMerged, StateMergeFailed, StateReviewFailed, StateQueued}
 	for i, state := range states {

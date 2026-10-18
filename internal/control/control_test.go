@@ -1252,6 +1252,12 @@ func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
 		"$JS.API.STREAM.PURGE." + JobStream,
 		"$KV." + issueBucket + ".7.1",
 		InboxPrefix("octocat") + ".reply",
+		StatusQuerySubjectPrefix + "octocat",
+		"$JS.API.STREAM.MSG.GET." + StatusStream,
+		"$JS.API.DIRECT.GET." + StatusStream,
+		"$JS.API.DIRECT.GET." + StatusStream + "." + StatusSubjectPrefix + "octocat.7.1",
+		"$JS.API.DIRECT.GET." + StatusStream + "." + RegisterSubjectPrefix + "octocat",
+		"$JS.API.CONSUMER.CREATE." + StatusStream,
 	} {
 		if err := hubot.Publish(subject, []byte("{}")); err != nil {
 			t.Fatal(err)
@@ -1354,5 +1360,44 @@ func TestStewardPayloadIsLimited(t *testing.T) {
 	}
 	if _, err := q.Publish(t.Context(), job); err != nil {
 		t.Errorf("Publish of the largest job = %v", err)
+	}
+}
+
+func TestRunnerReadsOnlyItsOwnAndPoolStatuses(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	own := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot"}
+	theirs := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "monalisa", Pool: true}
+	runner.report(own, StateRetrying, "attempt 1 of 3 failed")
+	runner.report(theirs, StateRetrying, "secret gate output")
+	runner.report(pooled, StateRetrying, "attempt 1 of 3 failed")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(pooled.Subject()); return ok })
+
+	hubot, _ := connectAs(t, q, "hubot", "hubot-token")
+	js, err := jetstream.New(hubot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	// What a runner does to restore a job's attempt count.
+	statuses, err := js.Stream(ctx, StatusStream)
+	if err != nil {
+		t.Fatalf("hubot cannot open the status stream: %v", err)
+	}
+	statusSubject := func(job Job) string {
+		return StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+	}
+	for _, job := range []Job{own, pooled} {
+		if _, err := statuses.GetLastMsgForSubject(ctx, statusSubject(job)); err != nil {
+			t.Errorf("hubot cannot read the status of %s: %v", job.Subject(), err)
+		}
+	}
+	short, cancelShort := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancelShort()
+	if msg, err := statuses.GetLastMsgForSubject(short, statusSubject(theirs)); err == nil {
+		t.Errorf("hubot read octocat's status: %s", msg.Data)
 	}
 }
