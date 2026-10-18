@@ -63,6 +63,9 @@ type worktreeSpec struct {
 	// gateEnv is the environment for the gate, before HOME and TMPDIR are
 	// pointed at the job's scratch directory; see [gateEnv].
 	gateEnv []string
+	// secrets are credentials the pre-push scan refuses verbatim besides
+	// token, such as the runner's NATS token. They have no fixed shape.
+	secrets []string
 }
 
 // worktree is the [Workspace] backed by a git worktree on the host.
@@ -215,15 +218,12 @@ func (w *worktree) GoCacheEnv(env []string) []string { return goCacheEnv(env, w.
 // an ancestor of HEAD, is updated without force. That is how a review round
 // publishes another commit on the same branch. A remote head that is not an
 // ancestor was not written by this checkout, so it is left in place and the
-// push fails. Tracked files are scanned before git push. A credential-shaped
-// literal refuses the push, and git push does not run.
+// push fails. The lines the branch adds are scanned before git push; see
+// [worktree.scanSecrets]. A finding refuses the push, and git push does not
+// run.
 func (w *worktree) Push(ctx context.Context) error {
-	found, err := secretscan.Scan(ctx, w.dir)
-	if err != nil {
-		return fmt.Errorf("scan tracked files for secrets: %w", err)
-	}
-	if len(found) > 0 {
-		return secretLiteralsError(found)
+	if err := w.scanSecrets(ctx); err != nil {
+		return err
 	}
 	ref := "refs/heads/" + w.spec.branch
 	remote, err := w.remoteHead(ctx, ref)
@@ -235,6 +235,21 @@ func (w *worktree) Push(ctx context.Context) error {
 	}
 	_, err = w.git(ctx, w.dir, "push", "-q", w.spec.url, "HEAD:"+ref)
 	return err
+}
+
+// scanSecrets scans the lines HEAD adds relative to the base for
+// credential-shaped literals and for the job's installation token and the
+// spec's other secrets verbatim. A literal already on the base is not the
+// job's and does not count.
+func (w *worktree) scanSecrets(ctx context.Context) error {
+	found, err := secretscan.ScanDiff(ctx, w.dir, w.baseRef, append([]string{w.spec.token}, w.spec.secrets...))
+	if err != nil {
+		return fmt.Errorf("scan the branch's changes for secrets: %w", err)
+	}
+	if len(found) > 0 {
+		return secretLiteralsError(found)
+	}
+	return nil
 }
 
 // secretLiteralsError names each file and the kind of secret. It does not
@@ -324,12 +339,8 @@ func (w *worktree) Restack(ctx context.Context, onto string) (bool, error) {
 	if err != nil || after == before {
 		return false, err
 	}
-	found, err := secretscan.Scan(ctx, w.dir)
-	if err != nil {
-		return false, fmt.Errorf("scan tracked files for secrets: %w", err)
-	}
-	if len(found) > 0 {
-		return false, secretLiteralsError(found)
+	if err := w.scanSecrets(ctx); err != nil {
+		return false, err
 	}
 	branch := "refs/heads/" + w.spec.branch
 	if _, err := w.git(ctx, w.dir, "push", "-q", "--force-with-lease="+branch+":"+before, w.spec.url, "HEAD:"+branch); err != nil {

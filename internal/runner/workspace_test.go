@@ -134,6 +134,13 @@ func lastEnv(env []string, name string) string {
 
 func newPushFixture(t *testing.T) (*worktree, string) {
 	t.Helper()
+	return newPushFixtureOn(t, nil)
+}
+
+// newPushFixtureOn is newPushFixture with base, file name to content, also
+// committed on main before the job's worktree is cut.
+func newPushFixtureOn(t *testing.T, base map[string]string) (*worktree, string) {
+	t.Helper()
 	// Keep the machine's git config (signing, hooks, identity) out of the test.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
@@ -144,7 +151,12 @@ func newPushFixture(t *testing.T) (*worktree, string) {
 	if err := os.WriteFile(filepath.Join(src, "README"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	git(t, src, "add", "README")
+	for name, body := range base {
+		if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, src, "add", "-A")
 	git(t, src, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
 	bare := filepath.Join(t.TempDir(), "origin.git")
 	git(t, src, "clone", "-q", "--bare", src, bare)
@@ -165,6 +177,65 @@ func newPushFixture(t *testing.T) (*worktree, string) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 	return w, bare
+}
+
+func TestPushIgnoresALiteralAlreadyOnTheBase(t *testing.T) {
+	old := "AKI" + "AIOSFODNN7EXAMPLE"
+	w, bare := newPushFixtureOn(t, map[string]string{"legacy.txt": "key " + old + "\n"})
+	if err := os.WriteFile(filepath.Join(w.Dir(), "legacy.txt"), []byte("key "+old+"\nnew line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit(t.Context(), "touch the file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Push(t.Context()); err != nil {
+		t.Fatalf("Push = %v, want the base's literal ignored", err)
+	}
+	if !remoteHasBranch(t, bare, w.spec.branch) {
+		t.Fatal("the branch was not pushed")
+	}
+}
+
+func TestPushRefusesTheJobsCredentialsAndNewTokenShapes(t *testing.T) {
+	const nats = "steward-nats-token-no-shape"
+	tests := []struct {
+		name string
+		line func(w *worktree) string
+		kind string
+	}{
+		{name: "installation token verbatim", line: func(w *worktree) string { return "t=" + w.spec.token + " // schmeide:allow-secret" }, kind: secretscan.KindCredential},
+		{name: "NATS token verbatim", line: func(*worktree) string { return "nats " + nats }, kind: secretscan.KindCredential},
+		{name: "another installation token", line: func(*worktree) string { return "gh" + "s_" + strings.Repeat("Q", 40) }, kind: secretscan.KindGitHub},
+		{name: "Anthropic key", line: func(*worktree) string { return "sk-" + "ant-" + strings.Repeat("a", 30) }, kind: secretscan.KindAnthropic},
+		{name: "xAI key", line: func(*worktree) string { return "xa" + "i-" + strings.Repeat("b", 30) }, kind: secretscan.KindXAI},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, bare := newPushFixture(t)
+			w.spec.secrets = []string{nats}
+			line := tt.line(w)
+			if err := os.WriteFile(filepath.Join(w.Dir(), "leak.txt"), []byte(line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Commit(t.Context(), "leak"); err != nil {
+				t.Fatal(err)
+			}
+			err := w.Push(t.Context())
+			if err == nil {
+				t.Fatal("Push succeeded with a credential in an added line")
+			}
+			want := "refusing to push: leak.txt:1 contains a " + tt.kind
+			if err.Error() != want {
+				t.Fatalf("Push error = %q, want %q", err, want)
+			}
+			if strings.Contains(err.Error(), w.spec.token) || strings.Contains(err.Error(), nats) {
+				t.Fatal("Push error includes the secret text")
+			}
+			if remoteHasBranch(t, bare, w.spec.branch) {
+				t.Fatal("git push updated the remote")
+			}
+		})
+	}
 }
 
 func rsaPrivateKeyPEM(t *testing.T) []byte {

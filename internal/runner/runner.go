@@ -771,6 +771,7 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 		id:       fmt.Sprintf("%d-%d", job.RepoID, job.Issue),
 		repoID:   strconv.FormatInt(job.RepoID, 10),
 		gateEnv:  gateEnv(os.Environ(), r.opts.GatePassEnv),
+		secrets:  []string{r.opts.NATSToken},
 	})
 	if err != nil {
 		return failed(err)
