@@ -354,10 +354,11 @@ func TestStatusListsAJobNoRunnerHasClaimed(t *testing.T) {
 	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "laptop"})
 	eventually(t, func() bool { return tracker.hasRunner("octocat") })
 
-	// octocat has a runner, so its job waits on the steward subject; hubot
-	// has none, so its job waits on the pool subject.
+	// octocat has a runner, so its job waits on the steward subject; carol
+	// has none, so her job waits on the pool subject. runStatus reads as
+	// hubot: status is team-wide, so both show though neither is hubot's.
 	waiting := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
-	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "hubot", InstallationID: 1, Title: "t", Pool: true}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "carol", InstallationID: 1, Title: "t", Pool: true}
 	before := time.Now()
 	for _, job := range []Job{waiting, pooled} {
 		if created, err := q.Publish(t.Context(), job); err != nil || !created {

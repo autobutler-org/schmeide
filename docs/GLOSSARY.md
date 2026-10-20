@@ -74,6 +74,13 @@ to that job's repository and to the permissions a runner needs to push, open
 pull requests, comment, and read checks. GitHub expires it after one hour.
 Runners hold no long-lived GitHub credential.
 
+## pending
+
+The job state the control node records when it creates a job, before any
+runner has claimed it. `schmeide status` lists a pending job with how long it
+has waited. Not final: the runner's `claimed` replaces it. Not to be confused
+with [queued](#queued), which is a finished job in a merge queue.
+
 ## pool
 
 The fallback queue for a job whose assignee has no registered runner. A runner

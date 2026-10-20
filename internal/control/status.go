@@ -388,6 +388,8 @@ jobs that are queued or running, read from the control node's status stream.
 A job no runner has claimed yet is "pending"; FOR is how long a job has been
 in its state, so for a pending job it is how long the job has waited.
 It connects to the control node's NATS as a steward, the same way a runner does.
+Status is team-wide and read-only: any steward sees every steward's runners and
+jobs, pool jobs included, and running it changes nothing.
 
 Usage:
   schmeide status --steward <github login> [--json] [flags]

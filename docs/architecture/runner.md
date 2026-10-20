@@ -122,7 +122,9 @@ stateDiagram-v2
 The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried. When the
 attempt count after this failure is below `--max-attempts`, the runner reports `retrying`, flushes so the count
 is stored on `SCHMEIDE_STATUS`, and `NakWithDelay(30s)`. Otherwise it comments and acks. The count lives in each
-status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A
+status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A new
+job for an issue whose last job ended `failed` starts at zero: the control node's `pending` status for the new job
+is the latest on the subject and carries no `attempts`. A
 `map[string]int` in the process is the fallback when the status stream cannot be read.
 
 Hand-backs that do not count: a failed token request, a shutdown (the parent context is canceled, so the job is

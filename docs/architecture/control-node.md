@@ -132,6 +132,7 @@ flowchart LR
     intake --> issues
     intake --> js1
     intake --> js2
+    intake -- "pending" --> st2
     js1 --> c1
     js2 --> c2
     rpub --> st1
@@ -147,7 +148,7 @@ flowchart LR
 | Name | Kind | Subjects or keys | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` (`JobStream`) | stream, `MaxMsgs` 100,000 (`jobStreamMaxMsgs`), discard oldest | `schmeide.jobs.<steward>.<repo_id>.<issue>`, `schmeide.jobs._pool.<repo_id>.<issue>` | `Queue.Publish` | runner consumers; `tokenFor` via `GetLastMsgForSubject`; `seedIssues` at startup |
-| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
+| `SCHMEIDE_STATUS` (`StatusStream`) | stream, default limits (unbounded) | `schmeide.runners.<steward>` (`Registration`), `schmeide.status.<steward or _pool>.<repo_id>.<issue>` (`Status`) | runners; `Queue.Publish` (`pending` for a new job) | `Tracker` (replay plus ordered consumer), `ReadStatus` for `schmeide status`, runners restoring the attempt count |
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, default config | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
@@ -201,7 +202,15 @@ It may subscribe only below `_INBOX_<steward>.>` (`InboxPrefix`). Runners and `s
    subject from closing the new one.
 4. The record is written with `Create` (no record) or `Update` at the read revision. Of two concurrent deliveries
    for one issue, one wins and the other reports duplicate.
-5. The job is published to JetStream. If that fails the record is rolled back.
+5. `publishPending` stores `Status{state: "pending"}` on the job's status subject
+   (`schmeide.status.<steward or _pool>.<repo_id>.<issue>`), so `schmeide status` lists the job before a runner
+   claims it. It runs only once the tracker is running (the stream exists then), and only on this new-job path, so
+   a duplicate delivery stores no second `pending` and does not reset the wait. It runs before the job is
+   published, so a runner's `claimed` always gets a later sequence and supersedes it. A failure here is logged at
+   warn (`could not record the job as pending; schmeide status will not list it until a runner claims it`) and the
+   job is still created.
+6. The job is published to JetStream. If that fails the record is rolled back and the `pending` status is
+   deleted from `SCHMEIDE_STATUS` by sequence, so no pending line is left for a job that was never stored.
 
 On startup `seedIssues` copies every job still in the stream into the issue bucket when its key is missing, and
 only then is `MaxMsgs` applied to the stream. That keeps upgrades from older control nodes, where the stream was
@@ -211,14 +220,16 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 
 A runner publishes a `Registration{steward, harnesses, host, pool, version}` on `schmeide.runners.<steward>` once
 at startup and flushes. It then publishes a `Status{state, detail, attempts}` on its job's status subject at every
-state change.
+state change. The control node publishes one `pending` status on that subject when it creates the job (see
+Publishing a job above); every runner state supersedes it.
 
 `Tracker` (`status.go`) keeps the registrations and the latest status per job in memory:
 
 - `observeRegistration` drops a registration whose payload steward does not match the subject, since only the
   subject is pinned by NATS permissions. It keeps one entry per (steward, host). It logs a warning when
   `release.Skewed(runner version, control version)`, and still accepts the runner.
-- `observeStatus` stores the status and, for a final state (`State.final`: `pr_opened`, `review_failed`,
+- `observeStatus` stores the status and the time the message was stored on the stream (`since`), and, for a
+  final state (`State.final`: `pr_opened`, `review_failed`,
   `merged`, `queued`, `merge_failed`, `gate_failed`, `failed`), calls `Tracker.finish`, which writes the state
   into the issue record when the record still names that subject, is not already finished, and the status
   sequence is after `After`.
@@ -229,12 +240,21 @@ ordered consumer starts at the sequence after the replay, so no message is appli
 
 `schmeide status` (`StatusMain`) connects as a steward, calls `ReadStatus`, which replays the same stream into a
 fresh read-only `Tracker` (`issues == nil`, so it never writes), and prints the registrations and every job whose
-latest state is not final. `--json` prints the `Snapshot` struct, whose JSON form is stable.
+latest state is not final. Each job's `JobState.Since` is the stored time of its latest status; the text output
+prints the time since then in the FOR column, which for a `pending` job is how long it has waited. `--json` prints
+the `Snapshot` struct, whose JSON form is stable (`since` was added for #238).
+
+A job a runner hands back (`NakWithDelay` after a failed token request, `Nak` for a stuck job or on shutdown)
+keeps the runner's last state, usually `claimed` or `working`, until the next runner reports on it. That is
+accepted: the control node does not see a `Nak`, and the next delivery reports `claimed` again within the retry
+delay. A job pushed out of `SCHMEIDE_JOBS` by `MaxMsgs` while still unclaimed would keep a stale `pending`; with
+100,000 messages before that happens, it is not handled.
 
 ### Job states
 
 | State | Final | Meaning |
 | --- | --- | --- |
+| `pending` | no | The control node created the job; no runner has reported on it yet. |
 | `claimed` | no | A runner received the delivery. |
 | `working` | no | A writer session is running (detail: harness name). |
 | `retrying` | no | A work attempt failed and the job was handed back. |

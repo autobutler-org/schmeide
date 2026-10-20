@@ -9,7 +9,22 @@ it does not do. It covers only behavior that is built. For the lifecycle see
 A runner writes the number of failed work outcomes on every job status. The
 status stream is stored in the control node's data directory, so a restarted
 runner restores the count before it claims the job. A restart does not grant a
-job a fresh retry budget.
+job a fresh retry budget. A new job for the same issue does: the control node
+stores a `pending` status with no count when it creates the job.
+
+## Pending status
+
+When the control node creates a job it stores a `pending` status for it, so
+`schmeide status` lists the job before a runner claims it (JN-CLI-016).
+
+- If that status cannot be stored, the job is still created and the control
+  node logs `could not record the job as pending; schmeide status will not list
+  it until a runner claims it`. The job appears once a runner reports
+  `claimed`.
+- If the job cannot be stored, the webhook fails as before and the `pending`
+  status is deleted, so no line is left for a job that does not exist.
+- A job a runner hands back keeps the runner's last state in status until the
+  next runner reports on it.
 
 - `--max-attempts` (default 3) is how many failed work outcomes the runners
   allow for a job. While the count is below that, the runner reports the job
