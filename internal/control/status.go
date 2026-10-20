@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/nats-io/nats.go"
@@ -38,8 +39,10 @@ const (
 // and the job will be delivered again, and reviewing is still in progress.
 type State string
 
-// The states a runner reports for a job.
+// The states a job's status can hold. The control node reports pending when
+// it creates a job; runners report the rest.
 const (
+	StatePending    State = "pending"
 	StateClaimed    State = "claimed"
 	StateWorking    State = "working"
 	StateRetrying   State = "retrying"
@@ -54,7 +57,7 @@ const (
 	StateMergeFailed  State = "merge_failed"
 )
 
-// final reports whether a job in this state is done.
+// final reports whether a job in this state is done. Pending is not.
 func (s State) final() bool {
 	switch s {
 	case StatePROpened, StateReviewFailed, StateMerged, StateQueued, StateMergeFailed:
@@ -67,7 +70,8 @@ func (s State) final() bool {
 // get a new job.
 func (s State) failure() bool { return s == StateGateFailed || s == StateFailed }
 
-// Status is the message a runner publishes when a job changes state.
+// Status is the message a runner publishes when a job changes state, and the
+// one the control node publishes with StatePending when it creates a job.
 type Status struct {
 	State State `json:"state"`
 	// Detail is the PR URL for StatePROpened and the reason for the failure
@@ -96,9 +100,12 @@ type Registration struct {
 type Tracker struct {
 	stream  jetstream.Stream
 	issues  jetstream.KeyValue
+	log     *slog.Logger
 	mu      sync.Mutex
 	runners []Registration
 	jobs    map[string]Status
+	// since is when each job's latest status was stored.
+	since map[string]time.Time
 }
 
 // Track records runner registrations and job statuses. Messages already
@@ -123,7 +130,7 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read status stream: %w", err)
 	}
-	t := &Tracker{stream: stream, issues: q.issues, jobs: map[string]Status{}}
+	t := &Tracker{stream: stream, issues: q.issues, log: log, jobs: map[string]Status{}, since: map[string]time.Time{}}
 	if err := t.replay(ctx, stream, log, info.State); err != nil {
 		return nil, err
 	}
@@ -151,7 +158,7 @@ func (t *Tracker) replay(ctx context.Context, stream jetstream.Stream, log *slog
 		if err != nil {
 			return fmt.Errorf("load status history: %w", err)
 		}
-		t.observe(log, msg.Sequence, msg.Subject, msg.Data)
+		t.observe(log, msg.Sequence, msg.Time, msg.Subject, msg.Data)
 	}
 	return nil
 }
@@ -168,7 +175,7 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 			log.Error("dropping a status without metadata", "subject", msg.Subject(), "err", err)
 			return
 		}
-		t.observe(log, meta.Sequence.Stream, msg.Subject(), msg.Data())
+		t.observe(log, meta.Sequence.Stream, meta.Timestamp, msg.Subject(), msg.Data())
 	})
 	if err != nil {
 		return fmt.Errorf("follow status stream: %w", err)
@@ -176,12 +183,12 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 	return nil
 }
 
-func (t *Tracker) observe(log *slog.Logger, seq uint64, subject string, data []byte) {
+func (t *Tracker) observe(log *slog.Logger, seq uint64, at time.Time, subject string, data []byte) {
 	switch {
 	case strings.HasPrefix(subject, RegisterSubjectPrefix):
 		t.observeRegistration(log, subject, data)
 	case strings.HasPrefix(subject, StatusSubjectPrefix):
-		t.observeStatus(log, seq, subject, data)
+		t.observeStatus(log, seq, at, subject, data)
 	}
 }
 
@@ -208,7 +215,7 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 	t.runners = append(t.runners, reg)
 }
 
-func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, data []byte) {
+func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subject string, data []byte) {
 	var status Status
 	if err := json.Unmarshal(data, &status); err != nil || status.State == "" {
 		log.Warn("dropping a malformed job status", "subject", subject, "err", err)
@@ -218,6 +225,7 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, da
 	log.Info("job state", "job", job, "state", string(status.State), "detail", status.Detail)
 	t.mu.Lock()
 	t.jobs[job] = status
+	t.since[job] = at
 	t.mu.Unlock()
 	if status.State.final() {
 		if err := t.finish(seq, job, status.State); err != nil {
@@ -305,12 +313,16 @@ func (t *Tracker) JobStatus(subject string) (Status, bool) {
 	return status, ok
 }
 
-// JobState is one unfinished job in a Snapshot.
+// JobState is one unfinished job in a Snapshot: pending until a runner
+// reports on it, then the runner's latest state.
 type JobState struct {
 	// Subject is the job's subject (see Job.Subject).
 	Subject string `json:"subject"`
 	State   State  `json:"state"`
 	Detail  string `json:"detail,omitempty"`
+	// Since is when the latest status was stored: for a pending job, when
+	// it was queued.
+	Since time.Time `json:"since"`
 }
 
 // Snapshot is what `schmeide status` reports. Its JSON form is stable.
@@ -331,14 +343,14 @@ func ReadStatus(ctx context.Context, js jetstream.JetStream) (Snapshot, error) {
 	if err != nil {
 		return snap, fmt.Errorf("read status stream: %w", err)
 	}
-	t := &Tracker{jobs: map[string]Status{}}
+	t := &Tracker{jobs: map[string]Status{}, since: map[string]time.Time{}}
 	if err := t.replay(ctx, stream, slog.New(slog.DiscardHandler), stream.CachedInfo().State); err != nil {
 		return snap, err
 	}
 	snap.Runners = append(snap.Runners, t.runners...)
 	for subject, status := range t.jobs {
 		if !status.State.final() {
-			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail})
+			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail, Since: t.since[subject]})
 		}
 	}
 	slices.SortFunc(snap.Jobs, func(a, b JobState) int { return strings.Compare(a.Subject, b.Subject) })
@@ -362,9 +374,9 @@ func (s Snapshot) WriteText(w io.Writer) {
 		fmt.Fprintln(w, "No queued or running jobs.")
 		return
 	}
-	fmt.Fprintln(tw, "JOB\tSTATE\tDETAIL")
+	fmt.Fprintln(tw, "JOB\tSTATE\tFOR\tDETAIL")
 	for _, j := range s.Jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", j.Subject, j.State, j.Detail)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.Subject, j.State, time.Since(j.Since).Round(time.Second), j.Detail)
 	}
 	tw.Flush()
 }
@@ -373,6 +385,8 @@ func (s Snapshot) WriteText(w io.Writer) {
 func StatusUsage() string {
 	return `schmeide status shows the runners registered with the control node and the
 jobs that are queued or running, read from the control node's status stream.
+A job no runner has claimed yet is "pending"; FOR is how long a job has been
+in its state, so for a pending job it is how long the job has waited.
 It connects to the control node's NATS as a steward, the same way a runner does.
 
 Usage:
@@ -389,7 +403,8 @@ Flags:
         This steward's NATS token: the one the control node's --runner-tokens lists for --steward.
         Env: SCHMEIDE_NATS_TOKEN
   --json
-        Print one JSON object with "runners" and "jobs" instead of text.
+        Print one JSON object with "runners" and "jobs" instead of text. Each
+        job's "since" is when it entered its state.
   -h, --help
         Show this help.
 `

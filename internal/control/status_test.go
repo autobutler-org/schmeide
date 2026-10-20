@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // fakeRunner publishes what a runner would. It uses the control node's own
@@ -282,6 +283,7 @@ func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
 		t.Fatal(err)
 	}
+	got.Jobs = withoutSince(t, got.Jobs)
 	want := Snapshot{
 		Runners: []Registration{octocat},
 		Jobs:    []JobState{{Subject: queued.Subject(), State: StateClaimed}},
@@ -321,11 +323,150 @@ func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
 	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
 		t.Fatal(err)
 	}
+	got.Jobs = withoutSince(t, got.Jobs)
 	want := []JobState{
 		{Subject: job(1).Subject(), State: StateWorking},
 		{Subject: job(2).Subject(), State: StateReviewing},
 	}
 	if !reflect.DeepEqual(got.Jobs, want) {
 		t.Errorf("jobs = %+v, want only the working and reviewing jobs", got.Jobs)
+	}
+}
+
+// statusJobs runs `schmeide status --json` and returns its jobs by subject.
+func statusJobs(t *testing.T, url string) map[string]JobState {
+	t.Helper()
+	var snap Snapshot
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &snap); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]JobState{}
+	for _, j := range snap.Jobs {
+		got[j.Subject] = j
+	}
+	return got
+}
+
+func TestStatusListsAJobNoRunnerHasClaimed(t *testing.T) {
+	q, url := startQueueOverTCP(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "laptop"})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+
+	// octocat has a runner, so its job waits on the steward subject; hubot
+	// has none, so its job waits on the pool subject.
+	waiting := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "hubot", InstallationID: 1, Title: "t", Pool: true}
+	before := time.Now()
+	for _, job := range []Job{waiting, pooled} {
+		if created, err := q.Publish(t.Context(), job); err != nil || !created {
+			t.Fatalf("Publish %s = %v, %v", job.Subject(), created, err)
+		}
+	}
+	eventually(t, func() bool { _, ok := tracker.JobStatus(pooled.Subject()); return ok })
+
+	got := statusJobs(t, url)
+	for _, job := range []Job{waiting, pooled} {
+		j, ok := got[job.Subject()]
+		if !ok || j.State != StatePending {
+			t.Fatalf("--json lists %s as %+v, %v; want pending", job.Subject(), j, ok)
+		}
+		if j.Since.Before(before.Add(-time.Second)) || j.Since.After(time.Now()) {
+			t.Errorf("%s pending since %s, want the time it was published (after %s)", job.Subject(), j.Since, before)
+		}
+	}
+	text := runStatus(t, url)
+	for _, want := range []string{waiting.Subject(), pooled.Subject(), string(StatePending)} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text output %q does not contain %q", text, want)
+		}
+	}
+
+	// A duplicate delivery neither creates a job nor resets the wait.
+	if created, err := q.Publish(t.Context(), waiting); err != nil || created {
+		t.Fatalf("duplicate Publish = %v, %v", created, err)
+	}
+	if again := statusJobs(t, url)[waiting.Subject()]; !again.Since.Equal(got[waiting.Subject()].Since) {
+		t.Errorf("duplicate delivery moved pending since from %s to %s", got[waiting.Subject()].Since, again.Since)
+	}
+
+	// A runner's report supersedes pending.
+	runner.report(waiting, StateClaimed, "")
+	eventually(t, func() bool { s, _ := tracker.JobStatus(waiting.Subject()); return s.State == StateClaimed })
+	if j := statusJobs(t, url)[waiting.Subject()]; j.State != StateClaimed {
+		t.Errorf("after the claim, %s is %+v, want claimed", waiting.Subject(), j)
+	}
+}
+
+func TestPendingJobSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	startTracker(t, q)
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t", Pool: true}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+
+	q = restartQueue(t, q, dir)
+	startTracker(t, q)
+	snap, err := ReadStatus(t.Context(), q.js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Jobs) != 1 || snap.Jobs[0].Subject != job.Subject() || snap.Jobs[0].State != StatePending {
+		t.Errorf("jobs after restart = %+v, want %s pending", snap.Jobs, job.Subject())
+	}
+}
+
+func TestPendingStatusFailureKeepsTheJob(t *testing.T) {
+	q := startQueue(t)
+	startTracker(t, q)
+	// With the status stream no longer listening on job statuses, nothing
+	// stores the pending status.
+	if _, err := q.js.UpdateStream(t.Context(), jetstream.StreamConfig{
+		Name: StatusStream, Subjects: []string{RegisterSubjectPrefix + "*"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v; want the job created anyway", created, err)
+	}
+	if got := jobs(t, q); len(got) != 1 {
+		t.Errorf("jobs = %+v, want one", got)
+	}
+}
+
+// withoutSince checks that every job has a Since and clears it, so the rest
+// can be compared exactly.
+func withoutSince(t *testing.T, jobs []JobState) []JobState {
+	t.Helper()
+	for i := range jobs {
+		if jobs[i].Since.IsZero() {
+			t.Errorf("%s has no since", jobs[i].Subject)
+		}
+		jobs[i].Since = time.Time{}
+	}
+	return jobs
+}
+
+func TestFailedPublishLeavesNoPendingJob(t *testing.T) {
+	q := startQueue(t)
+	startTracker(t, q)
+	// Without the job stream the job cannot be stored.
+	if err := q.js.DeleteStream(t.Context(), JobStream); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if _, err := q.Publish(t.Context(), job); err == nil {
+		t.Fatal("Publish without a job stream succeeded")
+	}
+	snap, err := ReadStatus(t.Context(), q.js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Jobs) != 0 {
+		t.Errorf("jobs = %+v, want none for a job that was never stored", snap.Jobs)
 	}
 }
