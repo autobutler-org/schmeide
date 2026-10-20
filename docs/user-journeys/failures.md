@@ -14,8 +14,9 @@ Where to look:
   issue=... state=... detail=...`), errors that never reach the issue (token
   hand-backs, stuck jobs), the gate's output tail, and the harness session's
   own output.
-- **`schmeide status`** shows unfinished jobs with their latest state and
-  detail (JN-CLI-007).
+- **`schmeide status`** shows unfinished jobs with their latest state, how long
+  they have been in it, and detail (JN-CLI-007). A job no runner has claimed
+  yet is `pending` (JN-CLI-016).
 - **The control node's stderr** has webhook outcomes, registrations, and every
   job state the runners report.
 

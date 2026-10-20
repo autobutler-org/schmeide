@@ -49,8 +49,9 @@ started a runner against this control node.
 - alice's pool runner claims the job and opens a pull request as usual.
 - The steward is still `bob`. The pull request is opened by the App, and the
   comments go on bob's issue.
-- `schmeide status` lists the job under `schmeide.jobs._pool.<repo id>.<issue>`
-  while it runs.
+- `schmeide status` lists the job under `schmeide.jobs._pool.<repo id>.<issue>`,
+  as `pending` until a pool runner claims it (JN-CLI-016), then with the
+  runner's state while it runs.
 
 **Notes:**
 

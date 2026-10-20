@@ -339,7 +339,11 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("record issue %s: %w", key, err)
 	}
+	pending := q.publishPending(ctx, job)
 	if _, err := q.js.Publish(ctx, job.Subject(), data); err != nil {
+		if pending != 0 {
+			_ = q.tracker.stream.DeleteMsg(ctx, pending)
+		}
 		// Put the previous record back, so the issue is not stuck with a job
 		// that was never stored.
 		if rev == 0 {
@@ -350,6 +354,25 @@ func (q *Queue) Publish(ctx context.Context, job Job) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// publishPending stores a pending status for a new job, so `schmeide status`
+// lists it before a runner claims it, and returns its sequence. It runs
+// before the job is published, so a runner's claim is always stored after
+// it. A failure is only logged and returns 0: the job matters more than its
+// status line.
+func (q *Queue) publishPending(ctx context.Context, job Job) uint64 {
+	if q.tracker == nil {
+		return 0
+	}
+	data, _ := json.Marshal(Status{State: StatePending})
+	ack, err := q.js.Publish(ctx, StatusSubjectPrefix+strings.TrimPrefix(job.Subject(), jobSubjectPrefix), data)
+	if err != nil {
+		q.tracker.log.Warn("could not record the job as pending; schmeide status will not list it until a runner claims it",
+			"job", job.Subject(), "err", err)
+		return 0
+	}
+	return ack.Sequence
 }
 
 // ServeTokens answers requests on a steward's token subject. The request body

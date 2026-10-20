@@ -36,7 +36,7 @@ flowchart LR
 | Store | Owner (writes) | Readers | Lifetime |
 | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` stream | `control.Queue.Publish` | runner consumers, `tokenFor`, `seedIssues` | Until 100,000 later jobs push it out (`MaxMsgs`, discard oldest). Acked jobs are not removed: the stream has the default limits retention. |
-| `SCHMEIDE_STATUS` stream | runners (registration, status) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
+| `SCHMEIDE_STATUS` stream | runners (registration, status); `Queue.Publish` (`pending` status for a new job) | `control.Tracker`, `schmeide status`, runners (attempt count) | Unbounded. Every registration and status since the data directory was created. |
 | `SCHMEIDE_ISSUES` KV | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` | Forever, one key per issue ever made a job. Overwritten when a failed job's issue gets a new job. |
 | `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. |
 | Job consumers `runner-<steward>`, `runner-_pool` | runners (`CreateOrUpdateConsumer`) | JetStream | Durable, in `--data-dir`, until deleted by hand. |

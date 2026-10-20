@@ -130,6 +130,11 @@ func newWorld(t *testing.T) *world {
 		if err := json.Unmarshal(m.Data, &s.Status); err != nil {
 			t.Error(err)
 		}
+		// The control node reports pending when it creates a job; the
+		// tests here watch what the runner reports.
+		if s.State == control.StatePending {
+			return
+		}
 		w.statuses <- s
 	}); err != nil {
 		t.Fatal(err)
