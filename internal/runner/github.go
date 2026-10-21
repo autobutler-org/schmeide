@@ -102,11 +102,15 @@ func (g github) RetargetPull(ctx context.Context, number int, base string) error
 		return err
 	}
 	path := fmt.Sprintf("/repos/%s/pulls/%d", g.Repo, number)
+	auth, err := g.Bearer(ctx)
+	if err != nil {
+		return fmt.Errorf("github PATCH %s: %w", path, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, strings.TrimSuffix(g.API, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
