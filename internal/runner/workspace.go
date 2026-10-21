@@ -186,8 +186,10 @@ func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 		env = os.Environ()
 	}
 	cmd.Env = w.GoCacheEnv(slices.Clone(env))
-	// Its own process group, so a canceled gate takes its children with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Its own process session, detached from the runner's terminal so
+	// SIGTTOU and SIGTTIN cannot stop it. The session leader also leads its
+	// own process group, so a canceled gate takes its children with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()

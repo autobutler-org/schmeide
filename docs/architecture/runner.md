@@ -207,8 +207,12 @@ in `.schmeide/pr.md` with a `Closes #N` line. The review and fix briefs (`review
 - `Output` is the runner's stderr.
 
 The prompt goes in on stdin: `claude --print <args>` and `grok -p - <args>`, where `<args>` defaults to
-`--permission-mode acceptEdits`. Each session runs in its own process group, which is killed with `SIGKILL` when
-the session ends for any reason or its context is canceled.
+`--permission-mode acceptEdits`. Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
+true}` in `internal/harness/claude.go` and `internal/harness/grok.go`), so it has no controlling terminal. A runner
+started in an interactive terminal passes that terminal to the session as `Output`; were the session only a
+background process group on it, the CLI's first terminal ioctl would get `SIGTTOU` and stop the session until
+the session deadline killed it. The session leader also leads its own process group, which is killed with
+`SIGKILL` (`syscall.Kill(-pid, SIGKILL)`) when the session ends for any reason or its context is canceled.
 
 ### Harness selection
 
@@ -220,7 +224,9 @@ the session ends for any reason or its context is canceled.
 
 ## The gate
 
-`Workspace.Run` runs `sh -c <gate>` in the worktree, in its own process group, with `cmd.Cancel` killing the group.
+`Workspace.Run` (`internal/runner/workspace.go`) runs `sh -c <gate>` in the worktree, in its own process session
+(`Setsid`), detached from the runner's terminal so `SIGTTOU` and `SIGTTIN` cannot stop it, with `cmd.Cancel`
+killing the session leader's process group.
 The environment is the runner process's own environment (the worktree is created with a nil env, so the gate
 falls back to `os.Environ()`), plus the Go cache variables. The deadline is `gate_timeout` from the repo config,
 or `--gate-timeout`. A failure posts the command and error on the issue but never the output; the last 4000
