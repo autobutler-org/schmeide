@@ -416,7 +416,7 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 	if err := first.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	// The reviewer has its own process group, so killing the runner leaves it.
+	// The reviewer leads its own process session, so killing the runner leaves it.
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	<-first.done
 

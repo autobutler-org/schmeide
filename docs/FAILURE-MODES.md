@@ -84,6 +84,18 @@ A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
 
+### A runner started in a terminal
+
+A runner run from an interactive terminal passes its stderr, that terminal, to
+every harness session as output. Each harness session and gate command starts
+in its own process session (`Setsid` in `internal/harness/claude.go`,
+`internal/harness/grok.go`, and `internal/runner/workspace.go`), so it has no
+controlling terminal and `SIGTTOU` or `SIGTTIN` cannot stop it. Before this,
+a session was only a background process group on the runner's terminal: the
+CLI's first terminal ioctl stopped it (`ps` state `T`) and it sat until the
+session deadline fired and the job failed with "the claude-code session timed
+out". A session stopped that way now points at a build from before the fix.
+
 ## Delivery heartbeats and stuck jobs
 
 `--ack-wait` defaults to 5 minutes. It is the JetStream delivery lease: while

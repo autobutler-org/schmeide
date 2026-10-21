@@ -465,3 +465,35 @@ the runner's checkout does not contain.
 **Notes:**
 
 - No automated test.
+
+---
+
+### JN-FAIL-020: A runner started in an interactive terminal
+
+**Preconditions:** An operator runs `schmeide runner` in the foreground of an
+interactive terminal, so the runner's stderr, and with it every harness
+session's output, is that terminal.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. While the session runs, run `ps -o pid,pgid,sid,tpgid,stat,tty,args` for
+   the runner and the `claude` or `grok` process.
+
+**Expected result:**
+
+- The harness session's session id equals its own pid, and it is not stopped
+  (no `T` in `stat`). It writes its output to the terminal and finishes in the
+  time it takes without a terminal.
+- The gate command also leads its own session.
+- The job does not end with "the claude-code session timed out" because the
+  session was stopped by `SIGTTOU`.
+
+**Notes:**
+
+- Each session and gate starts with `Setsid` (`internal/harness/claude.go`,
+  `internal/harness/grok.go`, `internal/runner/workspace.go`). See
+  [../FAILURE-MODES.md](../FAILURE-MODES.md#a-runner-started-in-a-terminal).
+- Covered by `internal/harness` `TestFakeagentRunsInItsOwnSession` and
+  `internal/runner` `TestGateRunsInItsOwnSession`. No test runs the runner
+  under a real terminal.
