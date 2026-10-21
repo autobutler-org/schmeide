@@ -90,7 +90,10 @@ stateDiagram-v2
    attempt count from the last status on the job's status subject (`recordedAttempts`). Start the heartbeat
    goroutine. Report `claimed`.
 2. **Token.** Request the job's token on `schmeide.token.<steward>` with the job subject as the body. On failure,
-   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue.
+   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue. The
+   token is held in a `jobToken` (`internal/runner/token.go`) that every later GitHub call and git command asks,
+   and that requests a new one when the held one is within five minutes of expiry. See
+   [Credentials](credentials.md#refreshing-a-jobs-token).
 3. **Issue text.** A job with an empty title predates jobs carrying the issue text and fails with a message to
    relabel the issue.
 4. **Trust.** `trust.Check(workDir, origin, confirm)`. See [Trust prompt](#trust-prompt).
