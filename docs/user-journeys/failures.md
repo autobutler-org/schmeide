@@ -465,3 +465,45 @@ the runner's checkout does not contain.
 **Notes:**
 
 - No automated test.
+
+---
+
+### JN-FAIL-020: A job that outlives its token
+
+**Preconditions:** A job whose work runs longer than its first installation
+token lives. GitHub expires a token an hour after it is minted, and the
+default `session_timeout` is two hours, so a long session, many review rounds,
+or a long `check_wait` is enough.
+
+**Steps:**
+
+1. Have a job delivered to a runner.
+2. Let the session (or the review and CI wait after it) run past the first
+   token's `expires_at`.
+
+**Expected result:**
+
+- Before each GitHub call and each git command, the runner checks the token it
+  holds. Once that token is within five minutes of its `expires_at`, the runner
+  asks the control node on `schmeide.token.<steward>` for a new one for the same
+  job, and the control node mints one.
+- The push, the pull request, the review rounds, the merge, and the outcome
+  comment all use an unexpired token. GitHub never answers `401 Bad
+  credentials`, and the steward gets the usual outcome comment, including the
+  failure comment of a job whose session timed out (JN-FAIL-004).
+- When the control node cannot mint the new token, the call that needed it
+  fails with "refresh the job's GitHub token: ..." and the job fails as for any
+  GitHub error. The outcome comment is still tried with its own refresh. If
+  that fails too, the runner logs `level=ERROR msg="could not comment on the
+  issue"` with the refresh error, and `schmeide status` and the runner log are
+  where the outcome shows.
+
+**Notes:**
+
+- A token without an `expires_at` is never refreshed.
+- Each refresh mints another token, so a long job mints several.
+- Covered by `TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest`
+  (`internal/e2e`), and in `internal/runner` by `TestJobOutlivingItsTokenOpensPR`,
+  `TestSessionTimeoutAfterTokenExpiryStillComments`,
+  `TestWorktreeGitUsesTheCurrentToken`, `TestJobTokenRefreshesOnlyWhenStale`,
+  and `TestTokenStale`; in `internal/forge` by `TestTokensIsAskedForEachCall`.

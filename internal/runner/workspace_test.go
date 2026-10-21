@@ -94,6 +94,7 @@ func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 		branch:  "job-2",
 		id:      "job-2",
 		repoID:  first.spec.repoID,
+		token:   staticToken("t"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +154,7 @@ func newPushFixture(t *testing.T) (*worktree, string) {
 		url:      bare,
 		base:     "main",
 		branch:   "job",
-		token:    "gh" + "p_" + strings.Repeat("e", 36),
+		token:    staticToken("gh" + "p_" + strings.Repeat("e", 36)),
 		gitName:  "schmeide[bot]",
 		gitEmail: "bot@example.com",
 		id:       "job",

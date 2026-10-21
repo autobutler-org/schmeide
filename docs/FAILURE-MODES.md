@@ -35,6 +35,16 @@ When the control node creates a job it stores a `pending` status for it, so
 - A token hand-back does not consume an attempt. If the runner cannot get a
   GitHub token for the job, it hands the job back without commenting, because
   the issue could not be reached anyway.
+- A job that outlives its token gets a new one. GitHub expires an installation
+  token an hour after it is minted. Before each GitHub call and git command the
+  runner checks the token it holds, and when that token is within five minutes
+  of expiry it asks the control node for another one for the same job. If that
+  request fails, the call that needed the token fails with "refresh the job's
+  GitHub token: ..." and the job fails like any other GitHub error (an attempt
+  is used). The outcome comment is still attempted with its own refresh; if
+  that fails too, the runner logs `msg="could not comment on the issue"` with
+  the refresh error, nothing reaches the issue, and `schmeide status` still
+  shows the job's final state.
 - A shutdown does not consume an attempt. If the runner is stopping, it hands
   the job back at once for another runner.
 - A gate failure is final. It is the session's own result, so it is not

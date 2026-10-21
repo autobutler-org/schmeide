@@ -71,8 +71,10 @@ the runner cancels the gate's process group, fails the job, and does not retry.
 
 A short-lived GitHub App token the control node mints for one job. It is limited
 to that job's repository and to the permissions a runner needs to push, open
-pull requests, comment, and read checks. GitHub expires it after one hour.
-Runners hold no long-lived GitHub credential.
+pull requests, comment, and read checks. GitHub expires it after one hour, so
+a runner asks the control node for a new one for the same job when the one it
+holds is within five minutes of expiry. Runners hold no long-lived GitHub
+credential.
 
 ## pending
 
