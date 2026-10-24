@@ -83,7 +83,9 @@ with [queued](#queued), which is a finished job in a merge queue.
 
 ## pool
 
-The fallback queue for a job whose assignee has no registered runner. A runner
+The fallback queue for a job whose assignee has never registered a runner.
+Registrations are kept in the control node's data directory and never expire,
+so a steward whose runner is offline still gets jobs on their own subject. A runner
 started with `--pool` (off by default) also takes pool jobs. Pool runners work
 one job at a time and take their own steward's job first.
 
