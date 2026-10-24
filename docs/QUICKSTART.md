@@ -72,7 +72,7 @@ On the runner machine, with the login and token from the previous step:
 schmeide doctor --steward octocat --nats-token a-token-for-octocat
 ```
 
-Doctor checks that git is on `PATH`, that at least one harness is installed and logged in, and that the control node answers for that steward. Each failed check says how to fix it. When it passes:
+Doctor fails when any of these checks fails: `git` (git is on `PATH`), `gh` (gh is on `PATH` and `gh auth status` succeeds), `disk` (at least 1 GiB is free on the disk holding the current directory), `harness claude-code` and `harness grok` (at least one harness is installed and logged in), and `control node` (the control node answers for that steward). `permission floor` never fails, and `lint gate` reports the gate it finds and fails only when it cannot read the current directory. Each failed check says how to fix it. When it passes:
 
 ```sh
 schmeide runner --steward octocat --nats-token a-token-for-octocat

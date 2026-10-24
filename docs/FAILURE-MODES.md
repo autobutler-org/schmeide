@@ -9,7 +9,22 @@ it does not do. It covers only behavior that is built. For the lifecycle see
 A runner writes the number of failed work outcomes on every job status. The
 status stream is stored in the control node's data directory, so a restarted
 runner restores the count before it claims the job. A restart does not grant a
-job a fresh retry budget.
+job a fresh retry budget. A new job for the same issue does: the control node
+stores a `pending` status with no count when it creates the job.
+
+## Pending status
+
+When the control node creates a job it stores a `pending` status for it, so
+`schmeide status` lists the job before a runner claims it (JN-CLI-016).
+
+- If that status cannot be stored, the job is still created and the control
+  node logs `could not record the job as pending; schmeide status will not list
+  it until a runner claims it`. The job appears once a runner reports
+  `claimed`.
+- If the job cannot be stored, the webhook fails as before and the `pending`
+  status is deleted, so no line is left for a job that does not exist.
+- A job a runner hands back keeps the runner's last state in status until the
+  next runner reports on it.
 
 - `--max-attempts` (default 3) is how many failed work outcomes the runners
   allow for a job. While the count is below that, the runner reports the job
@@ -68,6 +83,18 @@ command's output.
 A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
+
+### A runner started in a terminal
+
+A runner run from an interactive terminal passes its stderr, that terminal, to
+every harness session as output. Each harness session and gate command starts
+in its own process session (`Setsid` in `internal/harness/claude.go`,
+`internal/harness/grok.go`, and `internal/runner/workspace.go`), so it has no
+controlling terminal and `SIGTTOU` or `SIGTTIN` cannot stop it. Before this,
+a session was only a background process group on the runner's terminal: the
+CLI's first terminal ioctl stopped it (`ps` state `T`) and it sat until the
+session deadline fired and the job failed with "the claude-code session timed
+out". A session stopped that way now points at a build from before the fix.
 
 ## Delivery heartbeats and stuck jobs
 

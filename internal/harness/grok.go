@@ -105,9 +105,11 @@ func (g *Grok) Run(ctx context.Context, req Request) error {
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Stdout = req.Output
 	cmd.Stderr = req.Output
-	// The session gets its own process group so everything it spawns can be
-	// killed together.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The session leads its own process session, detached from the runner's
+	// terminal, so SIGTTOU and SIGTTIN cannot stop it when the runner runs in
+	// a terminal. As session leader it also leads its own process group, so
+	// everything it spawns can be killed together.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	killGroup := func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.Cancel = killGroup
 	// Stops Wait from hanging when a leftover child holds the output open.
