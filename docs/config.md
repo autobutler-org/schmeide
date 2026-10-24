@@ -5,6 +5,11 @@ at the repo root. The file is TOML. Every value is a quoted string. A key the
 file does not recognize is an error, so a typo fails loudly instead of being
 ignored.
 
+The runner reads the file from the base branch before any harness session. A
+missing file, or any error below, fails the job finally: one comment on the
+issue names the file and the error, no pull request opens, and the job is not
+retried. Push a fixed file and add the ready label again to make a new job.
+
 A minimal file:
 
 ```toml

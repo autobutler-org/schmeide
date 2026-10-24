@@ -57,9 +57,11 @@ stateDiagram-v2
     Lookup --> ResumeReview: open PR with the issue prefix, or stage record names one
     Lookup --> Done: closed PR, or outcome comment already posted
     Lookup --> Base: no PR
-    Base --> Failed: blockers not one linear stack
+    Base --> FinalFailed: blockers not one linear stack
     Base --> Worktree: base = default branch or top of stack
-    Worktree --> Session: stage worktree_ready
+    Worktree --> Config: stage worktree_ready
+    Config --> FinalFailed: config missing or invalid
+    Config --> Session: repoconfig.Load
     Session --> Failed: session error, timeout, no changes
     Session --> Gate: stage session_finished, commit
     Gate --> GateFailed: gate fails or times out
@@ -78,6 +80,7 @@ stateDiagram-v2
     Failed --> HandBack: attempts below --max-attempts
     HandBack --> [*]
     Failed --> [*]: comment, report, ack
+    FinalFailed --> [*]: comment, report, ack, no retry
     GateFailed --> [*]: comment, report, ack
     ReviewFailed --> [*]: comment, report, ack
     MergeFailed --> [*]: comment, report, ack
@@ -103,9 +106,11 @@ stateDiagram-v2
    - A closed PR ends the job as `pr_opened` with no comment.
    - An open PR resumes at review on its head and base.
 6. **Base.** With no PR, `baseBranch` picks the base (see [Stacked pull requests](#stacked-pull-requests)).
+   Blockers that are not one linear stack (`errNotOneStack`) fail the job finally.
 7. **Worktree.** `newWorktree`, then mark stage `worktree_ready`.
 8. **Repo config.** `repoconfig.Load` from the worktree, which is still the base branch. The gate, timeouts,
-   `check_wait`, and `[automate]` come from here, before any session runs. `warnLintGate` comments a warning
+   `check_wait`, and `[automate]` come from here, before any session runs. A load error (missing file or
+   invalid content) fails the job finally (`finalFailed`). `warnLintGate` comments a warning
    when the gate does not mention a detected `make check` target or pre-commit config.
 9. **Writer session** (`open`): report `working`, run the harness with `brief(job, gate)`, mark
    `session_finished`. Read `.schmeide/pr.md` for the PR title and body and delete it (`prText`). The issue title
@@ -119,7 +124,9 @@ stateDiagram-v2
 
 ### Retries and acknowledgment
 
-The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried. When the
+The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried, and not those
+marked `final` by `finalFailed`: a repo config load error and blockers that are not one linear stack. A retry
+cannot change either, so they comment and ack on the first attempt. When the
 attempt count after this failure is below `--max-attempts`, the runner reports `retrying`, flushes so the count
 is stored on `SCHMEIDE_STATUS`, and `NakWithDelay(30s)`. Otherwise it comments and acks. The count lives in each
 status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A new
@@ -248,7 +255,8 @@ without force. `Restack` force-pushes with `--force-with-lease` pinned to the he
 `baseBranch` (`github.go`) reads the repository default branch and the issue's blocked-by list
 (`/issues/<n>/dependencies/blocked_by`). For each open blocker it looks for an open PR on `<blocker>_`. No such
 PR means the default branch. Otherwise the base is the head of the one PR whose chain of bases (`stackBelow`)
-contains every other blocker's head. Blockers that are not one chain fail the job with a comment. The worktree
+contains every other blocker's head. Blockers that are not one chain return `errNotOneStack`, and the job fails
+finally with one comment and no retry. The worktree
 is created from that base and the PR opens against it.
 
 ## Review loop
@@ -296,6 +304,7 @@ green, but".
 | --- | --- | --- |
 | Gate does not mention a detected lint target | the `lintgate.Warning` text, job continues | none |
 | Work failed after `--max-attempts` | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
+| Repo config missing or invalid, or blockers not one linear stack (first attempt, no retry) | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
 | Gate failed or timed out, no PR | "schmeide did not open a pull request:" plus command and error, no output | `gate_failed` |
 | Gate failed on a fix round | "schmeide left the pull request open:" plus command, error, PR URL | `gate_failed` |
 | Review passed | "schmeide opened a pull request for this issue:" plus the URL and "The review passed." | `pr_opened` |

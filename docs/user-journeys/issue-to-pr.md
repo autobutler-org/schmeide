@@ -441,7 +441,8 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Notes:**
 
-- Two or more stackable blockers are accepted when they form one chain.
+- Two or more stackable blockers are accepted when they form one chain. The
+  order GitHub lists the blockers in does not matter.
 - Covered by `TestLinearChainOfDependenciesStacksOnTheTop`.
 
 ---
@@ -457,14 +458,17 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Expected result:**
 
-- No worktree, no session, no pull request. Each attempt fails with "the open
-  dependencies' pull requests (5_a, 6_b) are not one linear stack, and
-  schmeide stacks only on a single chain of blockers".
-- After `--max-attempts`, the issue gets "schmeide could not finish this job
-  and did not open a pull request:" with that error.
+- No worktree, no session, no pull request. The job reports `claimed` then
+  `failed` on the first attempt and is not retried.
+- The issue gets one comment: "schmeide could not finish this job and did not
+  open a pull request:" with "the open dependencies' pull requests (5_a, 6_b)
+  are not one linear stack, and schmeide stacks only on a single chain of
+  blockers".
 
 **Notes:**
 
+- A retry cannot change the blocked-by list, so this failure is final, like a
+  gate failure. A linear chain is accepted (JN-PR-018).
 - Covered by `TestTwoSideBySideDependenciesOpenNothing`.
 
 ---
