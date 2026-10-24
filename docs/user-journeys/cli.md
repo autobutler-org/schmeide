@@ -179,20 +179,22 @@ progress.
   RUNNER    HOST         HARNESSES         POOL
   octocat   octo-laptop  claude-code,grok  false
 
-  JOB                          STATE      DETAIL
-  schmeide.jobs.octocat.42.7   reviewing  round 1 of 3
+  JOB                          STATE      FOR  DETAIL
+  schmeide.jobs.octocat.42.7   reviewing  4m2s round 1 of 3
   ```
 
 - The JOB column is `schmeide.jobs.<steward>.<repo id>.<issue>`, or
   `schmeide.jobs._pool.<repo id>.<issue>` for a pool job.
+- FOR is how long the job has been in its state: the time since its latest
+  status was stored on `SCHMEIDE_STATUS`, rounded to the second.
 
 **Notes:**
 
 - Jobs whose latest state is final (`pr_opened`, `gate_failed`, `failed`,
   `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
-- A job no runner has claimed yet is not listed either: the list comes from
-  the states runners report (`claimed`, `working`, `reviewing`, `retrying`).
-- Any steward sees every runner and job.
+- A job no runner has claimed yet is listed as `pending` (JN-CLI-016).
+- Status is team-wide and read-only: any steward sees every runner and every
+  steward's jobs, pool jobs included, and running it writes nothing.
 - A stopped runner stays listed.
 - Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
   `TestStatusHidesEveryFinishedRunnerState`.
@@ -235,13 +237,16 @@ progress.
 
 - One JSON object with `runners` (each with `steward`, `harnesses`, `host`,
   and `pool` and `version` when set) and `jobs` (each with `subject`,
-  `state`, and `detail` when set). Empty lists are `[]`.
+  `state`, `detail` when set, and `since`, the RFC 3339 time the job entered
+  its state). Empty lists are `[]`. A pending job is in `jobs` like any other
+  (JN-CLI-016).
 
 **Notes:**
 
 - The JSON shape is stable.
-- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
-  `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`.
+- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
+  `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`, and
+  `TestStatusListsAJobNoRunnerHasClaimed` (`internal/control`).
 
 ---
 
@@ -376,3 +381,57 @@ already exists.
 - `--json` writes `[{"name", "group", "status", "detail"}, ...]` to stdout.
   `status` is `ok`, `fail`, or `skip`.
 - Covered by `TestMainJSON` and `TestMainHelpAndBadFlag`.
+
+---
+
+### JN-CLI-016: See jobs no runner has claimed yet
+
+**Preconditions:** A control node. octocat's runner works one job at a time
+and is busy with an earlier job, or is stopped. Five issues are assigned to
+octocat and labeled `schmeide:ready`.
+
+**Steps:**
+
+1. Run `schmeide status --steward octocat --nats-token <token>`.
+2. Let the runner claim one of the waiting jobs, and run it again.
+3. Restart the control node, and run it again.
+
+**Expected result:**
+
+- Step 1: every job the control node created and no runner has reported on
+  is listed with state `pending`, and FOR is how long it has waited:
+
+  ```text
+  JOB                          STATE    FOR    DETAIL
+  schmeide.jobs.octocat.42.8   pending  3m10s
+  schmeide.jobs.octocat.42.9   pending  3m10s
+  ```
+
+  A job for a steward with no registered runner waits on the pool subject,
+  `schmeide.jobs._pool.<repo id>.<issue>`, and is listed the same way.
+- Step 2: the claimed job shows `claimed`, and FOR restarts from the claim.
+  The others stay `pending` with their wait unchanged.
+- Step 3: the pending jobs are still listed with the same wait, since
+  `SCHMEIDE_STATUS` is kept in `--data-dir`.
+- `--json` lists them in `jobs` with `"state": "pending"` and `since`.
+- Status is team-wide and read-only: hubot running `schmeide status --steward
+  hubot` sees octocat's pending jobs and pool jobs too, and changes nothing.
+
+**Notes:**
+
+- The control node stores the `pending` status in `Queue.publishPending`
+  (`internal/control/queue.go`) when it creates a job, before it publishes the
+  job, so a runner's `claimed` is always stored after it.
+- A duplicate delivery for the issue creates no job and stores no second
+  `pending`, so the wait is not reset.
+- If the `pending` status cannot be stored, the job is still created and the
+  control node logs `could not record the job as pending; schmeide status will
+  not list it until a runner claims it`. If the job itself cannot be stored,
+  the `pending` status is deleted again.
+- A job a runner hands back (a failed token request, a stuck job, a shutdown)
+  shows the runner's last state, such as `claimed`, until the next runner
+  reports on it. The job is back in the queue, but it is not shown as
+  `pending` again.
+- Covered by `TestStatusListsAJobNoRunnerHasClaimed`,
+  `TestPendingJobSurvivesARestart`, `TestPendingStatusFailureKeepsTheJob`, and
+  `TestFailedPublishLeavesNoPendingJob` (`internal/control`).

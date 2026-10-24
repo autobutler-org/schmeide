@@ -19,10 +19,10 @@ flowchart TB
         subgraph git["git commands"]
             gtok["token via GIT_CONFIG_VALUE_0"]
         end
-        subgraph sess["harness session (own process group)"]
+        subgraph sess["harness session (own process session)"]
             senv["base env + ANTHROPIC_, CLAUDE_, XAI_ + --pass-env<br/>no SCHMEIDE_*, no job token"]
         end
-        subgraph gate["gate command (own process group)"]
+        subgraph gate["gate command (own process session)"]
             genv["runner's full environment<br/>includes SCHMEIDE_* if set"]
         end
     end

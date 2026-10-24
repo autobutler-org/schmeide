@@ -75,6 +75,23 @@ func TestPushPublishesACleanWorktree(t *testing.T) {
 	}
 }
 
+// A gate in the runner's process session would be a background group on the
+// runner's terminal and stop on SIGTTOU, so it must lead its own session.
+func TestGateRunsInItsOwnSession(t *testing.T) {
+	w, _ := newPushFixture(t)
+	out, err := w.Run(t.Context(), `echo "$$ $(ps -o sid= -p $$)"`)
+	if err != nil {
+		t.Fatalf("Run = %v; output %q", err, out)
+	}
+	ids := strings.Fields(out)
+	if len(ids) != 2 {
+		t.Fatalf("output = %q, want the pid and the session id", out)
+	}
+	if ids[0] != ids[1] {
+		t.Errorf("gate pid %s has session id %s: the gate shares the runner's session and terminal", ids[0], ids[1])
+	}
+}
+
 func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 	first, bare := newPushFixture(t)
 	planted := filepath.Join(first.repoDir, "planted")
