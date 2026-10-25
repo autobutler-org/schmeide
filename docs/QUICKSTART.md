@@ -17,7 +17,7 @@ In the org, go to Settings, Developer settings, GitHub Apps, New GitHub App.
 
 - **Webhook URL:** `https://<your-host>/webhook`.
 - **Webhook secret:** a long random string. Keep it; the control node needs the same value.
-- **Repository permissions:** Contents: read and write. Pull requests: read and write. Issues: read and write. Checks: read-only. Administration: read-only. The runner needs Administration to see required reviews before a factory merge. Without it, the runner cannot see them, attempts the merge, and GitHub still enforces the branch rules.
+- **Repository permissions:** Contents: read and write. Pull requests: read and write. Issues: read and write. Checks: read-only. Administration: read-only. Actions: read-only. The runner reads branch protection (Administration) to see required reviews before a factory merge, and reads a failed Actions job's log (Actions) for a CI fix round. The control node asks for all six on every job token, and GitHub refuses the token when the App lacks any of them, so every job waits until the App has them.
 - **Subscribe to events:** Issues.
 - Create the App, then note its **App ID**.
 - Generate a **private key** and save the `.pem` file.

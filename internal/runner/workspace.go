@@ -53,8 +53,10 @@ type Workspace interface {
 }
 
 type worktreeSpec struct {
-	workDir, url, base, branch, token string
-	gitName, gitEmail                 string
+	workDir, url, base, branch string
+	// token returns the job's current GitHub token.
+	token             func(context.Context) (string, error)
+	gitName, gitEmail string
 	// id names the worktree directory and repoID the clone it hangs off.
 	id, repoID string
 	// env is the environment for git and the gate, without the runner's own
@@ -88,13 +90,9 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		repoDir: filepath.Join(s.workDir, "repos", s.repoID+".git"),
 		dir:     filepath.Join(s.workDir, "worktrees", s.id),
 		baseRef: "refs/remotes/origin/" + s.base,
-		// The token goes in through the environment so that it is never
-		// written to git config or shown in the process list.
+		// git adds the token to this for each command; see [worktree.git].
 		env: append(slices.Clone(s.env),
 			"GIT_TERMINAL_PROMPT=0",
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+s.token)),
 			"GIT_AUTHOR_NAME="+s.gitName, "GIT_AUTHOR_EMAIL="+s.gitEmail,
 			"GIT_COMMITTER_NAME="+s.gitName, "GIT_COMMITTER_EMAIL="+s.gitEmail,
 		),
@@ -142,10 +140,27 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	return w, nil
 }
 
+// basicAuth is the HTTP Basic credential git sends for an installation token.
+func basicAuth(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+// git runs one git command with the job's current token. The token goes in
+// through the environment so that it is never written to git config or
+// shown in the process list, and it is read for each command so that a push
+// late in a long job does not send an expired one.
 func (w *worktree) git(ctx context.Context, dir string, args ...string) (string, error) {
+	token, err := w.spec.token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = w.env
+	cmd.Env = append(slices.Clone(w.env),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(token),
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

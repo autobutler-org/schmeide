@@ -6,7 +6,7 @@ request, then reviews it and, when the repo asks, merges it. It works one job at
 
 | Package or file | Owns |
 | --- | --- |
-| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
+| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`; a variable that does not parse for its flag is a usage error), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
 | `internal/runner/runner.go` | `Options`, `Connect`, `New`, `register`, `Run`, `next`, `handle` (delivery, heartbeat, retries, ack), `work`, `execute`, `open`, `brief`, `prText`, `BranchName`, `gateOutcome`, the stage record (`mark`, `recordedStage`) |
 | `internal/runner/workspace.go` | `Workspace` interface and the git `worktree` implementation: `newWorktree`, `Commit`, `Run` (the gate), `Push`, `Resume`, `Count`, `Restack`, `BaseMerged`, `Close` |
 | `internal/runner/review.go` | `review`, `reviewOnce`, `reviewer` (harness choice for review), `applyFindings`, `readVerdict`, `session` (every harness `Request`), `promptWithMap` |
@@ -37,7 +37,8 @@ terminal. `New` then:
    unlimited reconnects, then sends an empty request on `schmeide.token.<steward>`. Only a control node answers
    it, so a wrong URL fails here with a message saying what to check.
 3. `register`: requires `git` on `PATH`, runs `Check` on every harness and picks the first that passes as the
-   writer, creates or updates the steward consumer and, with `--pool`, the pool consumer, opens the
+   writer, opens the steward consumer and, with `--pool`, the pool consumer (`sharedConsumer`: created with
+   this runner's `--ack-wait` when missing, used unchanged when another runner created it), opens the
    `SCHMEIDE_STATUS` stream and `SCHMEIDE_STAGES` bucket (each optional, for older control nodes), and publishes
    the `Registration` with the names of every harness that passed.
 
@@ -57,9 +58,11 @@ stateDiagram-v2
     Lookup --> ResumeReview: open PR with the issue prefix, or stage record names one
     Lookup --> Done: closed PR, or outcome comment already posted
     Lookup --> Base: no PR
-    Base --> Failed: blockers not one linear stack
+    Base --> FinalFailed: blockers not one linear stack
     Base --> Worktree: base = default branch or top of stack
-    Worktree --> Session: stage worktree_ready
+    Worktree --> Config: stage worktree_ready
+    Config --> FinalFailed: config missing or invalid
+    Config --> Session: repoconfig.Load
     Session --> Failed: session error, timeout, no changes
     Session --> Gate: stage session_finished, commit
     Gate --> GateFailed: gate fails or times out
@@ -78,6 +81,7 @@ stateDiagram-v2
     Failed --> HandBack: attempts below --max-attempts
     HandBack --> [*]
     Failed --> [*]: comment, report, ack
+    FinalFailed --> [*]: comment, report, ack, no retry
     GateFailed --> [*]: comment, report, ack
     ReviewFailed --> [*]: comment, report, ack
     MergeFailed --> [*]: comment, report, ack
@@ -90,7 +94,10 @@ stateDiagram-v2
    attempt count from the last status on the job's status subject (`recordedAttempts`). Start the heartbeat
    goroutine. Report `claimed`.
 2. **Token.** Request the job's token on `schmeide.token.<steward>` with the job subject as the body. On failure,
-   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue.
+   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue. The
+   token is held in a `jobToken` (`internal/runner/token.go`) that every later GitHub call and git command asks,
+   and that requests a new one when the held one is within five minutes of expiry. See
+   [Credentials](credentials.md#refreshing-a-jobs-token).
 3. **Issue text.** A job with an empty title predates jobs carrying the issue text and fails with a message to
    relabel the issue.
 4. **Trust.** `trust.Check(workDir, origin, confirm)`. See [Trust prompt](#trust-prompt).
@@ -103,9 +110,11 @@ stateDiagram-v2
    - A closed PR ends the job as `pr_opened` with no comment.
    - An open PR resumes at review on its head and base.
 6. **Base.** With no PR, `baseBranch` picks the base (see [Stacked pull requests](#stacked-pull-requests)).
+   Blockers that are not one linear stack (`errNotOneStack`) fail the job finally.
 7. **Worktree.** `newWorktree`, then mark stage `worktree_ready`.
 8. **Repo config.** `repoconfig.Load` from the worktree, which is still the base branch. The gate, timeouts,
-   `check_wait`, and `[automate]` come from here, before any session runs. `warnLintGate` comments a warning
+   `check_wait`, and `[automate]` come from here, before any session runs. A load error (missing file or
+   invalid content) fails the job finally (`finalFailed`). `warnLintGate` comments a warning
    when the gate does not mention a detected `make check` target or pre-commit config.
 9. **Writer session** (`open`): report `working`, run the harness with `brief(job, gate)`, mark
    `session_finished`. Read `.schmeide/pr.md` for the PR title and body and delete it (`prText`). The issue title
@@ -119,7 +128,9 @@ stateDiagram-v2
 
 ### Retries and acknowledgment
 
-The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried. When the
+The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried, and not those
+marked `final` by `finalFailed`: a repo config load error and blockers that are not one linear stack. A retry
+cannot change either, so they comment and ack on the first attempt. When the
 attempt count after this failure is below `--max-attempts`, the runner reports `retrying`, flushes so the count
 is stored on `SCHMEIDE_STATUS`, and `NakWithDelay(30s)`. Otherwise it comments and acks. The count lives in each
 status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A new
@@ -133,7 +144,9 @@ and `queued` are never retried.
 
 ### Heartbeat and the stuck watchdog
 
-The goroutine in `handle` sends `msg.InProgress()` every `AckWait/3`. Every `report` call signals a `progress`
+The goroutine in `handle` sends `msg.InProgress()` every third of the consumers' `AckWait` (`Runner.ackWait`,
+the shorter of the two for a `--pool` runner), which differs from `--ack-wait` when another runner created the
+consumer. Every `report` call signals a `progress`
 channel that resets a `--stuck-after` timer. When the timer fires, the goroutine cancels the work context with
 `errJobStuck` and `Nak`s the delivery. The job's processes are killed through their process groups, and
 `handle` returns without commenting or acking.
@@ -248,7 +261,8 @@ without force. `Restack` force-pushes with `--force-with-lease` pinned to the he
 `baseBranch` (`github.go`) reads the repository default branch and the issue's blocked-by list
 (`/issues/<n>/dependencies/blocked_by`). For each open blocker it looks for an open PR on `<blocker>_`. No such
 PR means the default branch. Otherwise the base is the head of the one PR whose chain of bases (`stackBelow`)
-contains every other blocker's head. Blockers that are not one chain fail the job with a comment. The worktree
+contains every other blocker's head. Blockers that are not one chain return `errNotOneStack`, and the job fails
+finally with one comment and no retry. The worktree
 is created from that base and the PR opens against it.
 
 ## Review loop
@@ -296,6 +310,7 @@ green, but".
 | --- | --- | --- |
 | Gate does not mention a detected lint target | the `lintgate.Warning` text, job continues | none |
 | Work failed after `--max-attempts` | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
+| Repo config missing or invalid, or blockers not one linear stack (first attempt, no retry) | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
 | Gate failed or timed out, no PR | "schmeide did not open a pull request:" plus command and error, no output | `gate_failed` |
 | Gate failed on a fix round | "schmeide left the pull request open:" plus command, error, PR URL | `gate_failed` |
 | Review passed | "schmeide opened a pull request for this issue:" plus the URL and "The review passed." | `pr_opened` |

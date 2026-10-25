@@ -21,7 +21,7 @@ sequenceDiagram
 
     P->>GH: assign issue, add schmeide:ready
     GH->>H: POST /webhook (issues, labeled)
-    H->>H: replay check, rate limit, HMAC (guard.go, intake.go)
+    H->>H: HMAC, rate limit, replay check (intake.go, guard.go)
     H->>H: JobFromIssuesEvent, Allowlist.allows
     H->>Q: Publish(job)
     Q->>Q: Tracker.hasRunner(steward)? steward subject : pool subject
@@ -276,6 +276,10 @@ sequenceDiagram
             R->>ST: status failed
             R->>JS: Ack
         end
+    else work ends in a final failed (repo config error, blockers not one linear stack)
+        R->>GH: comment with outcome marker
+        R->>ST: status failed
+        R->>JS: Ack, no retry
     else gate fails or times out
         R->>GH: comment without output
         R->>ST: status gate_failed

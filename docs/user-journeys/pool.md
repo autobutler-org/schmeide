@@ -171,3 +171,38 @@ own jobs are both waiting.
   registered with `--pool`. A runner that pulls a pool job without it gets no
   token and hands the job back.
 - Covered by `TestPoolJobTokenRequiresThePoolFlag`.
+
+---
+
+### JN-POOL-008: Pool runners started with different `--ack-wait`
+
+**Preconditions:** No runner has used the pool yet, so the `runner-_pool`
+consumer does not exist.
+
+**Steps:**
+
+1. Start alice's pool runner with `--pool --ack-wait 5m`.
+2. Start dave's pool runner with `--pool --ack-wait 15m`.
+3. Give dave's runner a long pool job.
+
+**Expected result:**
+
+- Alice's runner creates the pool consumer with a 5 minute lease. Dave's runner
+  uses it unchanged and logs `msg="a shared job consumer already has another
+  ack wait; heartbeating at the consumer's" ack_wait=15m0s
+  consumer_ack_wait=5m0s`.
+- Dave's runner heartbeats every 1m40s, a third of the consumer's lease, so the
+  long job is not redelivered while it is being worked.
+- Restarting either runner does not change the consumer's lease.
+
+**Notes:**
+
+- The same holds for one steward's runners on several hosts, which share the
+  `runner-<steward>` consumer.
+- To change the lease, delete the consumer with the `nats` CLI while no runner
+  holds a job from it; the next runner to start creates it with its own
+  `--ack-wait`. See
+  [FAILURE-MODES.md](../FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs).
+- JetStream redelivers without a `MaxDeliver` limit. The runner's
+  `--max-attempts` ends retries.
+- Covered by `TestSharedConsumersKeepTheFirstAckWait` in `internal/runner`.

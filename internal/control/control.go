@@ -75,9 +75,11 @@ type Config struct {
 	NATSTLSKeyFile  string
 }
 
-// Handler is the webhook endpoint. It caps the body, rate-limits requests,
-// drops replays of an X-Github-Delivery id, hands the delivery to Intake, and
-// maps the outcome to a status code.
+// Handler is the webhook endpoint. It caps the body, then checks the
+// signature, the rate limit, and the X-Github-Delivery replay memory in that
+// order, hands the delivery to Intake, and maps the outcome to a status code.
+// Checking the signature first keeps requests without the secret from using
+// the rate budget or reaching the replay memory.
 func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
 	gate := newWebhookGate(policy)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,28 +88,30 @@ func Handler(in Intake, log *slog.Logger, policy WebhookPolicy) http.Handler {
 			http.Error(w, "webhook deliveries must be POSTed", http.StatusMethodNotAllowed)
 			return
 		}
-		now := gate.now()
 		delivery := r.Header.Get("X-Github-Delivery")
-		if gate.replay(delivery, now) {
-			log.Info("webhook handled", "delivery", delivery, "outcome", string(OutcomeReplay))
-			fmt.Fprintln(w, OutcomeReplay)
-			return
-		}
-		if !gate.allow(now) {
-			log.Warn("webhook rejected", "delivery", delivery, "err", errRateLimited)
-			http.Error(w, errRateLimited.Error(), http.StatusTooManyRequests)
-			return
-		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBytes))
 		if err != nil {
 			http.Error(w, "could not read the payload", http.StatusBadRequest)
 			return
 		}
-		outcome, err := in.Handle(r.Context(), r.Header.Get("X-Github-Event"), r.Header.Get("X-Hub-Signature-256"), body)
-		switch {
-		case errors.Is(err, ErrBadSignature):
+		if err := in.Verify(body, r.Header.Get("X-Hub-Signature-256")); err != nil {
 			log.Warn("webhook rejected", "delivery", delivery, "err", err)
 			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		now := gate.now()
+		if !gate.allow(now) {
+			log.Warn("webhook rejected", "delivery", delivery, "err", errRateLimited)
+			http.Error(w, errRateLimited.Error(), http.StatusTooManyRequests)
+			return
+		}
+		if gate.replay(delivery, now) {
+			log.Info("webhook handled", "delivery", delivery, "outcome", string(OutcomeReplay))
+			fmt.Fprintln(w, OutcomeReplay)
+			return
+		}
+		outcome, err := in.Handle(r.Context(), r.Header.Get("X-Github-Event"), body)
+		switch {
 		case errors.Is(err, ErrNotAllowed):
 			log.Warn("webhook rejected", "delivery", delivery, "err", err)
 			http.Error(w, err.Error(), http.StatusForbidden)

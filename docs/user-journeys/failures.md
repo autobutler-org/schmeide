@@ -42,11 +42,11 @@ fails once (for example an API outage), then works.
 **Notes:**
 
 - Failures that count as an attempt: a session that fails, times out, or makes
-  no changes; a config error (JN-CFG-002); a trust refusal (JN-SETUP-022); a
-  secret scan refusal (JN-FAIL-007); a git or GitHub error before the pull
-  request is open; a non-linear stack of blockers (JN-PR-019).
-- Not retried, final at once: a gate failure or gate timeout, any review
-  failure, any factory merge failure.
+  no changes; a trust refusal (JN-SETUP-022); a secret scan refusal
+  (JN-FAIL-007); a git or GitHub error before the pull request is open.
+- Not retried, final at once: a missing or invalid repo config (JN-CFG-002),
+  open blockers side by side (JN-PR-019), a gate failure or gate timeout, any
+  review failure, any factory merge failure.
 - Not counted at all: a token hand-back (JN-FAIL-015), a shutdown hand-back
   (JN-FAIL-016), a stuck-job hand-back (JN-FAIL-014).
 - The 30-second wait has no flag.
@@ -354,7 +354,9 @@ change for an hour (for example a session that hangs under a longer
 ### JN-FAIL-015: No token for the job
 
 **Preconditions:** The control node cannot mint an installation token, for
-example because the App was uninstalled from the repository.
+example because the App was uninstalled from the repository, or because the
+App or its installation lacks one of the permissions the token asks for
+(Contents, Pull requests, Issues, Checks, Administration, Actions).
 
 **Steps:**
 
@@ -372,6 +374,11 @@ example because the App was uninstalled from the repository.
 **Notes:**
 
 - This repeats until the token works or the job is removed.
+- A missing permission shows in the GitHub reply quoted after "github refused
+  an installation token for installation <id>:". Grant the permission to the
+  App and accept it on the installation.
+- Only the first token request of a delivery is handled this way. A refresh
+  later in the job is JN-FAIL-021.
 - Covered by `TestTokenHandBackDoesNotConsumeAttempts` and
   `TestMintReportsGitHubRefusal`.
 
@@ -497,3 +504,45 @@ session's output, is that terminal.
 - Covered by `internal/harness` `TestFakeagentRunsInItsOwnSession` and
   `internal/runner` `TestGateRunsInItsOwnSession`. No test runs the runner
   under a real terminal.
+
+---
+
+### JN-FAIL-021: A job that outlives its token
+
+**Preconditions:** A job whose work runs longer than its first installation
+token lives. GitHub expires a token an hour after it is minted, and the
+default `session_timeout` is two hours, so a long session, many review rounds,
+or a long `check_wait` is enough.
+
+**Steps:**
+
+1. Have a job delivered to a runner.
+2. Let the session (or the review and CI wait after it) run past the first
+   token's `expires_at`.
+
+**Expected result:**
+
+- Before each GitHub call and each git command, the runner checks the token it
+  holds. Once that token is within five minutes of its `expires_at`, the runner
+  asks the control node on `schmeide.token.<steward>` for a new one for the same
+  job, and the control node mints one.
+- The push, the pull request, the review rounds, the merge, and the outcome
+  comment all use an unexpired token. GitHub never answers `401 Bad
+  credentials`, and the steward gets the usual outcome comment, including the
+  failure comment of a job whose session timed out (JN-FAIL-004).
+- When the control node cannot mint the new token, the call that needed it
+  fails with "refresh the job's GitHub token: ..." and the job fails as for any
+  GitHub error. The outcome comment is still tried with its own refresh. If
+  that fails too, the runner logs `level=ERROR msg="could not comment on the
+  issue"` with the refresh error, and `schmeide status` and the runner log are
+  where the outcome shows.
+
+**Notes:**
+
+- A token without an `expires_at` is never refreshed.
+- Each refresh mints another token, so a long job mints several.
+- Covered by `TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest`
+  (`internal/e2e`), and in `internal/runner` by `TestJobOutlivingItsTokenOpensPR`,
+  `TestSessionTimeoutAfterTokenExpiryStillComments`,
+  `TestWorktreeGitUsesTheCurrentToken`, `TestJobTokenRefreshesOnlyWhenStale`,
+  and `TestTokenStale`; in `internal/forge` by `TestTokensIsAskedForEachCall`.

@@ -97,6 +97,12 @@ func TestTrackerReportsLatestStatePerJob(t *testing.T) {
 	runner.report(second, StateClaimed, "")
 	runner.report(first, StateWorking, "")
 	runner.report(first, StatePROpened, "https://github.com/o/r/pull/9")
+	// Wait for the state first: the stream keeps one message per subject, so
+	// the junk below could replace it before the tracker reads it.
+	eventually(t, func() bool {
+		status, _ := tracker.JobStatus(first.Subject())
+		return status.State == StatePROpened
+	})
 	// Junk does not overwrite a job's state.
 	runner.publish(StatusSubjectPrefix+"alice.7.1", []byte("not json"))
 	runner.publish(StatusSubjectPrefix+"alice.7.1", Status{})
@@ -131,10 +137,10 @@ func TestTrackerRemembersRunnersAndStatusAcrossRestart(t *testing.T) {
 	alicePhone := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-phone"}
 	first := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}
 	untouched := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "alice"}
-	runner.publish(RegisterSubjectPrefix+"alice", alice)
-	runner.publish(RegisterSubjectPrefix+"bob", bob)
-	runner.publish(RegisterSubjectPrefix+"alice", aliceAgain)
-	runner.publish(RegisterSubjectPrefix+"alice", alicePhone)
+	runner.publish(RegisterSubject("alice", alice.Host), alice)
+	runner.publish(RegisterSubject("bob", bob.Host), bob)
+	runner.publish(RegisterSubject("alice", aliceAgain.Host), aliceAgain)
+	runner.publish(RegisterSubject("alice", alicePhone.Host), alicePhone)
 	runner.report(first, StateClaimed, "")
 	runner.report(first, StatePROpened, "https://github.com/o/r/pull/9")
 
@@ -182,11 +188,13 @@ func TestTrackerRestartDropsMalformed(t *testing.T) {
 	runner.publish(RegisterSubjectPrefix+"alice", alice)
 	runner.report(job, StateWorking, "")
 	// A registration for someone else's subject, junk, and an empty status
-	// are not recorded, and a restart must not bring them back.
+	// are not recorded, and a restart must not bring them back. They go on
+	// subjects with no valid status: the stream keeps one message per
+	// subject, so junk on a job's subject would replace its stored status.
 	runner.publish(RegisterSubjectPrefix+"mallory", alice)
 	runner.publish(RegisterSubjectPrefix+"carol", []byte("not json"))
-	runner.publish(StatusSubjectPrefix+"alice.7.1", []byte("not json"))
-	runner.publish(StatusSubjectPrefix+"alice.7.1", Status{})
+	runner.publish(StatusSubjectPrefix+"alice.7.3", []byte("not json"))
+	runner.publish(StatusSubjectPrefix+"alice.7.3", Status{})
 	runner.publish(StatusSubjectPrefix+"alice.7.2", []byte("not json"))
 
 	want := []Registration{alice}
@@ -206,9 +214,11 @@ func TestTrackerRestartDropsMalformed(t *testing.T) {
 	if got, ok := tracker.JobStatus(job.Subject()); !ok || got != wantStatus {
 		t.Errorf("status of %s = %+v, %v; want %+v", job.Subject(), got, ok, wantStatus)
 	}
-	junkOnly := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "alice"}
-	if got, ok := tracker.JobStatus(junkOnly.Subject()); ok {
-		t.Errorf("status of a junk-only job = %+v, want none", got)
+	for _, issue := range []int{2, 3} {
+		junkOnly := Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "alice"}
+		if got, ok := tracker.JobStatus(junkOnly.Subject()); ok {
+			t.Errorf("status of a junk-only job = %+v, want none", got)
+		}
 	}
 }
 
@@ -469,5 +479,98 @@ func TestFailedPublishLeavesNoPendingJob(t *testing.T) {
 	}
 	if len(snap.Jobs) != 0 {
 		t.Errorf("jobs = %+v, want none for a job that was never stored", snap.Jobs)
+	}
+}
+
+// statusStreamInfo reads the status stream's current config and state.
+func statusStreamInfo(t *testing.T, q *Queue) *jetstream.StreamInfo {
+	t.Helper()
+	stream, err := q.js.Stream(t.Context(), StatusStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := stream.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
+func TestStatusStreamKeepsOnlyTheLatestMessagePerSubject(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	laptop := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice.laptop"}
+	laptopAgain := Registration{Steward: "alice", Harnesses: []string{"claude", "fake"}, Host: "alice.laptop"}
+	desk := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "desk", Pool: true}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}
+	runner.publish(RegisterSubject("alice", laptop.Host), laptop)
+	runner.publish(RegisterSubject("alice", desk.Host), desk)
+	runner.publish(RegisterSubject("alice", laptopAgain.Host), laptopAgain)
+	// A registration whose subject names another host is not recorded.
+	runner.publish(RegisterSubject("alice", "elsewhere"), laptop)
+	runner.report(job, StateClaimed, "")
+	runner.report(job, StateWorking, "")
+	runner.report(job, StatePROpened, "https://github.com/o/r/pull/9")
+
+	wantRunners := []Registration{desk, laptopAgain}
+	wantStatus := Status{State: StatePROpened, Detail: "https://github.com/o/r/pull/9"}
+	eventually(t, func() bool {
+		status, _ := tracker.JobStatus(job.Subject())
+		return status == wantStatus && reflect.DeepEqual(tracker.Runners(), wantRunners)
+	})
+	// One message each for the laptop, the desk, the other host, and the job.
+	if got := statusStreamInfo(t, q).State.Msgs; got != 4 {
+		t.Errorf("status stream holds %d messages, want 4", got)
+	}
+
+	// Replay skips the sequences the limit removed.
+	q = restartQueue(t, q, dir)
+	tracker = startTracker(t, q)
+	if got := tracker.Runners(); !reflect.DeepEqual(got, wantRunners) {
+		t.Errorf("runners after restart = %+v, want %+v", got, wantRunners)
+	}
+	if !tracker.poolRunner("alice") {
+		t.Error("the desk's pool registration was lost on restart")
+	}
+	if got, ok := tracker.JobStatus(job.Subject()); !ok || got != wantStatus {
+		t.Errorf("status after restart = %+v, %v; want %+v", got, ok, wantStatus)
+	}
+	snap, err := ReadStatus(t.Context(), q.js)
+	if err != nil || !reflect.DeepEqual(snap.Runners, wantRunners) {
+		t.Errorf("ReadStatus runners = %+v, %v; want %+v", snap.Runners, err, wantRunners)
+	}
+}
+
+func TestTrackLimitsAStatusStreamCreatedWithoutLimits(t *testing.T) {
+	q := startQueue(t)
+	// The status stream as an older control node created it.
+	if _, err := q.js.CreateStream(t.Context(), jetstream.StreamConfig{
+		Name:     StatusStream,
+		Subjects: []string{RegisterSubjectPrefix + "*", StatusSubjectPrefix + "*.*.*"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "alice"}
+	subject := StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+	for _, state := range []State{StateClaimed, StateWorking, StatePROpened} {
+		data, _ := json.Marshal(Status{State: state})
+		if _, err := q.js.Publish(t.Context(), subject, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tracker := startTracker(t, q)
+	info := statusStreamInfo(t, q)
+	if info.Config.MaxMsgsPerSubject != 1 || info.Config.Discard != jetstream.DiscardOld {
+		t.Errorf("limits = %d per subject, discard %v; want 1 and old", info.Config.MaxMsgsPerSubject, info.Config.Discard)
+	}
+	if info.State.Msgs != 1 {
+		t.Errorf("status stream holds %d messages after the update, want 1", info.State.Msgs)
+	}
+	if got, ok := tracker.JobStatus(job.Subject()); !ok || got.State != StatePROpened {
+		t.Errorf("status = %+v, %v; want the latest, pr_opened", got, ok)
 	}
 }

@@ -34,11 +34,32 @@ When the control node creates a job it stores a `pending` status for it, so
   on the issue and acknowledges the job.
 - A token hand-back does not consume an attempt. If the runner cannot get a
   GitHub token for the job, it hands the job back without commenting, because
-  the issue could not be reached anyway.
+  the issue could not be reached anyway. An App without one of the permissions
+  the control node asks for (Contents, Pull requests, Issues, Checks,
+  Administration, Actions) gets no token, so every job is handed back until
+  the App and its installation have them.
+- A job that outlives its token gets a new one. GitHub expires an installation
+  token an hour after it is minted. Before each GitHub call and git command the
+  runner checks the token it holds, and when that token is within five minutes
+  of expiry it asks the control node for another one for the same job. If that
+  request fails, the call that needed the token fails with "refresh the job's
+  GitHub token: ..." and the job fails like any other GitHub error (an attempt
+  is used). The outcome comment is still attempted with its own refresh; if
+  that fails too, the runner logs `msg="could not comment on the issue"` with
+  the refresh error, nothing reaches the issue, and `schmeide status` still
+  shows the job's final state.
 - A shutdown does not consume an attempt. If the runner is stopping, it hands
   the job back at once for another runner.
 - A gate failure is final. It is the session's own result, so it is not
   retried.
+- A missing or invalid `.schmeide/config.toml` is final. The runner reads it
+  from the base branch before any session, and a retry reads the same file.
+  The comment names the error from `internal/repoconfig`. Push a fixed config
+  and add the ready label again to make a new job.
+- Open blockers side by side, whose pull requests are not one linear stack,
+  are final. The blocked-by list does not change between attempts. The
+  comment says "are not one linear stack, and schmeide stacks only on a single
+  chain of blockers".
 - A review that is not passed after the allowed rounds is final. A fix whose
   gate fails is a gate failure and is final too.
 - A factory merge that does not land is final. The pull request already
@@ -103,6 +124,21 @@ a runner owns a job it sends `InProgress` every third of that duration. The
 runner therefore has to remain connected to the control node throughout a
 long session. If the process dies or heartbeats stop, JetStream redelivers the
 job after the lease expires.
+
+The lease belongs to the shared consumer, not to each runner. The first runner
+to start for a steward (or the first `--pool` runner) creates the consumer with
+its `--ack-wait`, and later runners use it unchanged. A runner whose
+`--ack-wait` differs logs `a shared job consumer already has another ack wait;
+heartbeating at the consumer's` and heartbeats every third of the consumer's
+lease, so a mismatch cannot cause a redelivery of a job that is still being
+worked. To change the lease, delete the consumer (`runner-<steward>` or
+`runner-_pool` on `SCHMEIDE_JOBS`) with the `nats` CLI while no runner holds a
+job from it, then start a runner with the new `--ack-wait`.
+
+JetStream redelivers without limit: no `MaxDeliver` is set. The runner's
+attempt count is what ends retries, because it does not count hand-backs for a
+missing token, for shutdown, or for a dead runner, and a job stopped by
+`MaxDeliver` would end with no status and no issue comment.
 
 `--stuck-after` defaults to 3 hours and is a separate no-progress budget. Each
 reported job-state change resets it. If the budget expires, the runner cancels
