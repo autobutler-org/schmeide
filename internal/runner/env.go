@@ -7,9 +7,8 @@ import (
 
 // baseEnv are the variables every harness session sees, when the runner has
 // them: what a shell, a toolchain, and an HTTPS client need to work, and
-// nothing that grants access to anything. The gate does not use this list: it
-// inherits the runner's whole environment (see "The gate inherits the runner's
-// environment" in docs/architecture/credentials.md, and issue #111).
+// nothing that grants access to anything. The gate gets the same list, without
+// the harness prefixes; see [gateEnv].
 var baseEnv = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TZ", "TMPDIR",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",

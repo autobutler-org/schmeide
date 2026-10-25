@@ -23,7 +23,7 @@ flowchart TB
             senv["base env + ANTHROPIC_, CLAUDE_, XAI_ + --pass-env<br/>no SCHMEIDE_*, no job token"]
         end
         subgraph gate["gate command (own process session)"]
-            genv["runner's full environment<br/>includes SCHMEIDE_* if set"]
+            genv["base env + --gate-pass-env<br/>no SCHMEIDE_*, no job token<br/>HOME and TMPDIR at a per-job scratch dir"]
         end
     end
     gh["GitHub"]
@@ -38,7 +38,7 @@ flowchart TB
 | GitHub to control node | signed webhook payloads | anything without a valid `X-Hub-Signature-256` |
 | Control node to runner | job messages, a token for each of the steward's own jobs (and pool jobs for a `--pool` runner) | the App key, the webhook secret, other stewards' jobs, tokens, and stage records |
 | Runner to harness session | the brief, the worktree, the reduced environment | the job's installation token, the NATS token, `SCHMEIDE_*` settings |
-| Runner to gate | the worktree and the runner's environment | the job's installation token (it is only in git's environment) |
+| Runner to gate | the worktree, the base environment, and `--gate-pass-env` | the job's installation token (it is only in git's environment), the NATS token, `SCHMEIDE_*` settings, the agent logins, the runner's `HOME` |
 | Worktree to remote | tracked files that pass the secret scan | credential-shaped literals |
 
 The session and the gate run as the runner's OS user, with that user's files. There is no container or OS
@@ -179,15 +179,28 @@ token from its environment. The job's installation token is never in the session
 only in the git commands' environment. A session can still read any file the runner's OS user can read, including
 the harness's own login under `HOME`.
 
-### The gate inherits the runner's environment
+### Gate environment
 
-`runner.work` creates the worktree without an env list, so `worktreeSpec.env` is nil and `worktree.Run` falls
-back to `os.Environ()` for the gate. The gate therefore sees the runner's whole environment, including
-`SCHMEIDE_NATS_TOKEN` when the token was passed that way, and any agent API keys. The gate is a command from the
-repository's base branch, but it runs code the session just wrote (tests, build scripts), so a session can reach
-the runner's environment through the gate. This is a known gap (#111). The comment on `baseEnv` in `env.go` says the
-base list does not apply to the gate. Until the gate gets a filtered environment, run the runner as a user that
-holds nothing else worth taking, and pass the NATS token in a way the gate cannot read if that matters.
+`gateEnv` in `internal/runner/env.go` filters the runner's `os.Environ()` for the gate, and `runner.work` passes
+the result to `newWorktree` as `worktreeSpec.gateEnv`:
+
+| Kept | Names |
+| --- | --- |
+| base names (`baseEnv`) | the same list as the harness session |
+| base prefixes (`basePrefixes`) | `LC_*`, `XDG_*` |
+| `--gate-pass-env` | each listed name, exactly. The help text says never to list a secret. |
+| added by `worktree.Run` | `HOME` and `TMPDIR` set to the job's scratch directory, then `GOCACHE`, `GOMODCACHE`, `GOFLAGS` |
+
+The harness prefixes (`ANTHROPIC_*`, `CLAUDE_*`, `XAI_*`) are not kept, so the gate does not see the agent
+logins. A `SCHMEIDE_*` name is never kept, even when listed: `gatePassEnv` in `internal/runner/cli.go` refuses one
+in `--gate-pass-env` at startup with `--gate-pass-env lists <NAME>: the gate never sees a SCHMEIDE_ name` (exit
+code 2), and `gateEnv` drops any that slip through. `scratchHome` drops `HOME`, `TMPDIR`, and the
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` variables, then points `HOME` and
+`TMPDIR` at `<work-dir>/scratch/<repo_id>-<issue>`, so the gate reads no dotfiles from the runner's home and the
+XDG directories default to under the scratch `HOME`. `newWorktree` clears and recreates that directory (mode
+`0700`) for each job, and `Close` removes it with the worktree. The gate still runs as the runner's OS user, so it
+can read any file that user can read by absolute path. Run the runner as a user that holds nothing else worth
+taking.
 
 Git commands get only the token and identity variables (`GIT_TERMINAL_PROMPT`, `GIT_CONFIG_*`, `GIT_AUTHOR_*`,
 `GIT_COMMITTER_*`), with no `PATH` or `HOME`.
