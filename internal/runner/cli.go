@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
@@ -27,8 +28,9 @@ func envName(flagName string) string {
 }
 
 // ParseFlags parses args into fs, then fills every flag that was not given
-// from its SCHMEIDE_<NAME> environment variable. It returns flag.ErrHelp when
-// help was asked for.
+// from its SCHMEIDE_<NAME> environment variable. A variable whose value does
+// not parse for its flag's type is an error that names the variable and shows
+// a valid value. It returns flag.ErrHelp when help was asked for.
 func ParseFlags(fs *flag.FlagSet, args []string) error {
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
@@ -39,12 +41,32 @@ func ParseFlags(fs *flag.FlagSet, args []string) error {
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	var errs []error
 	fs.VisitAll(func(f *flag.Flag) {
-		if v := os.Getenv(envName(f.Name)); v != "" && !given[f.Name] {
-			_ = f.Value.Set(v)
+		name := envName(f.Name)
+		if v := os.Getenv(name); v != "" && !given[f.Name] {
+			if f.Value.Set(v) != nil {
+				errs = append(errs, fmt.Errorf("%s is %q, which is not %s, unset it, or pass --%s", name, v, envExample(f.Value), f.Name))
+			}
 		}
 	})
-	return nil
+	return errors.Join(errs...)
+}
+
+// envExample describes the kind of value a flag takes and shows a valid one,
+// for the error ParseFlags returns.
+func envExample(v flag.Value) string {
+	if g, ok := v.(flag.Getter); ok {
+		switch g.Get().(type) {
+		case time.Duration:
+			return "a duration; set it to one such as 5m"
+		case int:
+			return "an integer; set it to one such as 3"
+		case bool:
+			return "a boolean; set it to true or false"
+		}
+	}
+	return "valid for this flag; set it to a valid value"
 }
 
 // FlagUsage lists the flags of fs with their environment variables and
