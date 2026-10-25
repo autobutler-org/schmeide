@@ -1,7 +1,9 @@
 package forge
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +101,38 @@ func TestProtectionReadsRequiredReviews(t *testing.T) {
 				t.Fatalf("Protection = %+v, %v, want %d approvals", got, err, tt.want)
 			}
 		})
+	}
+}
+
+// TestTokensIsAskedForEachCall sends whatever Tokens returns at the time of
+// each call, and does not call GitHub when Tokens fails.
+func TestTokensIsAskedForEachCall(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+	}))
+	t.Cleanup(srv.Close)
+	tokens := []string{"first", "second"}
+	refuse := errors.New("no token")
+	g := GitHub{API: srv.URL, Repo: testRepo, Tokens: func(context.Context) (string, error) {
+		if len(tokens) == 0 {
+			return "", refuse
+		}
+		next := tokens[0]
+		tokens = tokens[1:]
+		return next, nil
+	}}
+	for range 2 {
+		if _, err := g.DefaultBranch(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.DefaultBranch(t.Context()); !errors.Is(err, refuse) {
+		t.Errorf("DefaultBranch with no token = %v, want the token error", err)
+	}
+	if want := []string{"Bearer first", "Bearer second"}; !slices.Equal(got, want) {
+		t.Errorf("Authorization headers = %q, want %q", got, want)
 	}
 }
 

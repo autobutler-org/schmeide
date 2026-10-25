@@ -86,8 +86,14 @@ ago.
   instead (JN-PR-004). Either way there is one job.
 - A delivery that was rejected (401, 403, 429, 500) is not remembered, so its
   redelivery is handled again.
-- Covered by `TestRepeatedDeliveryIsAcknowledgedWithoutPublishing` and
-  `TestRejectedDeliveryIDIsNotRemembered`.
+- The replay check runs after the signature check and the rate limit. A request
+  that reuses a remembered delivery id without a valid `X-Hub-Signature-256`
+  answers 401, not `replay`. A redelivery counts toward `--webhook-rate`, so
+  over the limit it answers 429.
+- Covered by `TestRepeatedDeliveryIsAcknowledgedWithoutPublishing`,
+  `TestRejectedDeliveryIDIsNotRemembered`,
+  `TestUnsignedRequestNeverReachesTheReplayCache`, and
+  `TestReplayCountsAgainstTheRateLimit` in `internal/control`.
 
 ---
 
@@ -199,7 +205,13 @@ with a pull request (any state other than `failed` or `gate_failed`).
 
 - A non-POST request to `/webhook` answers 405 "webhook deliveries must be
   POSTed". A body over 25 MiB answers 400 and publishes nothing.
-- Covered by `TestWebhookIntake` and `TestOversizedWebhookPublishesNothing`.
+- The signature is checked before the rate limit and the replay check. A
+  request with a bad or missing signature answers 401 even when it reuses a
+  delivery id the control node already handled, and it does not count toward
+  `--webhook-rate`.
+- Covered by `TestWebhookIntake`, `TestOversizedWebhookPublishesNothing`,
+  `TestUnsignedRequestNeverReachesTheReplayCache`, and
+  `TestUnsignedRequestsDoNotUseTheRateBudget` in `internal/control`.
 
 ---
 
@@ -218,7 +230,11 @@ with a pull request (any state other than `failed` or `gate_failed`).
 
 **Notes:**
 
-- Covered by `TestWebhookRateLimitPublishesNoJob`.
+- Only deliveries with a valid signature count toward the limit. A redelivery
+  of a delivery id already handled counts, and over the limit it answers 429
+  rather than `replay`.
+- Covered by `TestWebhookRateLimitPublishesNoJob` and
+  `TestReplayCountsAgainstTheRateLimit` in `internal/control`.
 
 ---
 
@@ -441,7 +457,8 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Notes:**
 
-- Two or more stackable blockers are accepted when they form one chain.
+- Two or more stackable blockers are accepted when they form one chain. The
+  order GitHub lists the blockers in does not matter.
 - Covered by `TestLinearChainOfDependenciesStacksOnTheTop`.
 
 ---
@@ -457,14 +474,17 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Expected result:**
 
-- No worktree, no session, no pull request. Each attempt fails with "the open
-  dependencies' pull requests (5_a, 6_b) are not one linear stack, and
-  schmeide stacks only on a single chain of blockers".
-- After `--max-attempts`, the issue gets "schmeide could not finish this job
-  and did not open a pull request:" with that error.
+- No worktree, no session, no pull request. The job reports `claimed` then
+  `failed` on the first attempt and is not retried.
+- The issue gets one comment: "schmeide could not finish this job and did not
+  open a pull request:" with "the open dependencies' pull requests (5_a, 6_b)
+  are not one linear stack, and schmeide stacks only on a single chain of
+  blockers".
 
 **Notes:**
 
+- A retry cannot change the blocked-by list, so this failure is final, like a
+  gate failure. A linear chain is accepted (JN-PR-018).
 - Covered by `TestTwoSideBySideDependenciesOpenNothing`.
 
 ---

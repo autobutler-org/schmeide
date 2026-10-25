@@ -15,20 +15,20 @@ flowchart TB
     end
     subgraph runner["Runner process (steward's OS user)"]
         ntok["this steward's NATS token"]
-        jtok["current job's installation token"]
+        jtok["current job's installation token<br/>(jobToken: asks again 5 min before expiry)"]
         subgraph git["git commands"]
             gtok["token via GIT_CONFIG_VALUE_0"]
         end
-        subgraph sess["harness session (own process group)"]
+        subgraph sess["harness session (own process session)"]
             senv["base env + ANTHROPIC_, CLAUDE_, XAI_ + --pass-env<br/>no SCHMEIDE_*, no job token"]
         end
-        subgraph gate["gate command (own process group)"]
+        subgraph gate["gate command (own process session)"]
             genv["runner's full environment<br/>includes SCHMEIDE_* if set"]
         end
     end
     gh["GitHub"]
     ctl -- "JWT signed with App key" --> gh
-    ctl -- "TokenReply over NATS (TLS)" --> runner
+    ctl -- "TokenReply over NATS (TLS)<br/>at claim, then whenever the held one is near expiry" --> runner
     git -- "Authorization: Basic x-access-token" --> gh
     runner -- "Bearer job token (REST, GraphQL)" --> gh
 ```
@@ -52,26 +52,82 @@ sandbox. [FAILURE-MODES.md](../FAILURE-MODES.md#not-built) and [design.md](../de
 | Authenticated as | the App, with an RS256 JWT: `iss` App ID, `iat` now minus 1 minute, `exp` now plus 9 minutes |
 | Endpoint | `POST <github-api-url>/app/installations/<installation_id>/access_tokens` |
 | Repository scope | `repository_ids: [job.repo_id]`, the one repository |
-| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read` |
-| Lifetime | one hour, set by GitHub. One token per delivery, requested at claim time. |
+| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `administration: read`, `actions: read` |
+| Lifetime | one hour, set by GitHub. The first token of a delivery is requested at claim time; the runner asks for another whenever the one it holds is within five minutes of its `expires_at`. |
 | Who may ask | a runner on `schmeide.token.<steward>`, for a subject in `SCHMEIDE_JOBS` that is that steward's job, or a pool job when the steward registered with `--pool` (`Queue.tokenFor`) |
-| Where the runner keeps it | in memory, in `forge.GitHub.Token`, and in the git environment of the job's worktree |
+| Where the runner keeps it | in memory only, in the job's `jobToken` (`internal/runner/token.go`); `forge.GitHub.Tokens` and every git command read it from there |
 
 How the runner uses it:
 
-- Git: `newWorktree` sets `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.extraHeader`, and
-  `GIT_CONFIG_VALUE_0=Authorization: Basic base64(x-access-token:<token>)` in the environment of every git command
+- Git: `worktree.git` (`internal/runner/workspace.go`) asks the job's token source for the current token and sets
+  `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.extraHeader`, and
+  `GIT_CONFIG_VALUE_0=Authorization: Basic base64(x-access-token:<token>)` in the environment of each git command
   it runs. The token is never written to git config or put on a command line. `GIT_TERMINAL_PROMPT=0` stops a
   credential prompt.
-- REST and GraphQL: `Authorization: Bearer <token>` (`internal/forge/github.go`, `internal/runner/github.go`).
+- REST and GraphQL: `Authorization: Bearer <token>`, built by `forge.GitHub.Bearer` before each call from
+  `forge.GitHub.Tokens` (`internal/forge/github.go`, `internal/forge/queue.go`, and `RetargetPull` in
+  `internal/runner/github.go`).
 
-The token is not refreshed. A job that runs longer than an hour after its claim (long sessions, many review
-rounds, a long `check_wait`) will see GitHub reject later calls, and those calls fail the job.
+### Refreshing a job's token
 
-The four permissions do not include `administration` or `actions`. Reading branch protection needs
-Administration read, and `forge.GitHub.Protection` treats the resulting 403 as no protection. Reading an Actions
-job log for a CI fix round needs Actions read; when that read fails, `logTail` puts "(schmeide could not read the
-log ...)" in the fix brief in place of the log.
+A job can run longer than a token lives: the default `session_timeout` alone is two hours, and review rounds and
+`check_wait` come after it. So the runner never holds one token for a whole job.
+
+```mermaid
+sequenceDiagram
+    participant J as runner: jobToken.get
+    participant Q as control: Queue.tokenFor
+    participant GH as GitHub
+    Note over J: claim: no token held
+    J->>Q: request schmeide.token.{steward} with the job subject
+    Q->>GH: POST /app/installations/{id}/access_tokens
+    GH-->>Q: token, expires_at (1 hour)
+    Q-->>J: TokenReply
+    Note over J: each GitHub call and git command calls get
+    alt now is before expires_at minus 5 minutes
+        J-->>J: return the held token
+    else within 5 minutes of expires_at
+        J->>Q: request again with the same job subject
+        Q->>GH: mint a new token
+        Q-->>J: TokenReply
+        J-->>J: hold and return the new token
+    end
+```
+
+- `Runner.handle` builds one `jobToken` per delivery (`internal/runner/token.go`). Its `fetch` is the same
+  `schmeide.token.<steward>` request the claim makes. `get` holds a mutex, so concurrent calls refresh once.
+- `stale` decides: no token yet, or `now` at or after `expires_at` minus `tokenRefreshMargin` (five minutes). A
+  token without an `expires_at` is never refreshed.
+- `Queue.tokenFor` (`internal/control/queue.go`) mints a new token on every request whose subject is still in
+  `SCHMEIDE_JOBS` and belongs to the asking steward (or is a pool job it may take). The job stays in the stream
+  while it is worked and after it is acknowledged (the stream has limits retention), so a refresh at any point of
+  the job, including the outcome comment, is answered. Each refresh is one more token minted by the App.
+- A refresh that fails returns `refresh the job's GitHub token: <cause>` and keeps the old token, so the next call
+  tries again. The GitHub call or git command that needed it fails with that error and the job fails the way any
+  GitHub error fails it. The outcome comment is still attempted after that, with its own refresh. When that one
+  fails too, the runner logs `level=ERROR msg="could not comment on the issue"` with the refresh error and
+  acknowledges the job; the job's state is still reported on `SCHMEIDE_STATUS`, so `schmeide status` shows it.
+
+### What each permission is for
+
+| Permission | Used for |
+| --- | --- |
+| `contents: write` | fetch and push the job's branch, merge the pull request |
+| `pull_requests: write` | open, find, retarget, and merge pull requests |
+| `issues: write` | read the issue's comments and blockers, post the outcome comment |
+| `checks: read` | list check runs on the pull request's head |
+| `administration: read` | `GET /repos/{owner}/{repo}/branches/{branch}/protection` in `forge.GitHub.Protection`, before a factory merge |
+| `actions: read` | `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` in `forge.GitHub.JobLog`, for a CI fix round |
+
+GitHub's "Permissions required for GitHub Apps" REST page lists the protection read under Administration (read)
+and the job log download under Actions (read). The request is pinned by `TestTokenPerJob` (`internal/control`).
+
+GitHub cannot grant an installation token a permission the App installation was not granted. An App created
+before `administration: read` and `actions: read` were requested, or an installation whose owner has not accepted
+the App's new permissions, gets no token at all: every job is handed back as in JN-FAIL-015 until the App has
+both permissions. `forge.GitHub.Protection` still treats a 403 on the protection read as no protection, and when
+the job log read fails, `logTail` puts "(schmeide could not read the log ...)" in the fix brief in place of the
+log.
 
 ## Per-steward NATS tokens
 
@@ -129,8 +185,8 @@ the harness's own login under `HOME`.
 back to `os.Environ()` for the gate. The gate therefore sees the runner's whole environment, including
 `SCHMEIDE_NATS_TOKEN` when the token was passed that way, and any agent API keys. The gate is a command from the
 repository's base branch, but it runs code the session just wrote (tests, build scripts), so a session can reach
-the runner's environment through the gate. This is a known gap. The comment on `baseEnv` in `env.go` says the base
-list applies to gate commands as well; the code does not pass it. Until it does, run the runner as a user that
+the runner's environment through the gate. This is a known gap (#111). The comment on `baseEnv` in `env.go` says the
+base list does not apply to the gate. Until the gate gets a filtered environment, run the runner as a user that
 holds nothing else worth taking, and pass the NATS token in a way the gate cannot read if that matters.
 
 Git commands get only the token and identity variables (`GIT_TERMINAL_PROMPT`, `GIT_CONFIG_*`, `GIT_AUTHOR_*`,

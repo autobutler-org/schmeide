@@ -20,8 +20,12 @@ type GitHub struct {
 	// API is the REST base URL, such as https://api.github.com.
 	API string
 	// Repo is "owner/name".
-	Repo  string
+	Repo string
+	// Token is the token every call sends when Tokens is nil.
 	Token string
+	// Tokens, when set, is asked for the token before each call, so a job
+	// that outlives one installation token sends a fresh one.
+	Tokens func(context.Context) (string, error)
 }
 
 var _ Forge = GitHub{}
@@ -33,6 +37,19 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string { return e.msg }
+
+// Bearer is the Authorization header value for one call: Tokens' answer,
+// or Token when Tokens is nil.
+func (g GitHub) Bearer(ctx context.Context) (string, error) {
+	if g.Tokens == nil {
+		return "Bearer " + g.Token, nil
+	}
+	token, err := g.Tokens(ctx)
+	if err != nil {
+		return "", err
+	}
+	return "Bearer " + token, nil
+}
 
 // do calls one endpoint under /repos/<repo>.
 func (g GitHub) do(ctx context.Context, method, path string, in, out any) error {
@@ -56,11 +73,15 @@ func (g GitHub) send(ctx context.Context, method, path string, in any) ([]byte, 
 		}
 		body = bytes.NewReader(data)
 	}
+	auth, err := g.Bearer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github %s %s: %w", method, path, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(g.API, "/")+"/repos/"+g.Repo+path, body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -195,11 +216,15 @@ func (g GitHub) JobLog(ctx context.Context, id int64) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	path := fmt.Sprintf("/actions/jobs/%d/logs", id)
+	auth, err := g.Bearer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github GET %s: %w", path, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(g.API, "/")+"/repos/"+g.Repo+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -246,10 +271,11 @@ func (g GitHub) MergePull(ctx context.Context, number int) error {
 	return g.do(ctx, http.MethodPut, fmt.Sprintf("/pulls/%d/merge", number), body, nil)
 }
 
-// Protection reads the branch protection endpoint. GitHub answers 404 for a
-// branch without protection. It answers 403 when the token cannot read
-// protection (that needs Administration: read); that is treated as no
-// protection too, so merge goes on as it did before this read existed.
+// Protection reads the branch protection endpoint, which needs
+// Administration: read. GitHub answers 404 for a branch without protection.
+// It answers 403 when the token cannot read protection, which happens when
+// the App installation was not granted Administration: read; that is treated
+// as no protection too, so merge goes on as it did before this read existed.
 func (g GitHub) Protection(ctx context.Context, branch string) (Protection, error) {
 	var resp struct {
 		Reviews *struct {

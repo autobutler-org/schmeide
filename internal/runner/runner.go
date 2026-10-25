@@ -13,7 +13,10 @@
 // hours) and the gate after the gate timeout (default 30 minutes). The repo
 // config keys session_timeout and gate_timeout override those flags. A
 // timeout cancels that process group, fails the job, and comments on the
-// issue. The comment does not include the command's output.
+// issue. The comment does not include the command's output. A job's GitHub
+// token comes from the control node and is replaced with a new one when it
+// is within five minutes of expiry, so a job may run longer than one token
+// lives. The runner holds no other GitHub credential.
 package runner
 
 import (
@@ -166,6 +169,10 @@ type Runner struct {
 	nc       *nats.Conn
 	cons     jetstream.Consumer
 	poolCons jetstream.Consumer
+	// ackWait is the shortest AckWait of the consumers this runner pulls
+	// from. It sets the heartbeat interval, and differs from
+	// Options.AckWait when another runner created a consumer first.
+	ackWait  time.Duration
 	statuses jetstream.Stream
 	harness  harness.Harness
 	// attempts is restored from the status stream for the current job. Only
@@ -314,27 +321,21 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	// One durable consumer per steward, shared by all of the steward's
 	// runners, so each job goes to exactly one of them and no other steward's
 	// job is ever delivered here.
-	r.cons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
-		Durable:       control.ConsumerName(r.opts.Steward),
-		FilterSubject: control.JobFilter(r.opts.Steward),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       r.opts.AckWait,
-	})
-	if err != nil {
+	if r.cons, err = r.sharedConsumer(ctx, js, r.opts.Steward); err != nil {
 		return fmt.Errorf("subscribe to %s's jobs: %w", r.opts.Steward, err)
 	}
+	r.ackWait = r.cons.CachedInfo().Config.AckWait
 	if r.opts.Pool {
 		// One durable consumer for every pool runner, so each pool job is
 		// delivered to only one of them.
-		r.poolCons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
-			Durable:       control.ConsumerName(control.PoolName),
-			FilterSubject: control.JobFilter(control.PoolName),
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			AckWait:       r.opts.AckWait,
-		})
-		if err != nil {
+		if r.poolCons, err = r.sharedConsumer(ctx, js, control.PoolName); err != nil {
 			return fmt.Errorf("subscribe to pool jobs: %w", err)
 		}
+		r.ackWait = min(r.ackWait, r.poolCons.CachedInfo().Config.AckWait)
+	}
+	if r.ackWait != r.opts.AckWait {
+		r.log.Warn("a shared job consumer already has another ack wait; heartbeating at the consumer's",
+			"ack_wait", r.opts.AckWait, "consumer_ack_wait", r.ackWait)
 	}
 	// An older control node may not have started status tracking yet. Jobs can
 	// still run, but their attempt count cannot survive a runner restart.
@@ -349,7 +350,7 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 		r.stages = nil
 	}
 	host, _ := os.Hostname()
-	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{
+	r.publish(control.RegisterSubject(r.opts.Steward, host), Registration{
 		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool, Version: r.opts.Version,
 	})
 	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -359,6 +360,24 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	}
 	r.log.Info("runner registered", "steward", r.opts.Steward, "harnesses", strings.Join(names, ","), "pool", r.opts.Pool, "nats", r.opts.NATSURL)
 	return nil
+}
+
+// sharedConsumer opens the durable consumer over name's jobs, which every
+// runner for that steward (or every pool runner) shares. Its config is set
+// only when this runner creates it: a consumer that already exists is used
+// as it is, so a later runner with another --ack-wait does not change the
+// lease of jobs other runners are working.
+func (r *Runner) sharedConsumer(ctx context.Context, js jetstream.JetStream, name string) (jetstream.Consumer, error) {
+	cons, err := js.CreateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
+		Durable:       control.ConsumerName(name),
+		FilterSubject: control.JobFilter(name),
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       r.opts.AckWait,
+	})
+	if errors.Is(err, jetstream.ErrConsumerExists) {
+		return js.Consumer(ctx, control.JobStream, control.ConsumerName(name))
+	}
+	return cons, err
 }
 
 // Close drops the connection to the control node.
@@ -491,20 +510,21 @@ func (r *Runner) recordedStage(ctx context.Context, job control.Job) stage {
 	return s
 }
 
-// token asks the control node for the job's GitHub token.
-func (r *Runner) token(ctx context.Context, subject string) (string, error) {
+// token asks the control node for a GitHub token for the job. The control
+// node mints a new one on every request while the job is in the stream.
+func (r *Runner) token(ctx context.Context, subject string) (control.Token, error) {
 	msg, err := r.nc.RequestWithContext(ctx, control.TokenSubjectPrefix+r.opts.Steward, []byte(subject))
 	if err != nil {
-		return "", fmt.Errorf("ask the control node for the job's token: %w", err)
+		return control.Token{}, fmt.Errorf("ask the control node for the job's token: %w", err)
 	}
 	var reply control.TokenReply
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return "", fmt.Errorf("decode the job's token: %w", err)
+		return control.Token{}, fmt.Errorf("decode the job's token: %w", err)
 	}
 	if reply.Error != "" || reply.Token.Token == "" {
-		return "", fmt.Errorf("the control node could not mint a token: %s", reply.Error)
+		return control.Token{}, fmt.Errorf("the control node could not mint a token: %s", reply.Error)
 	}
-	return reply.Token.Token, nil
+	return reply.Token, nil
 }
 
 // handle works one delivered job. It acknowledges the job only once the job
@@ -532,7 +552,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		tick := time.NewTicker(r.opts.AckWait / 3)
+		tick := time.NewTicker(r.ackWait / 3)
 		defer tick.Stop()
 		stuck := time.NewTimer(r.opts.StuckAfter)
 		defer stuck.Stop()
@@ -560,8 +580,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}()
 
 	r.report(job, StateClaimed, "")
-	token, err := r.token(workCtx, msg.Subject())
-	if err != nil {
+	tokens := &jobToken{fetch: func(ctx context.Context) (control.Token, error) { return r.token(ctx, msg.Subject()) }}
+	if _, err := tokens.get(workCtx); err != nil {
 		if errors.Is(context.Cause(workCtx), errJobStuck) {
 			return
 		}
@@ -572,8 +592,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
 	}
-	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}}
-	out := r.work(workCtx, gh, job, token)
+	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Tokens: tokens.get}}
+	out := r.work(workCtx, gh, job, tokens.get)
 	if errors.Is(context.Cause(workCtx), errJobStuck) {
 		return
 	}
@@ -589,8 +609,9 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
 	// pass is final too: its rounds are spent. A factory merge that does not
-	// land is final as well.
-	if out.state == StateFailed {
+	// land is final as well. So is a failure marked final, such as a missing
+	// or invalid repo config, which a retry cannot change.
+	if out.state == StateFailed && !out.final {
 		r.attempts++
 		r.failures[job.Subject()] = r.attempts
 		n := r.attempts
@@ -695,6 +716,8 @@ type outcome struct {
 	detail string
 	// comment is posted on the issue. Empty posts nothing.
 	comment string
+	// final keeps a StateFailed outcome from being retried.
+	final bool
 }
 
 func failed(err error) outcome {
@@ -705,8 +728,15 @@ func failed(err error) outcome {
 	}
 }
 
+// finalFailed is a failure that a retry cannot change, so it is not retried.
+func finalFailed(err error) outcome {
+	out := failed(err)
+	out.final = true
+	return out
+}
+
 // work takes the job as far as it goes on this attempt.
-func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, token string) outcome {
+func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, token func(context.Context) (string, error)) outcome {
 	if job.Title == "" {
 		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
@@ -757,6 +787,9 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 	} else if base, err = baseBranch(ctx, gh, job.Issue); err != nil {
 		// Asked before the worktree exists, so a stacked job starts on the
 		// dependency's branch and the pull request opens against it.
+		if errors.Is(err, errNotOneStack) {
+			return finalFailed(err)
+		}
 		return failed(err)
 	}
 
@@ -793,7 +826,9 @@ func (r *Runner) execute(ctx context.Context, ws Workspace, gh forge.Forge, job 
 	// The gate is read before the session runs, so the session cannot weaken it.
 	cfg, err := repoconfig.Load(ws.Dir())
 	if err != nil {
-		return failed(err)
+		// The config is read from the base branch, which a retry does not
+		// change.
+		return finalFailed(err)
 	}
 	// The gate string is the one just read. Detection runs here, before the
 	// session, and not during git commit or git push.

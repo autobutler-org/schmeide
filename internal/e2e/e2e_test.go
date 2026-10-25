@@ -154,8 +154,17 @@ func git(t *testing.T, dir string, args ...string) string {
 }
 
 // newWorld seeds an origin whose repo config runs gate, starts the fakes, and
-// starts the control node.
+// starts the control node. Every job token is jobToken and lasts an hour.
 func newWorld(t *testing.T, gate string) *world {
+	return newWorldMinting(t, gate, func(*fakegh.Server) (string, time.Time) {
+		return jobToken, time.Now().Add(time.Hour)
+	})
+}
+
+// newWorldMinting is newWorld whose fake GitHub App answers each token
+// request with what mint returns. mint can make the fake GitHub accept the
+// token it hands out.
+func newWorldMinting(t *testing.T, gate string, mint func(*fakegh.Server) (string, time.Time)) *world {
 	w := &world{t: t, dir: t.TempDir(), natsAddr: freeAddr(t), httpAddr: freeAddr(t)}
 	t.Cleanup(w.stop)
 
@@ -181,8 +190,9 @@ func newWorld(t *testing.T, gate string) *world {
 			http.NotFound(rw, r)
 			return
 		}
+		token, expires := mint(w.gh)
 		rw.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(rw).Encode(map[string]string{"token": jobToken, "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)})
+		_ = json.NewEncoder(rw).Encode(map[string]string{"token": token, "expires_at": expires.Format(time.RFC3339Nano)})
 	}))
 	t.Cleanup(minter.Close)
 
@@ -416,7 +426,7 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 	if err := first.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	// The reviewer has its own process group, so killing the runner leaves it.
+	// The reviewer leads its own process session, so killing the runner leaves it.
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	<-first.done
 
@@ -428,5 +438,46 @@ func TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest(t *testing
 	}
 	if pulls := w.pulls(); len(pulls) != 1 {
 		t.Errorf("pull requests = %+v, want the first runner's one only", pulls)
+	}
+}
+
+// TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest is JN-FAIL-021.
+// The job's first token expires during the writer's session, so the push,
+// the pull request, the review, and the outcome comment need a second one.
+// The App reports each expiry five minutes (the runner's refresh margin)
+// after the fake GitHub enforces it, so GitHub refuses the first token at
+// the moment the runner should stop using it.
+func TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest(t *testing.T) {
+	var mints sync.Mutex
+	minted := 0
+	w := newWorldMinting(t, "true", func(gh *fakegh.Server) (string, time.Time) {
+		mints.Lock()
+		defer mints.Unlock()
+		minted++
+		lasts := time.Hour
+		if minted == 1 {
+			lasts = 3 * time.Second
+		}
+		token := fmt.Sprintf("ghs_e2e_%d", minted)
+		expires := time.Now().Add(lasts)
+		gh.Accept(token, expires)
+		return token, expires.Add(5 * time.Minute)
+	})
+	w.startRunner("sleep 5\n"+writer, passReview)
+	w.label(4, "Add a greeting")
+
+	w.waitComment(4, "The review passed.", time.Minute)
+	if pulls := w.pulls(); len(pulls) != 1 {
+		t.Errorf("pull requests = %+v, want one", pulls)
+	}
+	for _, call := range w.gh.Calls() {
+		if strings.HasPrefix(call, "401 ") {
+			t.Errorf("GitHub refused an expired token: %s", call)
+		}
+	}
+	mints.Lock()
+	defer mints.Unlock()
+	if minted < 2 {
+		t.Errorf("tokens minted = %d, want a second one after the first expired", minted)
 	}
 }
