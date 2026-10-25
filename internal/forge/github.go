@@ -271,10 +271,11 @@ func (g GitHub) MergePull(ctx context.Context, number int) error {
 	return g.do(ctx, http.MethodPut, fmt.Sprintf("/pulls/%d/merge", number), body, nil)
 }
 
-// Protection reads the branch protection endpoint. GitHub answers 404 for a
-// branch without protection. It answers 403 when the token cannot read
-// protection (that needs Administration: read); that is treated as no
-// protection too, so merge goes on as it did before this read existed.
+// Protection reads the branch protection endpoint, which needs
+// Administration: read. GitHub answers 404 for a branch without protection.
+// It answers 403 when the token cannot read protection, which happens when
+// the App installation was not granted Administration: read; that is treated
+// as no protection too, so merge goes on as it did before this read existed.
 func (g GitHub) Protection(ctx context.Context, branch string) (Protection, error) {
 	var resp struct {
 		Reviews *struct {

@@ -354,7 +354,9 @@ change for an hour (for example a session that hangs under a longer
 ### JN-FAIL-015: No token for the job
 
 **Preconditions:** The control node cannot mint an installation token, for
-example because the App was uninstalled from the repository.
+example because the App was uninstalled from the repository, or because the
+App or its installation lacks one of the permissions the token asks for
+(Contents, Pull requests, Issues, Checks, Administration, Actions).
 
 **Steps:**
 
@@ -372,6 +374,11 @@ example because the App was uninstalled from the repository.
 **Notes:**
 
 - This repeats until the token works or the job is removed.
+- A missing permission shows in the GitHub reply quoted after "github refused
+  an installation token for installation <id>:". Grant the permission to the
+  App and accept it on the installation.
+- Only the first token request of a delivery is handled this way. A refresh
+  later in the job is JN-FAIL-021.
 - Covered by `TestTokenHandBackDoesNotConsumeAttempts` and
   `TestMintReportsGitHubRefusal`.
 

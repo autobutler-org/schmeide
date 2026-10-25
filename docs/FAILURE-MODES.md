@@ -34,7 +34,10 @@ When the control node creates a job it stores a `pending` status for it, so
   on the issue and acknowledges the job.
 - A token hand-back does not consume an attempt. If the runner cannot get a
   GitHub token for the job, it hands the job back without commenting, because
-  the issue could not be reached anyway.
+  the issue could not be reached anyway. An App without one of the permissions
+  the control node asks for (Contents, Pull requests, Issues, Checks,
+  Administration, Actions) gets no token, so every job is handed back until
+  the App and its installation have them.
 - A job that outlives its token gets a new one. GitHub expires an installation
   token an hour after it is minted. Before each GitHub call and git command the
   runner checks the token it holds, and when that token is within five minutes
