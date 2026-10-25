@@ -1,38 +1,108 @@
-name: Continuous Integration
+name: ci
 
 on:
   workflow_dispatch:
   merge_group:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
 
-# cancel previous runs if new commits are pushed into the same PR
+# A newer push to a PR branch supersedes the older run. Pushes to main always
+# run to completion, so each one records a coverage baseline.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  ci:
+  # Fast feedback, in parallel with the tests.
+  lint:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: "go.mod"
-          cache: true
+          go-version-file: go.mod
+      - run: make check/format check/tidy check/vet check/lint
+      - run: make build
 
-      - name: Download dependencies
-        run: make deps
+  # The whole suite under the race detector (about two minutes, so one job,
+  # not shards). The coverage report gates a PR whose total drops more than
+  # one point below main's last recorded total; pushes to main record that
+  # baseline. With no baseline yet (first run, expired artifact) the gate is
+  # skipped.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # gh run download of main's baseline
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Race tests
+        shell: bash # adds pipefail, so tee does not hide a failure
+        run: make test/race COVERPROFILE=cover.out 2>&1 | tee race.log
+      - name: Slowest packages
+        if: always()
+        run: |
+          {
+            echo "### Slowest packages (race)"
+            echo '```'
+            grep -oE '^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+[0-9.]+s' race.log | awk '{print $NF, $2}' | sort -rn | head -10
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch main's coverage baseline
+        if: github.event_name != 'push'
+        continue-on-error: true
+        run: |
+          id="$(gh run list --workflow ci.yml --branch main --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -n "$id" ]; then gh run download "$id" --name coverage-baseline --dir baseline; else echo "no baseline available"; fi
+      - name: Coverage report and gate
+        shell: bash
+        run: BASELINE_FILE=baseline/total.txt TOTAL_FILE=total.txt scripts/cover-report.sh cover.out | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: coverage-baseline
+          path: total.txt
 
-      - name: Build
-        run: make build
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # The latest patched Go, not go.mod's minimum: make check/vuln scans
+          # with the go on PATH, so standard library fixes count.
+          go-version: stable
+          check-latest: true
+      - run: make check/vuln
 
-      - name: Test
-        run: make test
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make test/e2e
+
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: make test/scripts

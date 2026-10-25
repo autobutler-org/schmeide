@@ -35,7 +35,7 @@ internal/testutil/fakegh/ stateful fake of the GitHub REST endpoints the runner 
 internal/e2e/             end-to-end journeys against the built binary (build tag e2e)
 docs/                     operator and contributor documentation; architecture/ and user-journeys/ live here
 build/                    build output (./build/schmeide, coverage reports); not source
-.github/workflows/        check.yml (tidy, format, make check), ci.yml (build, test), image.yml, release.yml
+.github/workflows/        ci.yml (lint, race tests and coverage gate, govulncheck, e2e, scripts), image.yml, release.yml
 ```
 
 ### Where to read next
@@ -78,8 +78,9 @@ a target. `make help` lists everything; these are the ones that matter day to da
   and run as `go tool <name>`. Do not install them globally or add a second pin.
 - `.golangci.yml` enables only linters that have an autofix. `make check/lint` reports and does not fix; apply
   the fixes with `go tool golangci-lint run --fix --config .golangci.yml ./...` and commit what it changes.
-- CI's `check.yml` runs `make tidy` and `make format` and fails on any diff, then runs `make check`. Run
-  `make format`, `make tidy`, and `make check` before pushing, and commit whatever the first two changed.
+- CI's `ci.yml` runs `make check/format check/tidy check/vet check/lint`, which fail on any change `make format`
+  or `make tidy` would make, and runs the race tests, govulncheck, e2e, and script tests as parallel jobs. Run `make format`,
+  `make tidy`, and `make check` before pushing, and commit whatever the first two changed.
 - `go test ./...` skips `internal/e2e` because of its `e2e` build tag. Run `make test/e2e` when a change touches
   a flow those journeys cover (intake, job delivery, the gate, opening a pull request, redelivery).
 - Test doubles: `cmd/fakeagent` stands in for the claude and grok CLIs so the real harness process code runs;
