@@ -13,7 +13,10 @@
 // hours) and the gate after the gate timeout (default 30 minutes). The repo
 // config keys session_timeout and gate_timeout override those flags. A
 // timeout cancels that process group, fails the job, and comments on the
-// issue. The comment does not include the command's output.
+// issue. The comment does not include the command's output. A job's GitHub
+// token comes from the control node and is replaced with a new one when it
+// is within five minutes of expiry, so a job may run longer than one token
+// lives. The runner holds no other GitHub credential.
 package runner
 
 import (
@@ -502,20 +505,21 @@ func (r *Runner) recordedStage(ctx context.Context, job control.Job) stage {
 	return s
 }
 
-// token asks the control node for the job's GitHub token.
-func (r *Runner) token(ctx context.Context, subject string) (string, error) {
+// token asks the control node for a GitHub token for the job. The control
+// node mints a new one on every request while the job is in the stream.
+func (r *Runner) token(ctx context.Context, subject string) (control.Token, error) {
 	msg, err := r.nc.RequestWithContext(ctx, control.TokenSubjectPrefix+r.opts.Steward, []byte(subject))
 	if err != nil {
-		return "", fmt.Errorf("ask the control node for the job's token: %w", err)
+		return control.Token{}, fmt.Errorf("ask the control node for the job's token: %w", err)
 	}
 	var reply control.TokenReply
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return "", fmt.Errorf("decode the job's token: %w", err)
+		return control.Token{}, fmt.Errorf("decode the job's token: %w", err)
 	}
 	if reply.Error != "" || reply.Token.Token == "" {
-		return "", fmt.Errorf("the control node could not mint a token: %s", reply.Error)
+		return control.Token{}, fmt.Errorf("the control node could not mint a token: %s", reply.Error)
 	}
-	return reply.Token.Token, nil
+	return reply.Token, nil
 }
 
 // handle works one delivered job. It acknowledges the job only once the job
@@ -571,8 +575,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}()
 
 	r.report(job, StateClaimed, "")
-	token, err := r.token(workCtx, msg.Subject())
-	if err != nil {
+	tokens := &jobToken{fetch: func(ctx context.Context) (control.Token, error) { return r.token(ctx, msg.Subject()) }}
+	if _, err := tokens.get(workCtx); err != nil {
 		if errors.Is(context.Cause(workCtx), errJobStuck) {
 			return
 		}
@@ -583,8 +587,8 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		_ = msg.NakWithDelay(r.opts.RetryDelay)
 		return
 	}
-	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Token: token}}
-	out := r.work(workCtx, gh, job, token)
+	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Tokens: tokens.get}}
+	out := r.work(workCtx, gh, job, tokens.get)
 	if errors.Is(context.Cause(workCtx), errJobStuck) {
 		return
 	}
@@ -727,7 +731,7 @@ func finalFailed(err error) outcome {
 }
 
 // work takes the job as far as it goes on this attempt.
-func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, token string) outcome {
+func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, token func(context.Context) (string, error)) outcome {
 	if job.Title == "" {
 		return failed(errors.New("the job does not carry the issue's text; remove the ready label and add it again to make a new job"))
 	}
