@@ -52,7 +52,7 @@ sandbox. [FAILURE-MODES.md](../FAILURE-MODES.md#not-built) and [design.md](../de
 | Authenticated as | the App, with an RS256 JWT: `iss` App ID, `iat` now minus 1 minute, `exp` now plus 9 minutes |
 | Endpoint | `POST <github-api-url>/app/installations/<installation_id>/access_tokens` |
 | Repository scope | `repository_ids: [job.repo_id]`, the one repository |
-| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read` |
+| Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `administration: read`, `actions: read` |
 | Lifetime | one hour, set by GitHub. The first token of a delivery is requested at claim time; the runner asks for another whenever the one it holds is within five minutes of its `expires_at`. |
 | Who may ask | a runner on `schmeide.token.<steward>`, for a subject in `SCHMEIDE_JOBS` that is that steward's job, or a pool job when the steward registered with `--pool` (`Queue.tokenFor`) |
 | Where the runner keeps it | in memory only, in the job's `jobToken` (`internal/runner/token.go`); `forge.GitHub.Tokens` and every git command read it from there |
@@ -108,10 +108,26 @@ sequenceDiagram
   fails too, the runner logs `level=ERROR msg="could not comment on the issue"` with the refresh error and
   acknowledges the job; the job's state is still reported on `SCHMEIDE_STATUS`, so `schmeide status` shows it.
 
-The four permissions do not include `administration` or `actions`. Reading branch protection needs
-Administration read, and `forge.GitHub.Protection` treats the resulting 403 as no protection. Reading an Actions
-job log for a CI fix round needs Actions read; when that read fails, `logTail` puts "(schmeide could not read the
-log ...)" in the fix brief in place of the log.
+### What each permission is for
+
+| Permission | Used for |
+| --- | --- |
+| `contents: write` | fetch and push the job's branch, merge the pull request |
+| `pull_requests: write` | open, find, retarget, and merge pull requests |
+| `issues: write` | read the issue's comments and blockers, post the outcome comment |
+| `checks: read` | list check runs on the pull request's head |
+| `administration: read` | `GET /repos/{owner}/{repo}/branches/{branch}/protection` in `forge.GitHub.Protection`, before a factory merge |
+| `actions: read` | `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` in `forge.GitHub.JobLog`, for a CI fix round |
+
+GitHub's "Permissions required for GitHub Apps" REST page lists the protection read under Administration (read)
+and the job log download under Actions (read). The request is pinned by `TestTokenPerJob` (`internal/control`).
+
+GitHub cannot grant an installation token a permission the App installation was not granted. An App created
+before `administration: read` and `actions: read` were requested, or an installation whose owner has not accepted
+the App's new permissions, gets no token at all: every job is handed back as in JN-FAIL-015 until the App has
+both permissions. `forge.GitHub.Protection` still treats a 403 on the protection read as no protection, and when
+the job log read fails, `logTail` puts "(schmeide could not read the log ...)" in the fix brief in place of the
+log.
 
 ## Per-steward NATS tokens
 

@@ -141,6 +141,12 @@ readable by UID 65532 too.
 
 - **GitHub App webhook URL:** `https://<host>/webhook`, through the TLS proxy.
   Creating the App is in [QUICKSTART.md](QUICKSTART.md).
+- **GitHub App permissions:** Contents and Pull requests and Issues: read and
+  write. Checks, Administration, and Actions: read-only. The control node asks
+  for all of them on every job token, and GitHub refuses the token when the
+  App or its installation lacks one. After adding a permission to an existing
+  App, the installation's owner must accept it under the installation's
+  settings before jobs get tokens again.
 - **Runners:** `schmeide runner --steward <login> --nats-token <token>
   --nats-url tls://<host>:4222`. The certificate must be valid for `<host>`.
   Runners verify it against the system roots. For a private CA on Linux, point
