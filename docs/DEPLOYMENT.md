@@ -50,10 +50,25 @@ tokens would then cross the network in plain text.
 
 `SCHMEIDE_DATA_DIR` holds JetStream's files: the job queue, the per-issue
 records that dedupe webhooks, the stage records a restarted runner resumes
-from, and the status history `schmeide status` shows. Put it on persistent
+from, and the runner registrations and job states `schmeide status` shows. Put
+it on persistent
 block storage that outlives the machine or container. The image's user, UID
 65532, must be able to write it. A fresh named volume already is; for a host
 directory or disk, run `sudo chown 65532:65532 /data` on the host.
+
+How it grows:
+
+- The job stream keeps at most 100,000 jobs and then drops the oldest.
+- The status stream keeps one message per subject: the latest registration of
+  each steward and host, and the latest status of each job. It grows with the
+  number of jobs, not with the number of status changes or runner restarts.
+  A control node upgraded from a version without this limit drops the older
+  status messages on its first start.
+- The per-issue records keep one small entry per issue that was ever a job.
+- A stage record is deleted when its job reaches a final state.
+
+None of these expire by age, so the directory grows slowly with the number of
+issues the factory has worked.
 
 Losing it loses all of that. Queued jobs are gone, an issue that already had a
 job can get a second one, and a runner cannot resume a job in progress. The

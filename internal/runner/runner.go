@@ -161,6 +161,10 @@ type Runner struct {
 	nc       *nats.Conn
 	cons     jetstream.Consumer
 	poolCons jetstream.Consumer
+	// ackWait is the shortest AckWait of the consumers this runner pulls
+	// from. It sets the heartbeat interval, and differs from
+	// Options.AckWait when another runner created a consumer first.
+	ackWait  time.Duration
 	statuses jetstream.Stream
 	harness  harness.Harness
 	// attempts is restored from the status stream for the current job. Only
@@ -309,27 +313,21 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	// One durable consumer per steward, shared by all of the steward's
 	// runners, so each job goes to exactly one of them and no other steward's
 	// job is ever delivered here.
-	r.cons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
-		Durable:       control.ConsumerName(r.opts.Steward),
-		FilterSubject: control.JobFilter(r.opts.Steward),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       r.opts.AckWait,
-	})
-	if err != nil {
+	if r.cons, err = r.sharedConsumer(ctx, js, r.opts.Steward); err != nil {
 		return fmt.Errorf("subscribe to %s's jobs: %w", r.opts.Steward, err)
 	}
+	r.ackWait = r.cons.CachedInfo().Config.AckWait
 	if r.opts.Pool {
 		// One durable consumer for every pool runner, so each pool job is
 		// delivered to only one of them.
-		r.poolCons, err = js.CreateOrUpdateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
-			Durable:       control.ConsumerName(control.PoolName),
-			FilterSubject: control.JobFilter(control.PoolName),
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			AckWait:       r.opts.AckWait,
-		})
-		if err != nil {
+		if r.poolCons, err = r.sharedConsumer(ctx, js, control.PoolName); err != nil {
 			return fmt.Errorf("subscribe to pool jobs: %w", err)
 		}
+		r.ackWait = min(r.ackWait, r.poolCons.CachedInfo().Config.AckWait)
+	}
+	if r.ackWait != r.opts.AckWait {
+		r.log.Warn("a shared job consumer already has another ack wait; heartbeating at the consumer's",
+			"ack_wait", r.opts.AckWait, "consumer_ack_wait", r.ackWait)
 	}
 	// An older control node may not have started status tracking yet. Jobs can
 	// still run, but their attempt count cannot survive a runner restart.
@@ -344,7 +342,7 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 		r.stages = nil
 	}
 	host, _ := os.Hostname()
-	r.publish(RegisterSubjectPrefix+r.opts.Steward, Registration{
+	r.publish(control.RegisterSubject(r.opts.Steward, host), Registration{
 		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool, Version: r.opts.Version,
 	})
 	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -354,6 +352,24 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 	}
 	r.log.Info("runner registered", "steward", r.opts.Steward, "harnesses", strings.Join(names, ","), "pool", r.opts.Pool, "nats", r.opts.NATSURL)
 	return nil
+}
+
+// sharedConsumer opens the durable consumer over name's jobs, which every
+// runner for that steward (or every pool runner) shares. Its config is set
+// only when this runner creates it: a consumer that already exists is used
+// as it is, so a later runner with another --ack-wait does not change the
+// lease of jobs other runners are working.
+func (r *Runner) sharedConsumer(ctx context.Context, js jetstream.JetStream, name string) (jetstream.Consumer, error) {
+	cons, err := js.CreateConsumer(ctx, control.JobStream, jetstream.ConsumerConfig{
+		Durable:       control.ConsumerName(name),
+		FilterSubject: control.JobFilter(name),
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       r.opts.AckWait,
+	})
+	if errors.Is(err, jetstream.ErrConsumerExists) {
+		return js.Consumer(ctx, control.JobStream, control.ConsumerName(name))
+	}
+	return cons, err
 }
 
 // Close drops the connection to the control node.
@@ -527,7 +543,7 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		tick := time.NewTicker(r.opts.AckWait / 3)
+		tick := time.NewTicker(r.ackWait / 3)
 		defer tick.Stop()
 		stuck := time.NewTimer(r.opts.StuckAfter)
 		defer stuck.Stop()
