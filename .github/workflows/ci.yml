@@ -30,6 +30,16 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make check/format check/tidy check/vet check/lint
+
+  # Its own job so the ruleset's required build check is reported.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
       - run: make build
 
   # The whole suite under the race detector (about two minutes, so one job,

@@ -104,6 +104,6 @@ make help        # list all targets
 
 `make test/e2e` builds the binary and runs the end-to-end journeys in `internal/e2e`, which need the `e2e` build tag, so `go test ./...` skips them.
 
-CI (`.github/workflows/ci.yml`) runs on pull requests and on pushes to `main`: lint, the race suite with a coverage report that fails a pull request whose total drops more than one point below `main`'s, govulncheck, the end-to-end journeys, and `make test/scripts`, which runs every `scripts/*_test.sh`.
+CI (`.github/workflows/ci.yml`) runs on pull requests and on pushes to `main`: lint, `make build`, the race suite with a coverage report that fails a pull request whose total drops more than one point below `main`'s, govulncheck, the end-to-end journeys, and `make test/scripts`, which runs every `scripts/*_test.sh`.
 
 Seeded from [exokomodo/template-golang](https://github.com/exokomodo/template-golang).
