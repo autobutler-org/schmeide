@@ -214,6 +214,20 @@ whose value differs logs a warning and heartbeats at the consumer's lease. See
 [FAILURE-MODES.md](FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs) for how
 to change the lease.
 
+## Control node settings
+
+`schmeide control --help` lists every control node setting, and
+[control-node.md](architecture/control-node.md#settings) has the full table.
+Each setting is a flag, a `SCHMEIDE_<NAME>` environment variable, or a
+`name = value` line in the `--config` file. These change what the control node
+accepts at startup:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `--nats-addr` | `127.0.0.1:4222` | Beyond loopback, the control node refuses to start unless both `--nats-tls-cert-file` and `--nats-tls-key-file` are set, or `--allow-plaintext-nats` is `true`. |
+| `--nats-tls-cert-file`, `--nats-tls-key-file` | none | Both or neither. With both, NATS serves only TLS. |
+| `--allow-plaintext-nats` | `false` | `true` lets NATS listen beyond loopback without TLS. The control node then logs a warning at startup, because steward tokens and job tokens cross the network in plain text. Any value other than `true` or `false` is a usage error. |
+
 ## Errors
 
 Every rejected value produces an error that names the file and the key and

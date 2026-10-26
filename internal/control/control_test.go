@@ -289,18 +289,40 @@ func webhookHandler(q *Queue, policy WebhookPolicy, published *int) http.Handler
 }
 
 func TestOversizedWebhookPublishesNothing(t *testing.T) {
-	body := make([]byte, maxWebhookBytes+1)
-	q := startQueue(t)
-	var published int
-	h := webhookHandler(q, WebhookPolicy{}, &published)
-	if got := deliver(t, h, delivery{body: body, signature: sign(body)}); got != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", got, http.StatusBadRequest)
+	// Trailing whitespace keeps the payload valid JSON at any size.
+	pad := func(body []byte, size int) []byte {
+		return append(bytes.Clone(body), bytes.Repeat([]byte(" "), size-len(body))...)
 	}
-	if published != 0 {
-		t.Errorf("Publish calls = %d, want 0", published)
-	}
-	if got := jobs(t, q); len(got) != 0 {
-		t.Errorf("jobs = %+v, want none", got)
+	ready := payload(t, "issues_assigned_labeled.json")
+	for _, tt := range []struct {
+		name  string
+		event string
+		body  []byte
+		want  int
+	}{
+		{name: "issues event over its cap", event: "issues", body: pad(ready, maxIssuesWebhookBytes+1), want: http.StatusRequestEntityTooLarge},
+		{name: "other event over its cap", event: "push", body: pad([]byte("{}"), maxOtherWebhookBytes+1), want: http.StatusRequestEntityTooLarge},
+		{name: "issues event at another event's cap", event: "issues", body: pad(ready, maxOtherWebhookBytes+1), want: http.StatusAccepted},
+		{name: "issues event at its cap", event: "issues", body: pad(ready, maxIssuesWebhookBytes), want: http.StatusAccepted},
+		{name: "other event at its cap", event: "ping", body: pad([]byte("{}"), maxOtherWebhookBytes), want: http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := startQueue(t)
+			var published int
+			h := webhookHandler(q, WebhookPolicy{}, &published)
+			if got := deliver(t, h, delivery{event: tt.event, body: tt.body, signature: sign(tt.body)}); got != tt.want {
+				t.Errorf("status = %d, want %d", got, tt.want)
+			}
+			if tt.want != http.StatusRequestEntityTooLarge {
+				return
+			}
+			if published != 0 {
+				t.Errorf("Publish calls = %d, want 0", published)
+			}
+			if got := jobs(t, q); len(got) != 0 {
+				t.Errorf("jobs = %+v, want none", got)
+			}
+		})
 	}
 }
 
@@ -475,7 +497,10 @@ func TestRejectedDeliveryIDIsNotRemembered(t *testing.T) {
 	}
 }
 
-func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
+// runConfig is a Config that Run accepts, with a fresh GitHub App key and a
+// free loopback NATS port.
+func runConfig(t *testing.T) Config {
+	t.Helper()
 	dir := t.TempDir()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -494,32 +519,40 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 	if err := natsLn.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return Config{
+		HTTPAddr:                "127.0.0.1:0",
+		NATSAddr:                natsAddr,
+		RunnerTokens:            "octocat:t",
+		DataDir:                 filepath.Join(dir, "data"),
+		WebhookSecret:           testSecret,
+		ReadyLabel:              DefaultReadyLabel,
+		AllowedOrgs:             "autobutler-org",
+		GitHubAppID:             "12345",
+		GitHubAppPrivateKeyFile: keyPath,
+		GitHubAPIURL:            DefaultGitHubAPIURL,
+		WebhookRate:             "1000",
+		DeliveryTTL:             "10m",
+	}
+}
 
+// runUntilLogged runs the control node until its log contains every one of
+// want, then cancels it and checks that it shuts down cleanly.
+func runUntilLogged(t *testing.T, cfg Config, want ...string) string {
+	t.Helper()
 	var logs lockedBuffer
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
-	go func() {
-		done <- Run(ctx, Config{
-			HTTPAddr:                "127.0.0.1:0",
-			NATSAddr:                natsAddr,
-			RunnerTokens:            "octocat:t",
-			DataDir:                 filepath.Join(dir, "data"),
-			WebhookSecret:           testSecret,
-			ReadyLabel:              DefaultReadyLabel,
-			AllowedOrgs:             "autobutler-org",
-			GitHubAppID:             "12345",
-			GitHubAppPrivateKeyFile: keyPath,
-			GitHubAPIURL:            DefaultGitHubAPIURL,
-			WebhookRate:             "1000",
-			DeliveryTTL:             "10m",
-		}, slog.New(slog.NewTextHandler(&logs, nil)))
-	}()
+	go func() { done <- Run(ctx, cfg, slog.New(slog.NewTextHandler(&logs, nil))) }()
 
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		text := logs.String()
-		if strings.Contains(text, "plain HTTP") && strings.Contains(text, "TLS-terminating proxy") && strings.Contains(text, "http://") {
+		found := true
+		for _, w := range want {
+			found = found && strings.Contains(text, w)
+		}
+		if found {
 			break
 		}
 		select {
@@ -528,7 +561,7 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("startup log = %q, want plain HTTP behind a TLS-terminating proxy", logs.String())
+			t.Fatalf("startup log = %q, want %q", logs.String(), want)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -541,6 +574,32 @@ func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
+	return logs.String()
+}
+
+func TestRunLogsPlainHTTPAndShutsDown(t *testing.T) {
+	runUntilLogged(t, runConfig(t), "plain HTTP", "TLS-terminating proxy", "http://")
+}
+
+func TestRunRefusesPlaintextNATSBeyondLoopback(t *testing.T) {
+	cfg := runConfig(t)
+	_, port, _ := net.SplitHostPort(cfg.NATSAddr)
+	cfg.NATSAddr = net.JoinHostPort("0.0.0.0", port)
+	err := Run(t.Context(), cfg, slog.New(slog.DiscardHandler))
+	if !errors.Is(err, ErrPlaintextNATS) {
+		t.Fatalf("Run = %v, want ErrPlaintextNATS", err)
+	}
+	if _, statErr := os.Stat(cfg.DataDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Run created the data directory before refusing: %v", statErr)
+	}
+}
+
+func TestRunServesPlaintextNATSWhenAllowed(t *testing.T) {
+	cfg := runConfig(t)
+	_, port, _ := net.SplitHostPort(cfg.NATSAddr)
+	cfg.NATSAddr = net.JoinHostPort("0.0.0.0", port)
+	cfg.AllowPlaintextNATS = "true"
+	runUntilLogged(t, cfg, "NATS listens beyond loopback without TLS", "control node started")
 }
 
 // lockedBuffer is a bytes.Buffer safe for one writer and one reader.
@@ -1198,6 +1257,12 @@ func TestRunnerCannotPublishOutsideItsAllowList(t *testing.T) {
 		"$JS.API.STREAM.PURGE." + JobStream,
 		"$KV." + issueBucket + ".7.1",
 		InboxPrefix("octocat") + ".reply",
+		StatusQuerySubjectPrefix + "octocat",
+		"$JS.API.STREAM.MSG.GET." + StatusStream,
+		"$JS.API.DIRECT.GET." + StatusStream,
+		"$JS.API.DIRECT.GET." + StatusStream + "." + StatusSubjectPrefix + "octocat.7.1",
+		"$JS.API.DIRECT.GET." + StatusStream + "." + RegisterSubjectPrefix + "octocat",
+		"$JS.API.CONSUMER.CREATE." + StatusStream,
 	} {
 		if err := hubot.Publish(subject, []byte("{}")); err != nil {
 			t.Fatal(err)
@@ -1273,5 +1338,134 @@ func TestUnsignedRequestsDoNotUseTheRateBudget(t *testing.T) {
 	}
 	if got := deliver(t, h, delivery{body: ready, signature: sign(ready), id: "deliv-1"}); got != http.StatusAccepted {
 		t.Errorf("signed status after an unsigned flood = %d, want %d", got, http.StatusAccepted)
+	}
+}
+
+func TestStageBucketBoundsWhatAStewardStores(t *testing.T) {
+	q := startQueue(t)
+	octocat, _ := connectAs(t, q, "octocat", "octocat-token")
+	js, err := jetstream.New(octocat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	stages, err := js.KeyValue(ctx, StageBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := stages.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.History() != 1 {
+		t.Errorf("stage history = %d, want 1", status.History())
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", bytes.Repeat([]byte("x"), maxStageValueBytes)); err != nil {
+		t.Fatalf("a stage record at the cap was refused: %v", err)
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", bytes.Repeat([]byte("x"), maxStageValueBytes+1)); err == nil {
+		t.Error("a stage record over the cap was stored")
+	}
+	if _, err := stages.Put(ctx, "octocat.7.1", []byte(`{"stage":"pr_opened"}`)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := q.js.Stream(ctx, "KV_"+StageBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs := info.CachedInfo().State.Msgs; msgs != 1 {
+		t.Errorf("stage bucket holds %d messages for one key, want 1", msgs)
+	}
+}
+
+func TestStewardConnectionsAreLimited(t *testing.T) {
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	q, err := StartQueue(t.Context(), QueueOptions{Addr: addr, DataDir: t.TempDir(), RunnerTokens: testRunnerTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(q.Close)
+
+	connect := func() (*nats.Conn, error) {
+		return nats.Connect("nats://"+addr, nats.UserInfo("octocat", "octocat-token"), nats.NoReconnect())
+	}
+	limit := maxConnections(len(testRunnerTokens))
+	// The control node's own in-process connection is one of them.
+	for i := 1; i < limit; i++ {
+		nc, err := connect()
+		if err != nil {
+			t.Fatalf("connection %d of %d refused: %v", i+1, limit, err)
+		}
+		t.Cleanup(nc.Close)
+	}
+	if nc, err := connect(); err == nil {
+		nc.Close()
+		t.Errorf("connection %d was accepted, want the limit of %d to hold", limit+1, limit)
+	}
+}
+
+func TestStewardPayloadIsLimited(t *testing.T) {
+	q := startQueue(t)
+	octocat, _ := connectAs(t, q, "octocat", "octocat-token")
+	if got := octocat.MaxPayload(); got != maxPayloadBytes {
+		t.Errorf("max payload = %d, want %d", got, maxPayloadBytes)
+	}
+	big := bytes.Repeat([]byte("x"), maxPayloadBytes+1)
+	if err := octocat.Publish(StatusSubjectPrefix+"octocat.7.1", big); !errors.Is(err, nats.ErrMaxPayload) {
+		t.Errorf("publish over the cap = %v, want ErrMaxPayload", err)
+	}
+	// The largest job an issue can make still fits: GitHub caps an issue
+	// body at 65,536 characters, and json.Marshal escapes each '<' as six bytes.
+	job := Job{
+		Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1,
+		Title: strings.Repeat("<", 256), Body: strings.Repeat("<", 65536),
+	}
+	if _, err := q.Publish(t.Context(), job); err != nil {
+		t.Errorf("Publish of the largest job = %v", err)
+	}
+}
+
+func TestRunnerReadsOnlyItsOwnAndPoolStatuses(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+	own := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot"}
+	theirs := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "monalisa", Pool: true}
+	runner.report(own, StateRetrying, "attempt 1 of 3 failed")
+	runner.report(theirs, StateRetrying, "secret gate output")
+	runner.report(pooled, StateRetrying, "attempt 1 of 3 failed")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(pooled.Subject()); return ok })
+
+	hubot, _ := connectAs(t, q, "hubot", "hubot-token")
+	js, err := jetstream.New(hubot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	// What a runner does to restore a job's attempt count.
+	statuses, err := js.Stream(ctx, StatusStream)
+	if err != nil {
+		t.Fatalf("hubot cannot open the status stream: %v", err)
+	}
+	statusSubject := func(job Job) string {
+		return StatusSubjectPrefix + strings.TrimPrefix(job.Subject(), jobSubjectPrefix)
+	}
+	for _, job := range []Job{own, pooled} {
+		if _, err := statuses.GetLastMsgForSubject(ctx, statusSubject(job)); err != nil {
+			t.Errorf("hubot cannot read the status of %s: %v", job.Subject(), err)
+		}
+	}
+	short, cancelShort := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancelShort()
+	if msg, err := statuses.GetLastMsgForSubject(short, statusSubject(theirs)); err == nil {
+		t.Errorf("hubot read octocat's status: %s", msg.Data)
 	}
 }

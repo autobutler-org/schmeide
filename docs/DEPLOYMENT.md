@@ -43,8 +43,27 @@ certificate is served without a restart. If a read fails, for example while a
 renewal is half-written, the last pair that loaded is served. A bad pair at
 startup stops the control node.
 
-Without TLS, the control node warns when NATS listens beyond loopback. Runner
-tokens would then cross the network in plain text.
+Without TLS, the control node refuses to start when NATS listens beyond
+loopback, because steward tokens and every job's GitHub token would then cross
+the network in plain text. The error names `--nats-tls-cert-file` and
+`--nats-tls-key-file`. On a network you trust, such as a private container
+network with no other tenants, set `SCHMEIDE_ALLOW_PLAINTEXT_NATS=true`
+(`--allow-plaintext-nats true`): the control node then starts and logs a
+warning instead.
+
+## Limits
+
+The control node bounds what one request or one steward token can cost it.
+None of these is configurable.
+
+- Webhook bodies: 1 MiB for an `issues` event and 64 KiB for any other event,
+  chosen by the `X-GitHub-Event` header before the body is read. A larger body
+  answers 413. Subscribe the App to issues events only.
+- NATS messages: 512 KiB each, for every connection.
+- NATS connections: 16 per steward in `SCHMEIDE_RUNNER_TOKENS`, plus one for
+  the control node itself, shared by all stewards. A runner holds one
+  connection; `schmeide status` and `schmeide doctor` hold one briefly.
+- Stage records: one revision per job, at most 4 KiB each.
 
 ## Persistent storage
 
@@ -106,7 +125,7 @@ For a container:
 | Variable | Value |
 |---|---|
 | `SCHMEIDE_NATS_ADDR` | `0.0.0.0:4222`. The default, `127.0.0.1:4222`, is unreachable from outside the container. |
-| `SCHMEIDE_NATS_TLS_CERT_FILE`, `SCHMEIDE_NATS_TLS_KEY_FILE` | The NATS certificate and key, as above. |
+| `SCHMEIDE_NATS_TLS_CERT_FILE`, `SCHMEIDE_NATS_TLS_KEY_FILE` | The NATS certificate and key, as above. Without them, `0.0.0.0:4222` is refused at startup unless `SCHMEIDE_ALLOW_PLAINTEXT_NATS=true`. |
 | `SCHMEIDE_DATA_DIR` | The image sets `/data`. Mount persistent storage there. |
 
 Optional:

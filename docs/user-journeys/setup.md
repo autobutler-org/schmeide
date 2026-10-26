@@ -286,6 +286,7 @@ no `.schmeide/config.toml` and no `.schmeide/control.conf`.
 3. Run it while another process holds port 4222.
 4. Run it while another process holds port 8080.
 5. Run it with `--webhook-rate 0` or `--delivery-ttl soon`.
+6. Run it with `--nats-addr 0.0.0.0:4222` and no TLS files.
 
 **Expected result:**
 
@@ -301,11 +302,15 @@ no `.schmeide/config.toml` and no `.schmeide/control.conf`.
   per minute; pass --webhook-rate or set SCHMEIDE_WEBHOOK_RATE", or "delivery
   ttl "soon" is not a positive duration (for example 10m); pass --delivery-ttl
   or set SCHMEIDE_DELIVERY_TTL".
+- Step 6: exit code 1, the plain-text NATS refusal that names
+  --nats-tls-cert-file, --nats-tls-key-file, and --allow-plaintext-nats
+  (JN-OPS-005).
 
 **Notes:**
 
-- Covered by `TestParseControlNeedsBothTLSFiles` and
-  `TestNATSTLSConfigRejectsBadFiles`. Steps 3 to 5 have no automated test of
+- Covered by `TestParseControlNeedsBothTLSFiles`,
+  `TestNATSTLSConfigRejectsBadFiles`, and (step 6)
+  `TestRunRefusesPlaintextNATSBeyondLoopback`. Steps 3 to 5 have no automated test of
   the message.
 
 ---
@@ -574,8 +579,9 @@ in.
 
 - The runner creates `schmeide-work/` (the default `--work-dir`) for clones
   and worktrees.
-- The registration does not expire. A stopped runner stays listed, and its
-  steward keeps their jobs (JN-POOL-003).
+- The runner publishes its registration again every minute. Three minutes
+  after a runner stops, it is no longer listed, and its steward's next job goes
+  to the pool (JN-POOL-009).
 - Covered by `TestRunnerOnlyTakesItsStewardsJobs` and
   `TestTrackerRecordsRegisteredRunners`.
 

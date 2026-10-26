@@ -86,9 +86,7 @@ with [queued](#queued), which is a finished job in a merge queue.
 
 ## pool
 
-The fallback queue for a job whose assignee has never registered a runner.
-Registrations are kept in the control node's data directory and never expire,
-so a steward whose runner is offline still gets jobs on their own subject. A runner
+The fallback queue for a job whose assignee has no live registration. A runner
 started with `--pool` (off by default) also takes pool jobs. Pool runners work
 one job at a time and take their own steward's job first.
 
@@ -102,6 +100,15 @@ branch's merge queue. It is not merged yet. Status does not keep listing it.
 The label that marks an assigned issue as ready for the factory. It is
 `schmeide:ready` unless `--ready-label` says otherwise. An open, assigned issue
 that gets this label, or that is assigned while carrying it, becomes a job.
+
+## registration
+
+What a runner publishes on `schmeide.runners.<steward>`: its steward, host,
+harnesses, pool flag, and version. A runner publishes it at startup and every
+minute after. A registration is live for three minutes after the control node
+stored it; a steward with no live registration has no registered runner, so
+their next job goes to the pool, and `schmeide status` stops listing that
+runner.
 
 ## runner
 

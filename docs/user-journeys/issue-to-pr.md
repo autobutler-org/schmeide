@@ -204,7 +204,9 @@ with a pull request (any state other than `failed` or `gate_failed`).
 **Notes:**
 
 - A non-POST request to `/webhook` answers 405 "webhook deliveries must be
-  POSTed". A body over 25 MiB answers 400 and publishes nothing.
+  POSTed". An `issues` body over 1 MiB, or any other event's body over
+  64 KiB, answers 413 "a <event> payload may be at most <n> bytes", logs
+  `msg="webhook rejected"`, and publishes nothing.
 - The signature is checked before the rate limit and the replay check. A
   request with a bad or missing signature answers 401 even when it reuses a
   delivery id the control node already handled, and it does not count toward

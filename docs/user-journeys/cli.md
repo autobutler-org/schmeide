@@ -224,10 +224,13 @@ progress.
 - Jobs whose latest state is final (`pr_opened`, `gate_failed`, `failed`,
   `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
 - A job no runner has claimed yet is listed as `pending` (JN-CLI-016).
-- Status is team-wide and read-only: any steward sees every runner and every
-  steward's jobs, pool jobs included, and running it writes nothing.
-- A stopped runner stays listed.
-- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
+- A steward sees only their own runners and their own jobs. A steward with a
+  live `--pool` runner also sees pool jobs. Other stewards' runners, hosts,
+  versions, and job details are never shown. Running it writes nothing.
+- A runner that has not refreshed its registration for three minutes is not
+  listed (JN-POOL-009).
+- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
+  `TestStatusShowsOnlyTheAskingStewardsRunnersAndJobs`, and
   `TestStatusHidesEveryFinishedRunnerState`.
 
 ---
@@ -289,6 +292,7 @@ progress.
 
 1. Run `schmeide status` with no steward.
 2. Run `schmeide status --steward octocat --nats-url nats://127.0.0.1:1`.
+3. Run it against a control node from before status queries.
 
 **Expected result:**
 
@@ -298,10 +302,13 @@ progress.
   at nats://127.0.0.1:1 as octocat: ..." and "Check that `schmeide control`
   is running, that --nats-url points at its --nats-addr, and that
   --nats-token is the token its --runner-tokens lists for octocat.".
+- Step 3: exit code 1, "schmeide status: the control node does not answer
+  status queries; upgrade `schmeide control` to this version".
 
 **Notes:**
 
-- Covered by `TestRun`.
+- Steps 1 and 2 are covered by `TestRun`; step 3 by `internal/control`
+  `TestStatusAsksTheControlNode`.
 
 ---
 
@@ -447,15 +454,18 @@ octocat and labeled `schmeide:ready`.
   schmeide.jobs.octocat.42.9   pending  3m10s
   ```
 
-  A job for a steward with no registered runner waits on the pool subject,
-  `schmeide.jobs._pool.<repo id>.<issue>`, and is listed the same way.
+  A job for a steward with no live registration waits on the pool subject,
+  `schmeide.jobs._pool.<repo id>.<issue>`, and is listed the same way for a
+  steward with a live `--pool` runner.
 - Step 2: the claimed job shows `claimed`, and FOR restarts from the claim.
   The others stay `pending` with their wait unchanged.
 - Step 3: the pending jobs are still listed with the same wait, since
   `SCHMEIDE_STATUS` is kept in `--data-dir`.
 - `--json` lists them in `jobs` with `"state": "pending"` and `since`.
-- Status is team-wide and read-only: hubot running `schmeide status --steward
-  hubot` sees octocat's pending jobs and pool jobs too, and changes nothing.
+- Status is scoped to the asking steward (JN-CLI-007): hubot running
+  `schmeide status --steward hubot` does not see octocat's pending jobs, and
+  sees pending pool jobs only with a live `--pool` runner. Running it changes
+  nothing.
 
 **Notes:**
 

@@ -62,7 +62,7 @@ export SCHMEIDE_ALLOWED_ORGS=your-org
 schmeide control
 ```
 
-`--runner-tokens` is `<github login>:<token>`, one entry per steward. The listener serves `POST /webhook` on `--http-addr` (default `:8080`). Point your TLS proxy at it. The runner connects to NATS on `--nats-addr` (default `127.0.0.1:4222`). If the runner is on another machine, set `--nats-addr 0.0.0.0:4222` with `--nats-tls-cert-file` and `--nats-tls-key-file` (or `SCHMEIDE_NATS_TLS_CERT_FILE` and `SCHMEIDE_NATS_TLS_KEY_FILE`), and give the runner `--nats-url tls://<host>:4222`.
+`--runner-tokens` is `<github login>:<token>`, one entry per steward. The listener serves `POST /webhook` on `--http-addr` (default `:8080`). Point your TLS proxy at it. The runner connects to NATS on `--nats-addr` (default `127.0.0.1:4222`). If the runner is on another machine, set `--nats-addr 0.0.0.0:4222` with `--nats-tls-cert-file` and `--nats-tls-key-file` (or `SCHMEIDE_NATS_TLS_CERT_FILE` and `SCHMEIDE_NATS_TLS_KEY_FILE`), and give the runner `--nats-url tls://<host>:4222`. Without the TLS files, control refuses to listen beyond loopback unless you pass `--allow-plaintext-nats true`.
 
 ## 4. Check, then start the runner
 

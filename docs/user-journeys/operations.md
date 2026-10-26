@@ -43,7 +43,8 @@ release workflow finished.
 `/etc/schmeide/control.env` holding `SCHMEIDE_WEBHOOK_SECRET`,
 `SCHMEIDE_GITHUB_APP_ID`, `SCHMEIDE_RUNNER_TOKENS`, and
 `SCHMEIDE_ALLOWED_ORGS` (mode 0600). A TLS proxy forwards 443 to
-`127.0.0.1:8080`.
+`127.0.0.1:8080`. The host's certificate and key for NATS are at
+`/etc/schmeide/tls/fullchain.pem` and `privkey.pem`, readable by UID 65532.
 
 **Steps:**
 
@@ -57,6 +58,9 @@ release workflow finished.
      -v /data:/data \
      -v /etc/schmeide/github-app.pem:/run/secrets/github-app.pem:ro \
      -e SCHMEIDE_NATS_ADDR=0.0.0.0:4222 \
+     -e SCHMEIDE_NATS_TLS_CERT_FILE=/run/tls/fullchain.pem \
+     -e SCHMEIDE_NATS_TLS_KEY_FILE=/run/tls/privkey.pem \
+     -v /etc/schmeide/tls:/run/tls:ro \
      -e SCHMEIDE_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app.pem \
      --env-file /etc/schmeide/control.env \
      ghcr.io/autobutler-org/schmeide:0.0.1
@@ -67,7 +71,10 @@ release workflow finished.
 **Expected result:**
 
 - The log shows `msg="control node started"` with
-  `webhook=http://[::]:8080/webhook` and `nats=0.0.0.0:4222`.
+  `webhook=http://[::]:8080/webhook`, `nats=0.0.0.0:4222`, and
+  `nats_tls=true`.
+- Without the two TLS variables the container exits at once with the
+  plain-text NATS refusal (JN-OPS-005).
 - Without TLS settings it also shows the plain-text warning (JN-OPS-005). Add
   TLS (JN-OPS-003) before runners connect from other machines.
 - JetStream files appear under `/data`.
@@ -140,7 +147,7 @@ certificate files in place.
 
 ---
 
-### JN-OPS-005: Warning when NATS listens beyond loopback without TLS
+### JN-OPS-005: Control node refuses plain-text NATS beyond loopback
 
 **Preconditions:** None.
 
@@ -148,17 +155,33 @@ certificate files in place.
 
 1. Start the control node with `--nats-addr 0.0.0.0:4222` (or `:4222`, or a
    LAN address) and no TLS files.
+2. Start it again with the same address and `--allow-plaintext-nats true`
+   (or `SCHMEIDE_ALLOW_PLAINTEXT_NATS=true`).
+3. Start it with `--allow-plaintext-nats maybe`.
 
 **Expected result:**
 
-- The control node starts and logs `level=WARN msg="NATS listens beyond
-  loopback without TLS; runner tokens cross the network in plain text. Set
+- Step 1: exit code 1, "schmeide control: --nats-addr 0.0.0.0:4222: NATS
+  would listen beyond loopback without TLS, so steward tokens and every job's
+  GitHub token would cross the network in plain text; set
+  --nats-tls-cert-file and --nats-tls-key-file, listen on loopback
+  (127.0.0.1:4222), or pass --allow-plaintext-nats true to accept the risk".
+  Nothing is written to the data directory.
+- Step 2: the control node starts and logs `level=WARN msg="NATS listens
+  beyond loopback without TLS because --allow-plaintext-nats is set; steward
+  tokens and job tokens cross the network in plain text. Set
   --nats-tls-cert-file and --nats-tls-key-file" nats=0.0.0.0:4222`.
-- With `127.0.0.1`, `::1`, or `localhost`, there is no warning.
+- Step 3: exit code 2, "allow plaintext nats "maybe" is not true or false;
+  pass --allow-plaintext-nats or set SCHMEIDE_ALLOW_PLAINTEXT_NATS".
+- With `127.0.0.1`, `::1`, or `localhost`, or with both TLS files set, the
+  control node starts without the flag and without a warning.
 
 **Notes:**
 
-- Covered by `TestListensBeyondLoopback`.
+- Covered by `internal/control` `TestCheckNATSTransport`,
+  `TestRunRefusesPlaintextNATSBeyondLoopback`,
+  `TestRunServesPlaintextNATSWhenAllowed`, `TestParseControlAllowPlaintextNATS`,
+  and `TestListensBeyondLoopback`.
 
 ---
 

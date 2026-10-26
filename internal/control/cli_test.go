@@ -51,6 +51,7 @@ func TestParseControl(t *testing.T) {
 		GitHubAPIURL:            DefaultGitHubAPIURL,
 		WebhookRate:             "80",  // env beats the file
 		DeliveryTTL:             "15m", // flag beats the file
+		AllowPlaintextNATS:      "false",
 	}
 	if got != want {
 		t.Errorf("config = %+v, want %+v", got, want)

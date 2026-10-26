@@ -137,12 +137,14 @@ not change one that already exists.
 
 ### Routing
 
-When the assignee has ever registered a runner, the job stays on that
-steward's subject, even when that runner is offline: registrations are kept in
-the control node's data directory and never expire. Several runners for one steward share one queue consumer, so each of
-that steward's jobs goes to one of them.
+When the assignee has a live registration, the job stays on that steward's
+subject. A registration counts for `RegistrationTTL` (three minutes) after it
+was stored, and a runner is expected to publish it again every
+`RegistrationInterval` (one minute), so a runner that stopped falls out of
+routing within three minutes. Several runners for one steward share one queue
+consumer, so each of that steward's jobs goes to one of them.
 
-When the assignee has never registered a runner, the control node publishes
+When the assignee has no live registration, the control node publishes
 the job on a pool subject. `--pool` defaults off. A runner that sets it registers
 as a pool runner. Pool runners share one consumer, work one job at a time,
 and take their own job first. The token, gate, review, and merge path are the

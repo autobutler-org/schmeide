@@ -226,7 +226,7 @@ sequenceDiagram
 
     GH->>Q: Publish(job for steward a)
     Q->>T: hasRunner(a)
-    T-->>Q: false (no registration from a ever)
+    T-->>Q: false (no registration from a within RegistrationTTL)
     Q->>JS: publish schmeide.jobs._pool.{repo_id}.{issue} with pool true
     loop runner.next
         PR->>JS: Next() on runner-b, timeout

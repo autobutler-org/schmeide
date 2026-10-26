@@ -266,21 +266,32 @@ func runStatus(t *testing.T, url string, extra ...string) string {
 	return stdout.String()
 }
 
-func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
+// startStatus starts a queue that `schmeide status` can reach, with its
+// tracker and status service running.
+func startStatus(t *testing.T) (*Queue, *Tracker, string) {
+	t.Helper()
 	q, url := startQueueOverTCP(t)
 	tracker := startTracker(t, q)
+	if err := q.ServeStatus(slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	return q, tracker, url
+}
+
+func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
+	q, tracker, url := startStatus(t)
 	runner := startFakeRunner(t, q)
 
-	octocat := Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "octo-laptop"}
-	runner.publish(RegisterSubjectPrefix+"octocat", octocat)
-	queued := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
-	done := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", InstallationID: 1, Title: "t"}
+	hubot := Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "hubot-laptop"}
+	runner.publish(RegisterSubjectPrefix+"hubot", hubot)
+	queued := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot", InstallationID: 1, Title: "t"}
+	done := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "hubot", InstallationID: 1, Title: "t"}
 	runner.report(queued, StateClaimed, "")
 	runner.report(done, StatePROpened, "https://github.com/o/r/pull/3")
-	eventually(t, func() bool { _, ok := tracker.JobStatus(done.Subject()); return ok })
+	eventually(t, func() bool { _, ok := tracker.JobStatus(done.Subject()); return ok && len(tracker.Runners()) == 1 })
 
 	text := runStatus(t, url)
-	for _, want := range []string{"octocat", "octo-laptop", "claude", queued.Subject(), string(StateClaimed)} {
+	for _, want := range []string{"hubot", "hubot-laptop", "claude", queued.Subject(), string(StateClaimed)} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text output %q does not contain %q", text, want)
 		}
@@ -295,7 +306,7 @@ func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
 	}
 	got.Jobs = withoutSince(t, got.Jobs)
 	want := Snapshot{
-		Runners: []Registration{octocat},
+		Runners: []Registration{hubot},
 		Jobs:    []JobState{{Subject: queued.Subject(), State: StateClaimed}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -303,9 +314,71 @@ func TestStatusListsRegisteredRunnerAndQueuedJob(t *testing.T) {
 	}
 }
 
+func TestStatusShowsOnlyTheAskingStewardsRunnersAndJobs(t *testing.T) {
+	q, tracker, url := startStatus(t)
+	runner := startFakeRunner(t, q)
+
+	hubot := Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "hubot-laptop"}
+	octocat := Registration{Steward: "octocat", Harnesses: []string{"grok"}, Host: "octo-secret-host", Version: "v9"}
+	runner.publish(RegisterSubjectPrefix+"hubot", hubot)
+	runner.publish(RegisterSubjectPrefix+"octocat", octocat)
+	own := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot"}
+	theirs := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat"}
+	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 3, Steward: "monalisa", Pool: true}
+	runner.report(own, StateWorking, "claude")
+	runner.report(theirs, StateRetrying, "attempt 1 of 3 failed: make check: secret gate output")
+	runner.report(pooled, StateWorking, "grok")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(pooled.Subject()); return ok && len(tracker.Runners()) == 2 })
+
+	var got Snapshot
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := Snapshot{
+		Runners: []Registration{hubot},
+		Jobs:    []JobState{{Subject: own.Subject(), State: StateWorking, Detail: "claude"}},
+	}
+	got.Jobs = withoutSince(t, got.Jobs)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--json = %+v, want only hubot's own runner and job: %+v", got, want)
+	}
+	if text := runStatus(t, url); strings.Contains(text, "octo") || strings.Contains(text, "secret") {
+		t.Errorf("text output %q shows another steward's runner or job", text)
+	}
+
+	// A pool steward also sees pool jobs, which it may take.
+	hubotPool := hubot
+	hubotPool.Pool = true
+	runner.publish(RegisterSubjectPrefix+"hubot", hubotPool)
+	eventually(t, func() bool { return tracker.poolRunner("hubot") })
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	want = Snapshot{
+		Runners: []Registration{hubotPool},
+		Jobs: []JobState{
+			{Subject: pooled.Subject(), State: StateWorking, Detail: "grok"},
+			{Subject: own.Subject(), State: StateWorking, Detail: "claude"},
+		},
+	}
+	got.Jobs = withoutSince(t, got.Jobs)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--json for a pool steward = %+v, want %+v", got, want)
+	}
+}
+
+func TestStatusAsksTheControlNode(t *testing.T) {
+	// No status service: an older control node, or none at all.
+	_, url := startQueueOverTCP(t)
+	var stdout, stderr bytes.Buffer
+	code := StatusMain([]string{"--steward", "hubot", "--nats-token", "hubot-token", "--nats-url", url}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "upgrade") {
+		t.Errorf("exit code = %d, stderr = %q; want 1 and advice to upgrade the control node", code, stderr.String())
+	}
+}
+
 func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
-	q, url := startQueueOverTCP(t)
-	startTracker(t, q)
+	_, _, url := startStatus(t)
 	if got := runStatus(t, url); !strings.Contains(got, "No queued or running jobs.") {
 		t.Errorf("output = %q, want it to say there are no jobs", got)
 	}
@@ -315,12 +388,11 @@ func TestStatusWithAnEmptyStreamSaysThereAreNoJobs(t *testing.T) {
 }
 
 func TestStatusHidesEveryFinishedRunnerState(t *testing.T) {
-	q, url := startQueueOverTCP(t)
-	tracker := startTracker(t, q)
+	q, tracker, url := startStatus(t)
 	runner := startFakeRunner(t, q)
 
 	job := func(issue int) Job {
-		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "octocat", InstallationID: 1, Title: "t"}
+		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: "hubot", InstallationID: 1, Title: "t"}
 	}
 	states := []State{StateWorking, StateReviewing, StateMerged, StateMergeFailed, StateReviewFailed, StateQueued}
 	for i, state := range states {
@@ -358,16 +430,15 @@ func statusJobs(t *testing.T, url string) map[string]JobState {
 }
 
 func TestStatusListsAJobNoRunnerHasClaimed(t *testing.T) {
-	q, url := startQueueOverTCP(t)
-	tracker := startTracker(t, q)
+	q, tracker, url := startStatus(t)
 	runner := startFakeRunner(t, q)
-	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"claude"}, Host: "laptop"})
-	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+	runner.publish(RegisterSubjectPrefix+"hubot", Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "laptop", Pool: true})
+	eventually(t, func() bool { return tracker.hasRunner("hubot") })
 
-	// octocat has a runner, so its job waits on the steward subject; carol
-	// has none, so her job waits on the pool subject. runStatus reads as
-	// hubot: status is team-wide, so both show though neither is hubot's.
-	waiting := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	// hubot has a pool runner, so its job waits on the steward subject;
+	// carol has none, so her job waits on the pool subject. runStatus reads
+	// as hubot, who sees its own job and, as a pool steward, pool jobs.
+	waiting := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot", InstallationID: 1, Title: "t"}
 	pooled := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "carol", InstallationID: 1, Title: "t", Pool: true}
 	before := time.Now()
 	for _, job := range []Job{waiting, pooled} {
@@ -420,13 +491,9 @@ func TestPendingJobSurvivesARestart(t *testing.T) {
 	}
 
 	q = restartQueue(t, q, dir)
-	startTracker(t, q)
-	snap, err := ReadStatus(t.Context(), q.js)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snap.Jobs) != 1 || snap.Jobs[0].Subject != job.Subject() || snap.Jobs[0].State != StatePending {
-		t.Errorf("jobs after restart = %+v, want %s pending", snap.Jobs, job.Subject())
+	tracker := startTracker(t, q)
+	if got, ok := tracker.JobStatus(job.Subject()); !ok || got.State != StatePending {
+		t.Errorf("status after restart = %+v, %v; want %s pending", got, ok, job.Subject())
 	}
 }
 
@@ -464,7 +531,7 @@ func withoutSince(t *testing.T, jobs []JobState) []JobState {
 
 func TestFailedPublishLeavesNoPendingJob(t *testing.T) {
 	q := startQueue(t)
-	startTracker(t, q)
+	tracker := startTracker(t, q)
 	// Without the job stream the job cannot be stored.
 	if err := q.js.DeleteStream(t.Context(), JobStream); err != nil {
 		t.Fatal(err)
@@ -473,12 +540,10 @@ func TestFailedPublishLeavesNoPendingJob(t *testing.T) {
 	if _, err := q.Publish(t.Context(), job); err == nil {
 		t.Fatal("Publish without a job stream succeeded")
 	}
-	snap, err := ReadStatus(t.Context(), q.js)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snap.Jobs) != 0 {
-		t.Errorf("jobs = %+v, want none for a job that was never stored", snap.Jobs)
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if len(tracker.jobs) != 0 {
+		t.Errorf("job statuses = %+v, want none for a job that was never stored", tracker.jobs)
 	}
 }
 
@@ -538,9 +603,8 @@ func TestStatusStreamKeepsOnlyTheLatestMessagePerSubject(t *testing.T) {
 	if got, ok := tracker.JobStatus(job.Subject()); !ok || got != wantStatus {
 		t.Errorf("status after restart = %+v, %v; want %+v", got, ok, wantStatus)
 	}
-	snap, err := ReadStatus(t.Context(), q.js)
-	if err != nil || !reflect.DeepEqual(snap.Runners, wantRunners) {
-		t.Errorf("ReadStatus runners = %+v, %v; want %+v", snap.Runners, err, wantRunners)
+	if snap := tracker.Snapshot("alice"); !reflect.DeepEqual(snap.Runners, wantRunners) {
+		t.Errorf("Snapshot runners = %+v, want %+v", snap.Runners, wantRunners)
 	}
 }
 
@@ -572,5 +636,85 @@ func TestTrackLimitsAStatusStreamCreatedWithoutLimits(t *testing.T) {
 	}
 	if got, ok := tracker.JobStatus(job.Subject()); !ok || got.State != StatePROpened {
 		t.Errorf("status = %+v, %v; want the latest, pr_opened", got, ok)
+	}
+}
+
+// advance moves the tracker's clock d past the real time.
+func advance(tracker *Tracker, d time.Duration) {
+	tracker.setClock(func() time.Time { return time.Now().Add(d) })
+}
+
+func TestRegistrationExpiresWithoutRefresh(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop", Pool: true}
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+
+	advance(tracker, RegistrationTTL-time.Second)
+	if !tracker.hasRunner("alice") || !tracker.poolRunner("alice") || len(tracker.Runners()) != 1 {
+		t.Fatalf("registration expired before its TTL: runners = %+v", tracker.Runners())
+	}
+	advance(tracker, RegistrationTTL+time.Second)
+	if tracker.hasRunner("alice") || tracker.poolRunner("alice") {
+		t.Error("an expired registration still counts as a runner")
+	}
+	if got := tracker.Runners(); len(got) != 0 {
+		t.Errorf("runners = %+v, want none once expired", got)
+	}
+
+	// A refresh brings it back.
+	tracker.setClock(time.Now)
+	runner.publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+	if got := tracker.Runners(); !reflect.DeepEqual(got, []Registration{alice}) {
+		t.Errorf("runners after a refresh = %+v, want %+v", got, []Registration{alice})
+	}
+}
+
+func TestExpiredRegistrationSendsTheNextJobToThePool(t *testing.T) {
+	q := startQueue(t)
+	tracker := startTracker(t, q)
+	runner := startFakeRunner(t, q)
+
+	runner.publish(RegisterSubjectPrefix+"octocat", Registration{Steward: "octocat", Harnesses: []string{"fake"}, Host: "h"})
+	eventually(t, func() bool { return tracker.hasRunner("octocat") })
+	first := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "octocat", InstallationID: 1, Title: "t"}
+	second := Job{Repo: "o/r", RepoID: 7, Issue: 2, Steward: "octocat", InstallationID: 1, Title: "t"}
+	if created, err := q.Publish(t.Context(), first); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	advance(tracker, RegistrationTTL+time.Second)
+	if created, err := q.Publish(t.Context(), second); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	got := jobs(t, q)
+	if len(got) != 2 || got[0].Pool || !got[1].Pool {
+		t.Fatalf("jobs = %+v, want the first on the steward subject and the second pooled", got)
+	}
+	if got[1].Subject() != jobSubjectPrefix+PoolName+".7.2" {
+		t.Errorf("second job subject = %s, want the pool subject", got[1].Subject())
+	}
+}
+
+func TestRestartKeepsOnlyLiveRegistrations(t *testing.T) {
+	dir := t.TempDir()
+	q := startQueueIn(t, dir)
+	tracker := startTracker(t, q)
+	alice := Registration{Steward: "alice", Harnesses: []string{"claude"}, Host: "alice-laptop"}
+	startFakeRunner(t, q).publish(RegisterSubjectPrefix+"alice", alice)
+	eventually(t, func() bool { return tracker.hasRunner("alice") })
+
+	tracker = startTracker(t, restartQueue(t, q, dir))
+	if got := tracker.Runners(); !reflect.DeepEqual(got, []Registration{alice}) {
+		t.Errorf("runners right after a restart = %+v, want %+v", got, []Registration{alice})
+	}
+	// The registration's age comes from when it was stored, not from the
+	// replay, so a restart does not refresh it.
+	advance(tracker, RegistrationTTL+time.Second)
+	if got := tracker.Runners(); len(got) != 0 {
+		t.Errorf("runners = %+v, want none once the stored registration is older than the TTL", got)
 	}
 }

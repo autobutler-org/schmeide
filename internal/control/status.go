@@ -23,18 +23,34 @@ import (
 
 const (
 	// RegisterSubjectPrefix plus a steward and a host (see RegisterSubject)
-	// is the subject a runner announces itself on when it starts. The message
-	// is a Registration. Runners from before the host token publish on the
-	// prefix plus the steward alone, which is still accepted.
+	// is the subject a runner announces itself on when it starts, and again
+	// every RegistrationInterval. The message is a Registration. Runners from
+	// before the host token publish on the prefix plus the steward alone,
+	// which is still accepted.
 	RegisterSubjectPrefix = "schmeide.runners."
 	// StatusSubjectPrefix replaces "schmeide.jobs." in a job's subject to give
 	// the subject its Status messages are published on.
 	StatusSubjectPrefix = "schmeide.status."
+	// StatusQuerySubjectPrefix plus a steward is the request subject
+	// `schmeide status` asks the control node on. The reply is a
+	// StatusReply with only that steward's runners and jobs, and pool jobs
+	// when the steward has a live pool runner. A steward can only publish on
+	// its own query subject.
+	StatusQuerySubjectPrefix = "schmeide.status-query."
 
 	// StatusStream keeps runner registrations and job statuses in the queue's
 	// data directory. It is the history a restarted control node or runner
 	// loads.
 	StatusStream = "SCHMEIDE_STATUS"
+
+	// RegistrationInterval is how often a runner publishes its Registration
+	// again while it runs.
+	RegistrationInterval = time.Minute
+	// RegistrationTTL is how long a Registration counts after it was stored.
+	// A runner that has not refreshed it within this time is no longer
+	// registered: its steward's next job goes to the pool, and `schmeide
+	// status` stops listing it.
+	RegistrationTTL = 3 * RegistrationInterval
 )
 
 // RegisterSubject is the subject a runner on host registers for steward on.
@@ -117,16 +133,48 @@ type Registration struct {
 
 // Tracker records what runners report: who registered and where each job
 // stands. Registrations and statuses are stored on StatusStream, and Track
-// loads that history before it returns.
+// loads that history before it returns. A registration counts for
+// RegistrationTTL after it was stored.
 type Tracker struct {
 	stream  jetstream.Stream
 	issues  jetstream.KeyValue
 	log     *slog.Logger
 	mu      sync.Mutex
-	runners []Registration
+	runners []liveRegistration
 	jobs    map[string]Status
 	// since is when each job's latest status was stored.
 	since map[string]time.Time
+	// dropped are status sequences a failed Publish deleted; see forget.
+	dropped map[uint64]bool
+	// now is the clock. Nil means time.Now. Tests set it with setClock.
+	now func() time.Time
+}
+
+// liveRegistration is a Registration and when it was stored.
+type liveRegistration struct {
+	Registration
+
+	stored time.Time
+}
+
+// setClock replaces the tracker's clock.
+func (t *Tracker) setClock(now func() time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.now = now
+}
+
+// live drops registrations older than RegistrationTTL and returns the rest.
+// The caller holds t.mu.
+func (t *Tracker) live() []liveRegistration {
+	now := time.Now()
+	if t.now != nil {
+		now = t.now()
+	}
+	t.runners = slices.DeleteFunc(t.runners, func(r liveRegistration) bool {
+		return now.Sub(r.stored) >= RegistrationTTL
+	})
+	return t.runners
 }
 
 // Track records runner registrations and job statuses. Messages already
@@ -151,6 +199,9 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 		},
 		MaxMsgsPerSubject: 1,
 		Discard:           jetstream.DiscardOld,
+		// Direct gets name the subject in the request subject, so NATS
+		// permissions can limit a runner to its own and pool job statuses.
+		AllowDirect: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create status stream: %w", err)
@@ -215,16 +266,16 @@ func (t *Tracker) follow(ctx context.Context, stream jetstream.Stream, log *slog
 	return nil
 }
 
-func (t *Tracker) observe(log *slog.Logger, seq uint64, at time.Time, subject string, data []byte) {
+func (t *Tracker) observe(log *slog.Logger, seq uint64, stored time.Time, subject string, data []byte) {
 	switch {
 	case strings.HasPrefix(subject, RegisterSubjectPrefix):
-		t.observeRegistration(log, subject, data)
+		t.observeRegistration(log, stored, subject, data)
 	case strings.HasPrefix(subject, StatusSubjectPrefix):
-		t.observeStatus(log, seq, at, subject, data)
+		t.observeStatus(log, seq, stored, subject, data)
 	}
 }
 
-func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []byte) {
+func (t *Tracker) observeRegistration(log *slog.Logger, stored time.Time, subject string, data []byte) {
 	var reg Registration
 	// The subject, not the payload, is what NATS permissions can pin to a
 	// steward, so the two must agree. The host must agree too, so a steward
@@ -243,11 +294,12 @@ func (t *Tracker) observeRegistration(log *slog.Logger, subject string, data []b
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// A restarted runner registers again; keep one entry per steward and host.
-	t.runners = slices.DeleteFunc(t.runners, func(r Registration) bool {
+	// A runner registers again on an interval and on a restart; keep one
+	// entry per steward and host, the latest.
+	t.runners = slices.DeleteFunc(t.runners, func(r liveRegistration) bool {
 		return r.Steward == reg.Steward && r.Host == reg.Host
 	})
-	t.runners = append(t.runners, reg)
+	t.runners = append(t.runners, liveRegistration{Registration: reg, stored: stored})
 }
 
 func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subject string, data []byte) {
@@ -259,6 +311,10 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subj
 	job := jobSubjectPrefix + strings.TrimPrefix(subject, StatusSubjectPrefix)
 	log.Info("job state", "job", job, "state", string(status.State), "detail", status.Detail)
 	t.mu.Lock()
+	if t.dropped[seq] {
+		t.mu.Unlock()
+		return
+	}
 	t.jobs[job] = status
 	t.since[job] = at
 	t.mu.Unlock()
@@ -269,14 +325,26 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subj
 	}
 }
 
+// forget drops the pending status stored at seq for a job whose Publish
+// failed, whether or not it has been observed yet, so the job's steward is
+// not shown a job that was never stored.
+func (t *Tracker) forget(seq uint64, job string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dropped == nil {
+		t.dropped = map[uint64]bool{}
+	}
+	t.dropped[seq] = true
+	if t.jobs[job].State == StatePending {
+		delete(t.jobs, job)
+		delete(t.since, job)
+	}
+}
+
 // finish records the final state on the job's issue record, unless the
 // record now belongs to a later job: one on another subject, or one published
 // after this status was stored.
 func (t *Tracker) finish(seq uint64, job string, state State) error {
-	if t.issues == nil {
-		// ReadStatus only reads; the control node records final states.
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
 	parts := strings.Split(job, ".")
@@ -310,13 +378,13 @@ func (t *Tracker) lastSeq(ctx context.Context) (uint64, error) {
 	return info.State.LastSeq, nil
 }
 
-// hasRunner reports whether the steward has at least one registration.
-// Registrations are not expired: a runner that stops stays registered.
+// hasRunner reports whether the steward has at least one live registration.
 func (t *Tracker) hasRunner(steward string) bool {
 	return t.registered(steward, false)
 }
 
-// poolRunner reports whether the steward has a registration with the pool flag.
+// poolRunner reports whether the steward has a live registration with the
+// pool flag.
 func (t *Tracker) poolRunner(steward string) bool {
 	return t.registered(steward, true)
 }
@@ -324,7 +392,7 @@ func (t *Tracker) poolRunner(steward string) bool {
 func (t *Tracker) registered(steward string, poolOnly bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, r := range t.runners {
+	for _, r := range t.live() {
 		if r.Steward == steward && (!poolOnly || r.Pool) {
 			return true
 		}
@@ -332,11 +400,15 @@ func (t *Tracker) registered(steward string, poolOnly bool) bool {
 	return false
 }
 
-// Runners returns the registered runners, oldest registration first.
+// Runners returns the live registrations, least recently refreshed first.
 func (t *Tracker) Runners() []Registration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return slices.Clone(t.runners)
+	runners := []Registration{}
+	for _, r := range t.live() {
+		runners = append(runners, r.Registration)
+	}
+	return runners
 }
 
 // JobStatus returns the latest status reported for the job on the given
@@ -367,29 +439,56 @@ type Snapshot struct {
 	Jobs []JobState `json:"jobs"`
 }
 
-// ReadStatus replays the status stream into a Snapshot. It only reads: no
-// final state is recorded on an issue. A missing stream is an empty Snapshot.
-func ReadStatus(ctx context.Context, js jetstream.JetStream) (Snapshot, error) {
+// StatusReply answers a status query. Error is set instead of the Snapshot
+// when the control node cannot answer.
+type StatusReply struct {
+	Snapshot
+
+	Error string `json:"error,omitempty"`
+}
+
+// Snapshot is what `schmeide status` shows the steward: the steward's own
+// live registrations, and the unfinished jobs on the steward's subject. A
+// steward with a live pool runner also sees unfinished pool jobs, which that
+// runner may take. Other stewards' runners and jobs are left out.
+func (t *Tracker) Snapshot(steward string) Snapshot {
 	snap := Snapshot{Runners: []Registration{}, Jobs: []JobState{}}
-	stream, err := js.Stream(ctx, StatusStream)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return snap, nil
+	for _, r := range t.Runners() {
+		if r.Steward == steward {
+			snap.Runners = append(snap.Runners, r)
+		}
 	}
-	if err != nil {
-		return snap, fmt.Errorf("read status stream: %w", err)
+	own := jobSubjectPrefix + steward + "."
+	pool := ""
+	if t.poolRunner(steward) {
+		pool = jobSubjectPrefix + PoolName + "."
 	}
-	t := &Tracker{jobs: map[string]Status{}, since: map[string]time.Time{}}
-	if err := t.replay(ctx, stream, slog.New(slog.DiscardHandler), stream.CachedInfo().State); err != nil {
-		return snap, err
-	}
-	snap.Runners = append(snap.Runners, t.runners...)
+	t.mu.Lock()
 	for subject, status := range t.jobs {
-		if !status.State.final() {
+		mine := strings.HasPrefix(subject, own) || pool != "" && strings.HasPrefix(subject, pool)
+		if mine && !status.State.final() {
 			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail, Since: t.since[subject]})
 		}
 	}
+	t.mu.Unlock()
 	slices.SortFunc(snap.Jobs, func(a, b JobState) int { return strings.Compare(a.Subject, b.Subject) })
-	return snap, nil
+	return snap
+}
+
+// ServeStatus answers requests on a steward's status query subject with
+// that steward's Snapshot. Track must have run.
+func (q *Queue) ServeStatus(log *slog.Logger) error {
+	if q.tracker == nil {
+		return errors.New("serve status queries: the status stream is not tracked yet")
+	}
+	_, err := q.nc.Subscribe(StatusQuerySubjectPrefix+"*", func(m *nats.Msg) {
+		steward := strings.TrimPrefix(m.Subject, StatusQuerySubjectPrefix)
+		data, _ := json.Marshal(StatusReply{Snapshot: q.tracker.Snapshot(steward)})
+		if err := m.Respond(data); err != nil {
+			log.Error("status reply failed", "steward", steward, "err", err)
+		}
+	})
+	return err
 }
 
 // WriteText writes the Snapshot as aligned columns.
@@ -418,13 +517,13 @@ func (s Snapshot) WriteText(w io.Writer) {
 
 // StatusUsage is the help text of `schmeide status`.
 func StatusUsage() string {
-	return `schmeide status shows the runners registered with the control node and the
-jobs that are queued or running, read from the control node's status stream.
-A job no runner has claimed yet is "pending"; FOR is how long a job has been
-in its state, so for a pending job it is how long the job has waited.
-It connects to the control node's NATS as a steward, the same way a runner does.
-Status is team-wide and read-only: any steward sees every steward's runners and
-jobs, pool jobs included, and running it changes nothing.
+	return `schmeide status shows your runners that are registered with the control node
+and your jobs that are queued or running. A steward whose runner was started
+with --pool also sees queued and running pool jobs. Other stewards' runners and
+jobs are not shown. A job no runner has claimed yet is "pending"; FOR is how
+long a job has been in its state, so for a pending job it is how long the job
+has waited. It connects to the control node's NATS as a steward, the same way a
+runner does, and asks the control node. Running it changes nothing.
 
 Usage:
   schmeide status --steward <github login> [--json] [flags]
@@ -445,6 +544,27 @@ Flags:
   -h, --help
         Show this help.
 `
+}
+
+// queryStatus asks the control node for the steward's Snapshot.
+func queryStatus(nc *nats.Conn, steward string) (Snapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	msg, err := nc.RequestWithContext(ctx, StatusQuerySubjectPrefix+steward, nil)
+	if errors.Is(err, nats.ErrNoResponders) {
+		return Snapshot{}, errors.New("the control node does not answer status queries; upgrade `schmeide control` to this version")
+	}
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("ask the control node for status: %w; check that --nats-url points at a `schmeide control` node", err)
+	}
+	var reply StatusReply
+	if err := json.Unmarshal(msg.Data, &reply); err != nil {
+		return Snapshot{}, fmt.Errorf("decode the control node's status reply: %w", err)
+	}
+	if reply.Error != "" {
+		return Snapshot{}, fmt.Errorf("the control node could not answer: %s", reply.Error)
+	}
+	return reply.Snapshot, nil
 }
 
 // StatusMain runs `schmeide status` and returns its exit code.
@@ -484,16 +604,9 @@ func StatusMain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer nc.Close()
-	js, err := jetstream.New(nc)
+	snap, err := queryStatus(nc, *steward)
 	if err != nil {
 		fmt.Fprintf(stderr, "schmeide status: %v\n", err)
-		return 1
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
-	defer cancel()
-	snap, err := ReadStatus(ctx, js)
-	if err != nil {
-		fmt.Fprintf(stderr, "schmeide status: %v\nCheck that --nats-url points at a `schmeide control` node.\n", err)
 		return 1
 	}
 	if *asJSON {

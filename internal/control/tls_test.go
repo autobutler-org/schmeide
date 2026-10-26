@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -197,5 +198,57 @@ func TestListensBeyondLoopback(t *testing.T) {
 		if got := listensBeyondLoopback(addr); got != want {
 			t.Errorf("listensBeyondLoopback(%q) = %v, want %v", addr, got, want)
 		}
+	}
+}
+
+func TestCheckNATSTransport(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		addr      string
+		tls       bool
+		plaintext bool
+		refused   bool
+	}{
+		{name: "loopback without TLS", addr: "127.0.0.1:4222"},
+		{name: "every interface with TLS", addr: "0.0.0.0:4222", tls: true},
+		{name: "every interface without TLS", addr: "0.0.0.0:4222", refused: true},
+		{name: "a LAN address without TLS", addr: "10.0.0.5:4222", refused: true},
+		{name: "every interface with plain text allowed", addr: "0.0.0.0:4222", plaintext: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkNATSTransport(tt.addr, tt.tls, tt.plaintext)
+			if !tt.refused {
+				if err != nil {
+					t.Errorf("err = %v, want none", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrPlaintextNATS) {
+				t.Fatalf("err = %v, want ErrPlaintextNATS", err)
+			}
+			for _, want := range []string{"--nats-tls-cert-file", "--nats-tls-key-file", "--allow-plaintext-nats", tt.addr} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to name %s", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseControlAllowPlaintextNATS(t *testing.T) {
+	for _, s := range controlSettings {
+		t.Setenv(s.env(), "")
+	}
+	base := []string{"--webhook-secret", "s", "--github-app-id", "1", "--allowed-orgs", "acme", "--runner-tokens", "octocat:t", "--github-app-private-key-file", "/k.pem"}
+	got, err := parseControl(base)
+	if err != nil || got.AllowPlaintextNATS != "false" {
+		t.Fatalf("default = %q, %v; want false", got.AllowPlaintextNATS, err)
+	}
+	got, err = parseControl(append(append([]string{}, base...), "--allow-plaintext-nats", "true"))
+	if err != nil || got.AllowPlaintextNATS != "true" {
+		t.Fatalf("--allow-plaintext-nats true = %q, %v", got.AllowPlaintextNATS, err)
+	}
+	if _, err := parseControl(append(append([]string{}, base...), "--allow-plaintext-nats", "maybe")); err == nil || !strings.Contains(err.Error(), "--allow-plaintext-nats") {
+		t.Errorf("err = %v, want it to name --allow-plaintext-nats", err)
 	}
 }
