@@ -111,6 +111,9 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 - `SCHMEIDE_TRUST` is not a flag. It is read by the runner directly
   (JN-SETUP-023).
 - An empty variable counts as unset.
+- On `runner` and `doctor`, a variable whose value does not parse for its
+  flag's type (a duration, an integer, a boolean) is a usage error, exit code
+  2, unless the flag was also given (JN-CLI-006).
 - Covered by `TestRun` (`set SCHMEIDE_GITHUB_APP_ID` in the error text) and
   `TestParseControl`.
 
@@ -145,20 +148,48 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 
 1. Run `SCHMEIDE_NATS_URL=nats://127.0.0.1:1 schmeide doctor --steward octocat`.
 2. Run the same with `--nats-url nats://127.0.0.1:4222` added.
+3. Run `SCHMEIDE_ACK_WAIT="5 minutes" schmeide runner --steward octocat`.
+4. Run `SCHMEIDE_JSON=maybe schmeide doctor`.
+5. Run step 3 again with `--ack-wait 5m` added.
 
 **Expected result:**
 
 - Step 1 tries `nats://127.0.0.1:1`. Step 2 tries `nats://127.0.0.1:4222`: the
   flag wins.
+- Step 3: exit code 2, nothing is started, and stderr is:
+
+  ```text
+  schmeide runner: SCHMEIDE_ACK_WAIT is "5 minutes", which is not a duration; set it to one such as 5m, unset it, or pass --ack-wait
+  Run 'schmeide runner --help' for usage.
+  ```
+
+- Step 4: exit code 2, no checks run, and stderr is:
+
+  ```text
+  schmeide doctor: SCHMEIDE_JSON is "maybe", which is not a boolean; set it to true or false, unset it, or pass --json
+  Run 'schmeide doctor --help' for usage.
+  ```
+
+- Step 5: the runner starts with an ack wait of 5m. A given flag means its
+  variable is not read, so the bad value is not an error.
 
 **Notes:**
 
 - These commands take no config file.
-- An environment value that does not parse for its flag (for example
-  `SCHMEIDE_MAX_ATTEMPTS=lots`) is ignored, and the flag's default is used. A
-  flag value that does not parse is an error, exit code 2.
-- Implemented in `runner.ParseFlags` (`internal/runner/cli.go`). No automated
-  test for the ignored bad value.
+- The message depends on the flag's type. A duration flag says "which is not a
+  duration; set it to one such as 5m". An integer flag, such as
+  `--max-attempts`, says "which is not an integer; set it to one such as 3". A
+  boolean flag, such as `--pool`, says "which is not a boolean; set it to true
+  or false". String flags accept any value.
+- When several variables are bad, each gets its own line, in flag order.
+- A flag value that does not parse is also an error, exit code 2 (JN-CLI-002).
+- `control` takes every setting as a string and checks `--webhook-rate` and
+  `--delivery-ttl` itself, with exit code 2 (JN-SETUP-009). `status` takes only
+  strings.
+- Implemented in `runner.ParseFlags` (`internal/runner/cli.go`), which `runner`
+  and `doctor` share. Covered by `runner.TestMainRejectsUnparsableEnv`,
+  `runner.TestParseFlagsFlagWinsOverUnparsableEnv`, and
+  `doctor.TestMainRejectsUnparsableEnv`.
 
 ---
 
@@ -179,24 +210,25 @@ progress.
   RUNNER    HOST         HARNESSES         POOL
   octocat   octo-laptop  claude-code,grok  false
 
-  JOB                          STATE      DETAIL
-  schmeide.jobs.octocat.42.7   reviewing  round 1 of 3
+  JOB                          STATE      FOR  DETAIL
+  schmeide.jobs.octocat.42.7   reviewing  4m2s round 1 of 3
   ```
 
 - The JOB column is `schmeide.jobs.<steward>.<repo id>.<issue>`, or
   `schmeide.jobs._pool.<repo id>.<issue>` for a pool job.
+- FOR is how long the job has been in its state: the time since its latest
+  status was stored on `SCHMEIDE_STATUS`, rounded to the second.
 
 **Notes:**
 
 - Jobs whose latest state is final (`pr_opened`, `gate_failed`, `failed`,
   `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
-- A job no runner has claimed yet is not listed either: the list comes from
-  the states runners report (`claimed`, `working`, `reviewing`, `retrying`).
+- A job no runner has claimed yet is listed as `pending` (JN-CLI-016).
 - A steward sees only their own runners and their own jobs. A steward with a
   live `--pool` runner also sees pool jobs. Other stewards' runners, hosts,
-  versions, and job details are never shown.
+  versions, and job details are never shown. Running it writes nothing.
 - A runner that has not refreshed its registration for three minutes is not
-  listed (JN-POOL-008).
+  listed (JN-POOL-009).
 - Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
   `TestStatusShowsOnlyTheAskingStewardsRunnersAndJobs`, and
   `TestStatusHidesEveryFinishedRunnerState`.
@@ -239,13 +271,16 @@ progress.
 
 - One JSON object with `runners` (each with `steward`, `harnesses`, `host`,
   and `pool` and `version` when set) and `jobs` (each with `subject`,
-  `state`, and `detail` when set). Empty lists are `[]`.
+  `state`, `detail` when set, and `since`, the RFC 3339 time the job entered
+  its state). Empty lists are `[]`. A pending job is in `jobs` like any other
+  (JN-CLI-016).
 
 **Notes:**
 
 - The JSON shape is stable.
-- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob` and
-  `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`.
+- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
+  `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`, and
+  `TestStatusListsAJobNoRunnerHasClaimed` (`internal/control`).
 
 ---
 
@@ -319,7 +354,13 @@ progress.
 
 **Notes:**
 
-- Covered by `TestCompletion` and `TestCompletionUnknownShell`.
+- All three scripts list every command `run` in `cmd/schmeide/main.go`
+  dispatches: `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version`. `TestCompletionListsEveryCommand` reads the commands from
+  that switch, so a command added to the dispatcher and not to every script
+  fails it.
+- Covered by `TestCompletion`, `TestCompletionListsEveryCommand`, and
+  `TestCompletionUnknownShell`.
 
 ---
 
@@ -383,4 +424,64 @@ already exists.
 
 - `--json` writes `[{"name", "group", "status", "detail"}, ...]` to stdout.
   `status` is `ok`, `fail`, or `skip`.
-- Covered by `TestMainJSON` and `TestMainHelpAndBadFlag`.
+- A `SCHMEIDE_<NAME>` value that does not parse for its flag is a usage error,
+  exit code 2 (JN-CLI-006).
+- Covered by `TestMainJSON`, `TestMainHelpAndBadFlag`, and
+  `TestMainRejectsUnparsableEnv`.
+
+---
+
+### JN-CLI-016: See jobs no runner has claimed yet
+
+**Preconditions:** A control node. octocat's runner works one job at a time
+and is busy with an earlier job, or is stopped. Five issues are assigned to
+octocat and labeled `schmeide:ready`.
+
+**Steps:**
+
+1. Run `schmeide status --steward octocat --nats-token <token>`.
+2. Let the runner claim one of the waiting jobs, and run it again.
+3. Restart the control node, and run it again.
+
+**Expected result:**
+
+- Step 1: every job the control node created and no runner has reported on
+  is listed with state `pending`, and FOR is how long it has waited:
+
+  ```text
+  JOB                          STATE    FOR    DETAIL
+  schmeide.jobs.octocat.42.8   pending  3m10s
+  schmeide.jobs.octocat.42.9   pending  3m10s
+  ```
+
+  A job for a steward with no live registration waits on the pool subject,
+  `schmeide.jobs._pool.<repo id>.<issue>`, and is listed the same way for a
+  steward with a live `--pool` runner.
+- Step 2: the claimed job shows `claimed`, and FOR restarts from the claim.
+  The others stay `pending` with their wait unchanged.
+- Step 3: the pending jobs are still listed with the same wait, since
+  `SCHMEIDE_STATUS` is kept in `--data-dir`.
+- `--json` lists them in `jobs` with `"state": "pending"` and `since`.
+- Status is scoped to the asking steward (JN-CLI-007): hubot running
+  `schmeide status --steward hubot` does not see octocat's pending jobs, and
+  sees pending pool jobs only with a live `--pool` runner. Running it changes
+  nothing.
+
+**Notes:**
+
+- The control node stores the `pending` status in `Queue.publishPending`
+  (`internal/control/queue.go`) when it creates a job, before it publishes the
+  job, so a runner's `claimed` is always stored after it.
+- A duplicate delivery for the issue creates no job and stores no second
+  `pending`, so the wait is not reset.
+- If the `pending` status cannot be stored, the job is still created and the
+  control node logs `could not record the job as pending; schmeide status will
+  not list it until a runner claims it`. If the job itself cannot be stored,
+  the `pending` status is deleted again.
+- A job a runner hands back (a failed token request, a stuck job, a shutdown)
+  shows the runner's last state, such as `claimed`, until the next runner
+  reports on it. The job is back in the queue, but it is not shown as
+  `pending` again.
+- Covered by `TestStatusListsAJobNoRunnerHasClaimed`,
+  `TestPendingJobSurvivesARestart`, `TestPendingStatusFailureKeepsTheJob`, and
+  `TestFailedPublishLeavesNoPendingJob` (`internal/control`).

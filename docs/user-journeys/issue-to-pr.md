@@ -86,8 +86,14 @@ ago.
   instead (JN-PR-004). Either way there is one job.
 - A delivery that was rejected (401, 403, 429, 500) is not remembered, so its
   redelivery is handled again.
-- Covered by `TestRepeatedDeliveryIsAcknowledgedWithoutPublishing` and
-  `TestRejectedDeliveryIDIsNotRemembered`.
+- The replay check runs after the signature check and the rate limit. A request
+  that reuses a remembered delivery id without a valid `X-Hub-Signature-256`
+  answers 401, not `replay`. A redelivery counts toward `--webhook-rate`, so
+  over the limit it answers 429.
+- Covered by `TestRepeatedDeliveryIsAcknowledgedWithoutPublishing`,
+  `TestRejectedDeliveryIDIsNotRemembered`,
+  `TestUnsignedRequestNeverReachesTheReplayCache`, and
+  `TestReplayCountsAgainstTheRateLimit` in `internal/control`.
 
 ---
 
@@ -201,7 +207,13 @@ with a pull request (any state other than `failed` or `gate_failed`).
   POSTed". An `issues` body over 1 MiB, or any other event's body over
   64 KiB, answers 413 "a <event> payload may be at most <n> bytes", logs
   `msg="webhook rejected"`, and publishes nothing.
-- Covered by `TestWebhookIntake` and `TestOversizedWebhookPublishesNothing`.
+- The signature is checked before the rate limit and the replay check. A
+  request with a bad or missing signature answers 401 even when it reuses a
+  delivery id the control node already handled, and it does not count toward
+  `--webhook-rate`.
+- Covered by `TestWebhookIntake`, `TestOversizedWebhookPublishesNothing`,
+  `TestUnsignedRequestNeverReachesTheReplayCache`, and
+  `TestUnsignedRequestsDoNotUseTheRateBudget` in `internal/control`.
 
 ---
 
@@ -220,7 +232,11 @@ with a pull request (any state other than `failed` or `gate_failed`).
 
 **Notes:**
 
-- Covered by `TestWebhookRateLimitPublishesNoJob`.
+- Only deliveries with a valid signature count toward the limit. A redelivery
+  of a delivery id already handled counts, and over the limit it answers 429
+  rather than `replay`.
+- Covered by `TestWebhookRateLimitPublishesNoJob` and
+  `TestReplayCountsAgainstTheRateLimit` in `internal/control`.
 
 ---
 
@@ -443,7 +459,8 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Notes:**
 
-- Two or more stackable blockers are accepted when they form one chain.
+- Two or more stackable blockers are accepted when they form one chain. The
+  order GitHub lists the blockers in does not matter.
 - Covered by `TestLinearChainOfDependenciesStacksOnTheTop`.
 
 ---
@@ -459,14 +476,17 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 
 **Expected result:**
 
-- No worktree, no session, no pull request. Each attempt fails with "the open
-  dependencies' pull requests (5_a, 6_b) are not one linear stack, and
-  schmeide stacks only on a single chain of blockers".
-- After `--max-attempts`, the issue gets "schmeide could not finish this job
-  and did not open a pull request:" with that error.
+- No worktree, no session, no pull request. The job reports `claimed` then
+  `failed` on the first attempt and is not retried.
+- The issue gets one comment: "schmeide could not finish this job and did not
+  open a pull request:" with "the open dependencies' pull requests (5_a, 6_b)
+  are not one linear stack, and schmeide stacks only on a single chain of
+  blockers".
 
 **Notes:**
 
+- A retry cannot change the blocked-by list, so this failure is final, like a
+  gate failure. A linear chain is accepted (JN-PR-018).
 - Covered by `TestTwoSideBySideDependenciesOpenNothing`.
 
 ---
@@ -487,3 +507,40 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 **Notes:**
 
 - Covered by `TestReadyLabelIsConfigurable`.
+
+---
+
+### JN-PR-021: The gate runs in a locked-down environment
+
+**Preconditions:** A runner started with `SCHMEIDE_NATS_TOKEN`, an
+`ANTHROPIC_API_KEY`, and `--gate-pass-env GOPATH`; a repo whose gate is
+`env > "$TMPDIR/env.txt"; cat "$TMPDIR/env.txt"; test "$HOME" = "$TMPDIR"`.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Start a second runner with `--gate-pass-env SCHMEIDE_NATS_TOKEN`.
+
+**Expected result:**
+
+- Step 1: the gate passes and the pull request opens (JN-PR-012). The gate's
+  environment holds the base list (`PATH`, `USER`, `LANG`, the proxy and
+  certificate variables, `LC_*`, `XDG_*`) and `GOPATH`, plus `GOCACHE`,
+  `GOMODCACHE`, and `GOFLAGS`. It holds no `SCHMEIDE_*` name, no
+  `ANTHROPIC_*`, `CLAUDE_*`, or `XAI_*` name, and no job token. `HOME` and
+  `TMPDIR` are `<work-dir>/scratch/<repo_id>-<issue>`, and that directory is
+  gone once the job ends.
+- Step 2: the runner exits with code 2 and prints `schmeide runner:
+  --gate-pass-env lists SCHMEIDE_NATS_TOKEN: the gate never sees a SCHMEIDE_
+  name` and `Run 'schmeide runner --help' for usage.`
+
+**Notes:**
+
+- The gate still runs as the runner's OS user and can read that user's files
+  by absolute path. See `docs/architecture/credentials.md`, "Gate
+  environment".
+- Covered by `TestGateEnvKeepsBaseAndGatePassEnvAndDropsSecrets`,
+  `TestScratchHomeReplacesHomeTmpdirAndXDGDirs`,
+  `TestGateRunsInAScratchHomeThatCloseRemoves`,
+  `TestJobLocksGateGitAndHarnessEnvironments`, and
+  `TestMainRefusesASchmeideGatePassEnv` in `internal/runner`. No e2e test.

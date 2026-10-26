@@ -205,7 +205,8 @@ finished jobs. Its data directory is on persistent storage.
   (JN-FAIL-010).
 - Step 3 answers `duplicate`, not `created`: the per-issue records survived.
 - Jobs whose stewards had a registered runner before the restart still go to
-  that steward, not the pool.
+  that steward, not the pool. A steward with runners on several hosts keeps
+  every host's latest registration, including whether it was `--pool`.
 
 **Notes:**
 
@@ -214,8 +215,14 @@ finished jobs. Its data directory is on persistent storage.
   least that long (`--stop-timeout 30`).
 - Deliveries GitHub sent while the control node was down failed. Redeliver
   them from the App's Advanced tab.
+- The status stream keeps only the latest registration per steward and host
+  and the latest status per job, which is all the restart replays. A status a
+  runner published on a job's subject replaces the one before it, even a
+  malformed one.
 - Covered by `TestTrackerRemembersRunnersAndStatusAcrossRestart`,
-  `TestTrackerRestartDropsMalformed`, `TestRunLogsPlainHTTPAndShutsDown`.
+  `TestTrackerRestartDropsMalformed`,
+  `TestStatusStreamKeepsOnlyTheLatestMessagePerSubject`, and
+  `TestRunLogsPlainHTTPAndShutsDown` in `internal/control`.
 
 ---
 
@@ -317,3 +324,38 @@ persistent storage.
 - A slow client is cut off after 30 seconds for the whole request (10 for
   headers).
 - Covered by `TestWebhookReadTimeoutCutsOffASlowClient`.
+
+---
+
+### JN-OPS-011: Upgrade a control node whose status stream has no limits
+
+**Preconditions:** A control node from before the status stream limit, with a
+data directory that holds many status changes and runner restarts.
+
+**Steps:**
+
+1. Note the size of `<data-dir>/jetstream/$G/streams/SCHMEIDE_STATUS`.
+2. Replace the binary or image with this version and start the control node.
+3. Run `schmeide status`.
+4. Check the size of the same directory again.
+
+**Expected result:**
+
+- The control node starts normally. On startup it updates `SCHMEIDE_STATUS`
+  to keep one message per subject and drops the older messages.
+- Step 3 lists the same runners and unfinished jobs as before the upgrade.
+- Step 4 shows the directory no larger than in step 1, and from then on it
+  grows with the number of jobs, not with each status change or runner
+  restart.
+
+**Notes:**
+
+- A runner from before this version registers on
+  `schmeide.runners.<steward>`; a runner from this version registers on
+  `schmeide.runners.<steward>.<host>`. The control node accepts both. Upgrade
+  the runners too, so a steward with runners on several hosts keeps each
+  host's registration (JN-OPS-008 covers the version warning).
+- JetStream reclaims disk space as it compacts its block files, so step 4 may
+  not shrink at once.
+- Covered by `TestTrackLimitsAStatusStreamCreatedWithoutLimits` in
+  `internal/control`.

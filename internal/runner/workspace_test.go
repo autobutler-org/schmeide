@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -76,6 +77,23 @@ func TestPushPublishesACleanWorktree(t *testing.T) {
 	}
 }
 
+// A gate in the runner's process session would be a background group on the
+// runner's terminal and stop on SIGTTOU, so it must lead its own session.
+func TestGateRunsInItsOwnSession(t *testing.T) {
+	w, _ := newPushFixture(t)
+	out, err := w.Run(t.Context(), `echo "$$ $(ps -o sid= -p $$)"`)
+	if err != nil {
+		t.Fatalf("Run = %v; output %q", err, out)
+	}
+	ids := strings.Fields(out)
+	if len(ids) != 2 {
+		t.Fatalf("output = %q, want the pid and the session id", out)
+	}
+	if ids[0] != ids[1] {
+		t.Errorf("gate pid %s has session id %s: the gate shares the runner's session and terminal", ids[0], ids[1])
+	}
+}
+
 func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 	first, bare := newPushFixture(t)
 	planted := filepath.Join(first.repoDir, "planted")
@@ -95,6 +113,7 @@ func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 		branch:  "job-2",
 		id:      "job-2",
 		repoID:  first.spec.repoID,
+		token:   staticToken("t"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +185,7 @@ func newPushFixtureOn(t *testing.T, base map[string]string) (*worktree, string) 
 		url:      bare,
 		base:     "main",
 		branch:   "job",
-		token:    "gh" + "p_" + strings.Repeat("e", 36),
+		token:    staticToken("gh" + "p_" + strings.Repeat("e", 36)),
 		gitName:  "schmeide[bot]",
 		gitEmail: "bot@example.com",
 		id:       "job",
@@ -203,7 +222,10 @@ func TestPushRefusesTheJobsCredentialsAndNewTokenShapes(t *testing.T) {
 		line func(w *worktree) string
 		kind string
 	}{
-		{name: "installation token verbatim", line: func(w *worktree) string { return "t=" + w.spec.token + " // schmeide:allow-secret" }, kind: secretscan.KindCredential},
+		{name: "installation token verbatim", line: func(w *worktree) string {
+			tok, _ := w.spec.token(context.Background())
+			return "t=" + tok + " // schmeide:allow-secret"
+		}, kind: secretscan.KindCredential},
 		{name: "NATS token verbatim", line: func(*worktree) string { return "nats " + nats }, kind: secretscan.KindCredential},
 		{name: "another installation token", line: func(*worktree) string { return "gh" + "s_" + strings.Repeat("Q", 40) }, kind: secretscan.KindGitHub},
 		{name: "Anthropic key", line: func(*worktree) string { return "sk-" + "ant-" + strings.Repeat("a", 30) }, kind: secretscan.KindAnthropic},
@@ -228,7 +250,7 @@ func TestPushRefusesTheJobsCredentialsAndNewTokenShapes(t *testing.T) {
 			if err.Error() != want {
 				t.Fatalf("Push error = %q, want %q", err, want)
 			}
-			if strings.Contains(err.Error(), w.spec.token) || strings.Contains(err.Error(), nats) {
+			if tok, _ := w.spec.token(t.Context()); strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), nats) {
 				t.Fatal("Push error includes the secret text")
 			}
 			if remoteHasBranch(t, bare, w.spec.branch) {

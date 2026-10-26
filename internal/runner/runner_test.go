@@ -133,6 +133,11 @@ func newWorld(t *testing.T) *world {
 		if err := json.Unmarshal(m.Data, &s.Status); err != nil {
 			t.Error(err)
 		}
+		// The control node reports pending when it creates a job; the
+		// tests here watch what the runner reports.
+		if s.State == control.StatePending {
+			return
+		}
 		w.statuses <- s
 	}); err != nil {
 		t.Fatal(err)
@@ -425,7 +430,7 @@ func writes(files map[string]string) (*harness.Fake, *atomic.Int32) {
 func TestJobOpensPR(t *testing.T) {
 	w := newWorld(t)
 	registered := make(chan Registration, 1)
-	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice", func(m *nats.Msg) {
+	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice.*", func(m *nats.Msg) {
 		var reg Registration
 		if err := json.Unmarshal(m.Data, &reg); err != nil {
 			t.Error(err)
@@ -1444,9 +1449,10 @@ func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	}
 }
 
+// TestAutomateMergeNopeIsAConfigError keeps the default --max-attempts: a
+// config error is final on the first attempt.
 func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	w := newWorld(t)
-	w.maxAttempts = 1
 	w.pushConfig(t, testGateConfig+"[automate]\nmerge = \"nope\"\n")
 	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -1466,6 +1472,33 @@ func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	assertNoMerge(t, w)
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], `automate.merge = "on"`) || !strings.Contains(comments["7"][0], `automate.merge = "off"`) || !strings.Contains(comments["7"][0], "did not open a pull request") {
 		t.Errorf("issue comments = %q, want a config error that names on and off", comments["7"])
+	}
+}
+
+func TestMissingConfigIsFinal(t *testing.T) {
+	w := newWorld(t)
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "rm", "-q", ".schmeide/config.toml")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "drop config")
+	git(t, src, "push", "-q", "origin", "HEAD:main")
+	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Errorf("states = %s, want %s: a missing config is not retried", got, want)
+	}
+	assertSettled(t, w)
+	if sessions.Load() != 0 {
+		t.Errorf("sessions = %d, want none for a missing config", sessions.Load())
+	}
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], ".schmeide/config.toml: config file not found") || !strings.Contains(comments["7"][0], "did not open a pull request") {
+		t.Errorf("issue comments = %q, want one that says the config file is missing", comments["7"])
 	}
 }
 
@@ -1876,6 +1909,35 @@ func TestPoolNameIsNotASteward(t *testing.T) {
 	}
 }
 
+// TestSharedConsumersKeepTheFirstAckWait pins that a runner does not rewrite
+// a consumer another runner created, and heartbeats at the consumer's AckWait
+// rather than its own --ack-wait.
+func TestSharedConsumersKeepTheFirstAckWait(t *testing.T) {
+	w := newWorld(t)
+	h, _ := writes(nil)
+	w.ackWait = time.Second
+	w.runnerWith(t, "alice", h, true)
+	w.ackWait = time.Minute
+	second, _ := w.runnerWith(t, "alice", h, true)
+
+	js, err := jetstream.New(w.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, steward := range []string{"alice", control.PoolName} {
+		cons, err := js.Consumer(t.Context(), control.JobStream, control.ConsumerName(steward))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cons.CachedInfo().Config.AckWait; got != time.Second {
+			t.Errorf("%s consumer AckWait = %v, want the first runner's %v", steward, got, time.Second)
+		}
+	}
+	if second.ackWait != time.Second {
+		t.Errorf("second runner's ack wait = %v, want the consumers' %v", second.ackWait, time.Second)
+	}
+}
+
 func TestRegisteredStewardKeepsTheJobFromThePool(t *testing.T) {
 	w := newWorld(t)
 	w.track(t)
@@ -2200,15 +2262,8 @@ func TestTwoSideBySideDependenciesOpenNothing(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	states := w.await(t, "alice", 7)
-	if states[len(states)-1] != StateFailed {
-		t.Fatalf("states = %v, want the job failed", states)
-	}
-	for _, state := range states {
-		if state == StateWorking || state == StatePROpened {
-			t.Errorf("job went ahead: %v", states)
-			break
-		}
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Fatalf("states = %s, want %s: side-by-side dependencies are not retried", got, want)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
 	if got := sessions.Load(); got != 0 {

@@ -3,7 +3,8 @@
 // runs and their Actions job logs, blocked-by dependencies, branch
 // protection, and merge. List
 // endpoints honor per_page and page. Merge can be told to fail the way
-// GitHub does.
+// GitHub does. Accept adds tokens that expire, and an expired token gets
+// GitHub's 401 Bad credentials.
 package fakegh
 
 import (
@@ -69,9 +70,11 @@ type Server struct {
 
 	t           testing.TB
 	owner, repo string
-	token       string
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// tokens maps each accepted token to when it expires. A zero time
+	// never expires.
+	tokens   map[string]time.Time
 	onPR     func()
 	pulls    []Pull
 	comments map[string][]comment // by issue number
@@ -98,11 +101,20 @@ type Server struct {
 // closed when the test ends.
 func New(t testing.TB, repo, token string) *Server {
 	owner, _, _ := strings.Cut(repo, "/")
-	s := &Server{t: t, owner: owner, repo: repo, token: token, comments: map[string][]comment{}}
+	s := &Server{t: t, owner: owner, repo: repo, tokens: map[string]time.Time{token: {}}, comments: map[string][]comment{}}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	s.URL = srv.URL
 	return s
+}
+
+// Accept makes the fake also accept token until expires, after which a
+// request with it gets 401 Bad credentials, as GitHub answers an expired
+// installation token.
+func (s *Server) Accept(token string, expires time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens[token] = expires
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -154,13 +166,20 @@ func (p Pull) reply() map[string]any {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if got := r.Header.Get("Authorization"); got != "Bearer "+s.token {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got := r.Header.Get("Authorization")
+	token, bearer := strings.CutPrefix(got, "Bearer ")
+	expires, known := s.tokens[token]
+	known = known && bearer
+	if !known {
 		s.t.Errorf("%s %s: Authorization = %q, want the job's token", r.Method, r.URL, got)
+	}
+	if !known || (!expires.IsZero() && !time.Now().Before(expires)) {
+		s.calls = append(s.calls, "401 "+r.Method+" "+r.URL.Path)
 		writeError(w, http.StatusUnauthorized, "Bad credentials", "https://docs.github.com/rest")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
 	if r.Method == http.MethodDelete && r.URL.Path == "/installation/token" {
 		if s.revokeStatus != 0 {
@@ -456,7 +475,8 @@ func (s *Server) Snapshot() ([]Pull, map[string][]string) {
 	return slices.Clone(s.pulls), comments
 }
 
-// Calls returns every call so far as "METHOD /path".
+// Calls returns every call so far as "METHOD /path". A call refused for
+// its token is "401 METHOD /path".
 func (s *Server) Calls() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

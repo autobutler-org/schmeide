@@ -137,12 +137,15 @@ not change one that already exists.
 
 ### Routing
 
-When the assignee has a registered runner, the job stays on that steward's
-subject. Several runners for one steward share one queue consumer, so each of
-that steward's jobs goes to one of them.
+When the assignee has a live registration, the job stays on that steward's
+subject. A registration counts for `RegistrationTTL` (three minutes) after it
+was stored, and a runner is expected to publish it again every
+`RegistrationInterval` (one minute), so a runner that stopped falls out of
+routing within three minutes. Several runners for one steward share one queue
+consumer, so each of that steward's jobs goes to one of them.
 
-When the assignee has no registered runner, the control node publishes the
-job on a pool subject. `--pool` defaults off. A runner that sets it registers
+When the assignee has no live registration, the control node publishes
+the job on a pool subject. `--pool` defaults off. A runner that sets it registers
 as a pool runner. Pool runners share one consumer, work one job at a time,
 and take their own job first. The token, gate, review, and merge path are the
 same. A pool runner spends its owner's agent subscription on someone else's
@@ -171,7 +174,9 @@ requests changes, `automate.review_fix = "on"`, and a round remains, a fresh
 worker session applies the findings, the gate runs again, and the same branch
 is pushed. With `review_fix` absent or `"off"`, the first request for changes
 comments on the issue and leaves the pull request open for a person. A pass
-finishes the review. What happens next is under [Merge](#merge). Exhausting the rounds,
+finishes the review. The reviewer is the first ready harness other than the
+writer, so Grok reviews Claude Code's change when both are logged in. With one
+ready harness, that harness reviews its own change. What happens next is under [Merge](#merge). Exhausting the rounds,
 or a gate failure on a fix, comments on the issue and leaves the pull request
 open.
 
@@ -193,8 +198,9 @@ waits up to `check_wait` for the one below to merge. Merging into the branch
 below would leave the change off the default branch. While the one below is
 open, each poll restacks: the branch is rebased onto the branch below, so the
 stack follows a base that moved, and force-pushed with a lease. Once the one
-below has merged, which the runner tells by the base it last built on being in
-the default branch, it retargets the pull request to the default branch, unless
+below has merged, which the runner tells by the base it last built on, or the
+latest head of the pull request below (`refs/pull/<n>/head`, else its branch),
+being in the default branch, it retargets the pull request to the default branch, unless
 GitHub already did on deleting the merged branch, and rebases it onto the
 default branch. The check wait then runs on the rebased head. A bottom that
 does not merge in time, one that closes without merging, or a rebase that
@@ -238,9 +244,9 @@ the base. Two or more such open blockers have to be one linear stack: the
 base is the top, the one whose chain of pull request bases down to the
 default branch holds every other one, whatever order GitHub lists them in.
 Blockers that are not one chain, such as two pull requests side by side on
-the default branch (a diamond), fail the job. The runner comments on the
-issue that they are not one linear stack and does not open a pull request
-(`internal/runner/github.go`, `internal/runner/runner.go`). Restacking when
+the default branch (a diamond), fail the job finally. The runner comments on
+the issue that they are not one linear stack, does not open a pull request,
+and does not retry (`internal/runner/github.go`, `internal/runner/runner.go`). Restacking when
 the base moves or the bottom merges is under the factory merge above.
 
 ### Harnesses
@@ -306,8 +312,8 @@ A runner stores no long-lived GitHub credential. When it takes a job it asks
 the control node on `schmeide.token.<steward>`, with the job's subject as the
 request. The control node loads that job from the stream and mints a GitHub
 App installation token limited to the job's repository and to `contents:
-write`, `pull_requests: write`, `issues: write`, and `checks: read`
-(`internal/control/token.go`). The request is refused when the subject is not
+write`, `pull_requests: write`, `issues: write`, `checks: read`,
+`administration: read`, and `actions: read` (`internal/control/token.go`). The request is refused when the subject is not
 one of that steward's jobs. GitHub expires an installation token after one
 hour; the runner revokes it with `DELETE /installation/token` when the delivery
 ends. Git receives the token as an `http.extraHeader` in that git command's
@@ -395,7 +401,8 @@ Follow-ups that landed with the slice:
   does not consume an attempt. A restarted runner restores the attempt count.
   A job whose stage record names an open pull request resumes at review
   and does not open a second one. A job with no pull request starts over. The wait before the next try is 30 seconds and has no flag. A gate
-  failure is final. A pull request on a branch named `<issue number>_*`
+  failure is final. So are a missing or invalid `.schmeide/config.toml` and
+  open blockers side by side (#212): a retry cannot change them. A pull request on a branch named `<issue number>_*`
   suppresses a second PR.
 - **#103.** A runner sends a JetStream `InProgress` heartbeat every third of
   `--ack-wait` (default 5 minutes), so a dead runner's unacknowledged job is
@@ -434,7 +441,7 @@ Not in the first slice, and not shipped:
 | Which orgs or App installations may create jobs | Required. `--allowed-orgs` (owner logins, compared case-insensitively) or `--allowed-installations` (numeric installation IDs), or both. A job is accepted when it matches either list. `schmeide control` refuses to start when both are empty, and an empty allowlist allows no job. A delivery that would create a job and matches neither list is rejected with 403. A delivery that does not describe a ready job is ignored, including one from outside the allowlist. A bad signature is rejected before that check. | `internal/control/intake.go`, `internal/control/cli.go` |
 | Shape of the job message | JSON with `repo`, `repo_id`, `issue`, `steward`, `installation_id`, `title`, and `body`, on `schmeide.jobs.<steward>.<repo id>.<issue>` when the assignee has a registered runner, and on a pool subject when the assignee has none. Created only for an open issue that has an assignee and the ready label, and only from an `issues` action of `labeled` or `assigned`. The steward is `issue.assignee`, or the first of `issue.assignees` when that is empty. One job per repository id and issue number; a repeat delivery is a duplicate and does not replace the stored text. The runner does not fetch the issue. | `internal/control/intake.go`, `internal/control/queue.go` |
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
-| What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
+| What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks, administration, and actions read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | What the gate may see (#111) | The base list plus `--gate-pass-env`, never a `SCHMEIDE_*` name, with `HOME` and `TMPDIR` at a per-job scratch directory that closing the worktree removes. It no longer inherits the runner process environment. | `internal/runner/env.go`, `internal/runner/workspace.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
