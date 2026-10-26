@@ -65,6 +65,12 @@ func TestJobTokenRefreshesOnlyWhenStale(t *testing.T) {
 	if got, err := tokens.get(t.Context()); err != nil || got != "t3" {
 		t.Fatalf("get with a minute left = %q, %v, want t3", got, err)
 	}
+	if got := tokens.current(); got != "t3" {
+		t.Errorf("current = %q, want t3, the latest token", got)
+	}
+	if got := (&jobToken{}).current(); got != "" {
+		t.Errorf("current before any get = %q, want empty", got)
+	}
 
 	down := errors.New("no control node")
 	failing := &jobToken{fetch: func(context.Context) (control.Token, error) { return control.Token{}, down }}
@@ -131,6 +137,8 @@ func TestJobOutlivingItsTokenOpensPR(t *testing.T) {
 	if n := mints.Load(); n != 2 {
 		t.Errorf("tokens minted = %d, want 2: one at claim, one after the session", n)
 	}
+	// The revoke uses the second token: the expired first one would be a 401.
+	w.awaitRevoked(t, 1)
 	assertNoRefusedCalls(t, w)
 }
 

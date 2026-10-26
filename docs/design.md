@@ -313,7 +313,8 @@ App installation token limited to the job's repository and to `contents:
 write`, `pull_requests: write`, `issues: write`, `checks: read`,
 `administration: read`, and `actions: read` (`internal/control/token.go`). The request is refused when the subject is not
 one of that steward's jobs. GitHub expires an installation token after one
-hour. Git receives the token as an `http.extraHeader` in that git command's
+hour; the runner revokes it with `DELETE /installation/token` when the delivery
+ends. Git receives the token as an `http.extraHeader` in that git command's
 environment, so the token is not written into git config.
 
 NATS access is per steward. `--runner-tokens` is a comma-separated list of

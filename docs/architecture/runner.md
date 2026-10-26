@@ -19,7 +19,7 @@ request, then reviews it and, when the repo asks, merges it. It works one job at
 | `internal/repoconfig` | `Load` and `Parse` of `.schmeide/config.toml`: gate, `check_wait`, `gate_timeout`, `session_timeout`, `[automate]` |
 | `internal/trust` | `Check`: the per (work directory, origin) trust prompt and its record |
 | `internal/refguard` | `Install`: a `reference-transaction` hook so a worktree can move only its own branch |
-| `internal/secretscan` | `Scan`: credential-shaped literals in tracked files, run before every push |
+| `internal/secretscan` | `ScanDiff`: credential-shaped literals and the job's own tokens on the lines a branch adds, run before every push; `Scan` reads every tracked file |
 | `internal/lintgate` | `Detect` and `Warning`: a warning comment when the gate skips a `make check` target or pre-commit config |
 | `internal/ciwatch` | `Run` (a check run), `NeedsTail`, `Tail` (last 4000 bytes of a check log) |
 | `internal/repomap` | `Map`: up to 8 KiB listing tracked files and Go top-level names, appended to every prompt |
@@ -125,6 +125,13 @@ stateDiagram-v2
 12. **Review**, then **merge** when `automate.merge = "on"`. See below.
 13. **Finish.** Comment the outcome on the issue with the marker appended, report the final state, delete the
     stage record, and `Ack`.
+14. **Revoke.** `Runner.revoke` calls `github.RevokeToken` (`github.go`), which sends
+    `DELETE /installation/token` with the token the delivery holds at that point (`jobToken.current`, which does
+    not refresh; a token a refresh replaced is left to expire). It is deferred right after the token arrives, so it
+    runs however the delivery ends: a final state, a `retrying` hand-back, a stuck-job drop, or a shutdown. It
+    runs on a context a shutdown does not cancel, with a 30 second deadline. A failure logs "could not revoke the
+    job's token; it expires within the hour" and changes nothing else. A delivery whose token request failed has
+    nothing to revoke.
 
 ### Retries and acknowledgment
 
@@ -254,11 +261,15 @@ bytes of output go to the runner log only (`gateOutcome`). A gate failure is fin
 
 ## Secret scan before push
 
-`Workspace.Push` and `Workspace.Restack` call `secretscan.Scan(worktree)` before any `git push`. It lists tracked
-files with `git ls-files -z` (real git binary, minimal environment) and matches PEM private keys, `ghp_` and
-`github_pat_` tokens, `glpat-` tokens, `AKIA` keys, and JWTs, skipping a line with `schmeide:allow-secret`. A hit
-refuses the push and names file, line, and kind, never the text. The scan covers every tracked file, not only the
-job's diff.
+`Workspace.Push` and `Workspace.Restack` call `worktree.scanSecrets` (`workspace.go`) before any `git push`. It
+runs `secretscan.ScanDiff(worktree, baseRef, credentials)`, which reads `git diff -U0 -M <baseRef>...HEAD` (real git
+binary, minimal environment) and checks only the added lines. `baseRef` is `refs/remotes/origin/<base>`; after a
+restack it is the new base. It matches PEM private keys, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and
+`github_pat_` tokens, `glpat-` tokens, `AKIA` keys, JWTs, `sk-ant-` Anthropic keys, and `xai-` xAI keys, skipping
+a line with `schmeide:allow-secret`. It also refuses an exact match of the job's installation token
+(`worktreeSpec.token`) and of the runner's NATS token (`worktreeSpec.secrets`, from `--nats-token`), whatever the
+line says. A hit refuses the push and names file, line, and kind, never the text. A literal that is already on
+the base, or that a rename carries over unchanged, is not read, so it does not block the job.
 
 `Push` then refuses to overwrite a remote branch whose head is not an ancestor of the local `HEAD`, and pushes
 without force. `Restack` force-pushes with `--force-with-lease` pinned to the head it started from.

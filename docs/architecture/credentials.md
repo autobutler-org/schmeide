@@ -39,7 +39,7 @@ flowchart TB
 | Control node to runner | job messages, a token for each of the steward's own jobs (and pool jobs for a `--pool` runner) | the App key, the webhook secret, other stewards' jobs, tokens, and stage records |
 | Runner to harness session | the brief, the worktree, the reduced environment | the job's installation token, the NATS token, `SCHMEIDE_*` settings |
 | Runner to gate | the worktree, the base environment, and `--gate-pass-env` | the job's installation token (it is only in git's environment), the NATS token, `SCHMEIDE_*` settings, the agent logins, the runner's `HOME` |
-| Worktree to remote | tracked files that pass the secret scan | credential-shaped literals |
+| Worktree to remote | the branch's commits, whose added lines pass the secret scan | credential-shaped literals, the job's installation token, the runner's NATS token |
 
 The session and the gate run as the runner's OS user, with that user's files. There is no container or OS
 sandbox. [FAILURE-MODES.md](../FAILURE-MODES.md#not-built) and [design.md](../design.md#open-decisions) say so.
@@ -53,7 +53,7 @@ sandbox. [FAILURE-MODES.md](../FAILURE-MODES.md#not-built) and [design.md](../de
 | Endpoint | `POST <github-api-url>/app/installations/<installation_id>/access_tokens` |
 | Repository scope | `repository_ids: [job.repo_id]`, the one repository |
 | Permissions requested | `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `administration: read`, `actions: read` |
-| Lifetime | one hour, set by GitHub. The first token of a delivery is requested at claim time; the runner asks for another whenever the one it holds is within five minutes of its `expires_at`. |
+| Lifetime | one hour, set by GitHub. The first token of a delivery is requested at claim time; the runner asks for another whenever the one it holds is within five minutes of its `expires_at`. The one held when the delivery ends is revoked. |
 | Who may ask | a runner on `schmeide.token.<steward>`, for a subject in `SCHMEIDE_JOBS` that is that steward's job, or a pool job when the steward registered with `--pool` (`Queue.tokenFor`) |
 | Where the runner keeps it | in memory only, in the job's `jobToken` (`internal/runner/token.go`); `forge.GitHub.Tokens` and every git command read it from there |
 
@@ -67,6 +67,18 @@ How the runner uses it:
 - REST and GraphQL: `Authorization: Bearer <token>`, built by `forge.GitHub.Bearer` before each call from
   `forge.GitHub.Tokens` (`internal/forge/github.go`, `internal/forge/queue.go`, and `RetargetPull` in
   `internal/runner/github.go`).
+
+### Revoking a delivery's token
+
+When the delivery ends, the runner revokes the token it holds with `DELETE <github-api-url>/installation/token`,
+authenticated with that token (`github.RevokeToken` in `internal/runner/github.go`, called from `Runner.revoke`
+with `jobToken.current`, which does not refresh). The call is deferred as soon as the first token arrives, so it
+runs after the outcome comment and the `Ack` of a final state, and also after a `retrying` hand-back, a stuck-job
+drop, and a shutdown hand-back: the next delivery mints a fresh token. A token that leaked during the job
+(through the gate, a log, or a commit) is then useful for the job's own length, not the full hour. Only the
+current token is revoked: a token a refresh replaced was within five minutes of its expiry and expires on its own.
+A failed revoke is logged as "could not revoke the job's token; it expires within the hour" and does not change
+the job's outcome; the token then lives until GitHub expires it.
 
 ### Refreshing a job's token
 
@@ -225,22 +237,33 @@ front of it.
 
 ## Secret scan before push
 
-`secretscan.Scan` runs before every `git push` from `Workspace.Push` and `Workspace.Restack`. It lists tracked
-files with the real git binary and a minimal environment (`PATH` and `GIT_CONFIG_GLOBAL=/dev/null`), so the scan
-neither hands the runner's secrets to git nor reads the process environment. It matches:
+`secretscan.ScanDiff` runs before every `git push` from `Workspace.Push` and `Workspace.Restack`. It reads only
+the lines the branch adds relative to its base: `git diff -U0 -M <base>...HEAD`, run with the real git binary and
+a minimal environment (`PATH` and `GIT_CONFIG_GLOBAL=/dev/null`), so the scan neither hands the runner's secrets
+to git nor reads the process environment. The three-dot form diffs from the merge base, so commits the base
+gained later are not read, and `-M` keeps a renamed file's unchanged lines out. It matches:
 
 | Kind | Pattern |
 | --- | --- |
 | PEM private key | `-----BEGIN ... PRIVATE KEY-----` |
-| GitHub token | `ghp_` plus 36, or `github_pat_` plus 20 or more |
+| GitHub token | `ghp_`, `gho_`, `ghu_`, `ghs_` (installation), or `ghr_` plus 36 or more, or `github_pat_` plus 20 or more |
 | GitLab token | `glpat-` plus 20 or more |
 | AWS access key | `AKIA` plus 16 |
 | JWT | `eyJ` and three base64url segments of 8 or more |
+| Anthropic API key | `sk-ant-` plus 20 or more |
+| xAI API key | `xai-` plus 20 or more |
+| runner credential | the job's installation token or the runner's NATS token, verbatim (8 characters or more) |
 
-A line containing `schmeide:allow-secret` is skipped. A finding refuses the push and names file, line, and kind,
-never the text. The refusal is a failed work outcome. The scan covers every tracked file, so a repository that
-already contains a matching literal without the marker cannot be pushed to by the factory. `.gitguardian.yaml` lists the same
-shapes in a comment for the GitGuardian scan on the schmeide repository itself.
+The NATS token has no fixed shape, so the runner passes it and the job's installation token to the scan, which
+refuses an exact match of either. The Anthropic and xAI keys are the ones `harnessEnv` hands the session through
+`ANTHROPIC_*` and `XAI_*`; the runner does not read their values, so only their shapes are matched.
+
+A line containing `schmeide:allow-secret` is skipped by the patterns. The marker does not excuse an exact match
+of a runner credential. A finding refuses the push and names file, line, and kind, never the text. The refusal
+is a failed work outcome. A literal that is already on the base does not block the job, so a repository that
+contains one can still be pushed to by the factory. `secretscan.Scan`, which reads every tracked file, is kept
+for the schmeide repository's own hygiene test (`TestTrackedFilesHaveNoCredentialLiterals`). `.gitguardian.yaml`
+lists the same shapes in a comment for the GitGuardian scan on the schmeide repository itself.
 
 ## Trust prompt
 

@@ -90,8 +90,33 @@ func stackBelow(ctx context.Context, gh forge.Forge, head, trunk string) (map[st
 }
 
 // github is the GitHub forge plus what the runner needs that forge.GitHub
-// does not have yet: retargeting a pull request.
+// does not have yet: retargeting a pull request and revoking the job's
+// installation token.
 type github struct{ forge.GitHub }
+
+// RevokeToken revokes token with DELETE /installation/token, so it stops
+// working before its hour is up. GitHub answers 204 No Content.
+func (g github) RevokeToken(ctx context.Context, token string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	const path = "/installation/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, strings.TrimSuffix(g.API, "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("github DELETE %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("github DELETE %s: %s: %s", path, resp.Status, data)
+	}
+	return nil
+}
 
 // RetargetPull implements [retargeter].
 func (g github) RetargetPull(ctx context.Context, number int, base string) error {

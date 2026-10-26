@@ -74,8 +74,8 @@ to that job's repository and to the permissions a runner needs to push, open
 pull requests, comment, read checks, read branch protection, and read Actions
 job logs. GitHub expires it after one hour, so
 a runner asks the control node for a new one for the same job when the one it
-holds is within five minutes of expiry. Runners hold no long-lived GitHub
-credential.
+holds is within five minutes of expiry, and revokes the one it holds when the
+delivery ends. Runners hold no long-lived GitHub credential.
 
 ## pending
 

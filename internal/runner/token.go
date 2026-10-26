@@ -41,6 +41,15 @@ func (j *jobToken) get(ctx context.Context) (string, error) {
 	return token.Token, nil
 }
 
+// current returns the token held now without refreshing it, or "" when get
+// has not fetched one. A token it replaced was within tokenRefreshMargin of
+// its expiry, so the delivery revokes only this one.
+func (j *jobToken) current() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.cur.Token
+}
+
 // stale reports whether token must be replaced at now: there is none yet,
 // or it expires within tokenRefreshMargin. A token without an expiry is
 // never stale.

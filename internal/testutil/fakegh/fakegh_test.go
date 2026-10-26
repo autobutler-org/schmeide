@@ -232,6 +232,44 @@ func TestCommentsSince(t *testing.T) {
 	}
 }
 
+func TestRevokeToken(t *testing.T) {
+	s := New(t, repo, token)
+	revoke := func() int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, s.URL+"/installation/token", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	s.FailRevoke(http.StatusBadGateway)
+	if got := revoke(); got != http.StatusBadGateway {
+		t.Fatalf("failed revoke status = %d, want 502", got)
+	}
+	if s.Revoked() != 0 {
+		t.Fatal("a failed revoke counted")
+	}
+
+	s.FailRevoke(0)
+	if got := revoke(); got != http.StatusNoContent {
+		t.Fatalf("revoke status = %d, want 204", got)
+	}
+	if s.Revoked() != 1 {
+		t.Fatalf("Revoked = %d, want 1", s.Revoked())
+	}
+	calls := s.Calls()
+	if len(calls) != 2 || calls[1] != "DELETE /installation/token" {
+		t.Fatalf("calls = %v, want two revokes", calls)
+	}
+}
+
 // TestAcceptedTokenExpires answers an accepted token until its expiry and
 // 401 Bad credentials from then on, as GitHub treats an installation token.
 func TestAcceptedTokenExpires(t *testing.T) {

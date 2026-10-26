@@ -17,6 +17,9 @@
 // token comes from the control node and is replaced with a new one when it
 // is within five minutes of expiry, so a job may run longer than one token
 // lives. The runner holds no other GitHub credential.
+// Before every push it scans the lines the branch adds for credentials,
+// including the job's own installation token and the runner's NATS token, and
+// it revokes the delivery's current installation token when the delivery ends.
 package runner
 
 import (
@@ -593,6 +596,11 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 	gh := github{forge.GitHub{API: r.opts.GitHubAPIURL, Repo: job.Repo, Tokens: tokens.get}}
+	// Every delivery mints its own token, so it is revoked however this
+	// delivery ends: a final state, a retry, a hand-back, or a shutdown. That
+	// runs after the outcome comment, the last call that needs it. A token
+	// the refresh replaced expires within tokenRefreshMargin on its own.
+	defer r.revoke(ctx, gh, job, tokens)
 	out := r.work(workCtx, gh, job, tokens.get)
 	if errors.Is(context.Cause(workCtx), errJobStuck) {
 		return
@@ -639,6 +647,15 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	}
 	if err := msg.Ack(); err != nil {
 		r.log.Error("could not acknowledge the job; it will be redelivered", "repo", job.Repo, "issue", job.Issue, "err", err)
+	}
+}
+
+// revoke revokes the delivery's installation token. It runs on a context
+// that a shutdown does not cancel. A failure is logged and changes nothing
+// else: the token then expires on its own within the hour.
+func (r *Runner) revoke(ctx context.Context, gh github, job control.Job, tokens *jobToken) {
+	if err := gh.RevokeToken(context.WithoutCancel(ctx), tokens.current()); err != nil {
+		r.log.Warn("could not revoke the job's token; it expires within the hour", "repo", job.Repo, "issue", job.Issue, "err", err)
 	}
 }
 
@@ -804,6 +821,7 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 		id:       fmt.Sprintf("%d-%d", job.RepoID, job.Issue),
 		repoID:   strconv.FormatInt(job.RepoID, 10),
 		gateEnv:  gateEnv(os.Environ(), r.opts.GatePassEnv),
+		secrets:  []string{r.opts.NATSToken},
 	})
 	if err != nil {
 		return failed(err)

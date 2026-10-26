@@ -48,7 +48,7 @@ sequenceDiagram
     R->>W: prText, Commit
     R->>W: Run(gate), gate_timeout
     R->>Q: stage gate_passed
-    R->>W: Push: secretscan.Scan, ls-remote, git push
+    R->>W: Push: secretscan.ScanDiff, ls-remote, git push
     W->>GH: push {issue}_{slug}
     R->>GH: OpenPull(title, body, branch, base)
     R->>Q: stage pr_opened (PR URL, opened time)
@@ -284,6 +284,9 @@ sequenceDiagram
         R->>GH: comment without output
         R->>ST: status gate_failed
         R->>JS: Ack
+    end
+    opt the delivery got a token
+        R->>GH: DELETE /installation/token (revoke; a failure is only logged)
     end
 ```
 
