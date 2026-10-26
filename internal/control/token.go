@@ -80,8 +80,11 @@ func (m TokenMinter) appJWT(now time.Time) (string, error) {
 }
 
 // Mint returns an installation token for the job, limited to the job's
-// repository and to what a runner needs to push a branch, open a PR, and
-// list check runs. GitHub expires installation tokens after one hour.
+// repository and to what a runner needs: push a branch, open and merge a PR,
+// comment, list check runs, read branch protection before a factory merge
+// (administration: read), and read an Actions job log for a CI fix round
+// (actions: read). GitHub expires installation tokens after one hour; the
+// runner asks for a new one before then, and each request mints a new token.
 func (m TokenMinter) Mint(ctx context.Context, job Job) (Token, error) {
 	jwt, err := m.appJWT(time.Now())
 	if err != nil {
@@ -90,10 +93,12 @@ func (m TokenMinter) Mint(ctx context.Context, job Job) (Token, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"repository_ids": []int64{job.RepoID},
 		"permissions": map[string]string{
-			"contents":      "write",
-			"pull_requests": "write",
-			"issues":        "write",
-			"checks":        "read",
+			"contents":       "write",
+			"pull_requests":  "write",
+			"issues":         "write",
+			"checks":         "read",
+			"administration": "read",
+			"actions":        "read",
 		},
 	})
 	if err != nil {

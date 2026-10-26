@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 // open blockers' pull requests have to be one linear stack, and the new pull
 // request stacks on its top: the one whose chain of bases down to the
 // default branch holds every other one. Blockers that do not form one chain,
-// such as two stacked side by side, are refused.
+// such as two stacked side by side, are refused with errNotOneStack.
 func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) {
 	base, err := gh.DefaultBranch(ctx)
 	if err != nil {
@@ -60,8 +61,12 @@ func baseBranch(ctx context.Context, gh forge.Forge, issue int) (string, error) 
 			return top, nil
 		}
 	}
-	return "", fmt.Errorf("the open dependencies' pull requests (%s) are not one linear stack, and schmeide stacks only on a single chain of blockers", strings.Join(heads, ", "))
+	return "", fmt.Errorf("the open dependencies' pull requests (%s) are not one linear stack, and %w", strings.Join(heads, ", "), errNotOneStack)
 }
+
+// errNotOneStack is open blockers whose pull requests do not form one chain.
+// A retry does not change them, so the job fails finally.
+var errNotOneStack = errors.New("schmeide stacks only on a single chain of blockers")
 
 // stackBelow is the set of schmeide branches under head: its pull request's
 // base, that branch's base, and so on down to trunk.
@@ -89,10 +94,9 @@ func stackBelow(ctx context.Context, gh forge.Forge, head, trunk string) (map[st
 // installation token.
 type github struct{ forge.GitHub }
 
-// RevokeToken revokes the installation token g holds with
-// DELETE /installation/token, so it stops working before its hour is up.
-// GitHub answers 204 No Content.
-func (g github) RevokeToken(ctx context.Context) error {
+// RevokeToken revokes token with DELETE /installation/token, so it stops
+// working before its hour is up. GitHub answers 204 No Content.
+func (g github) RevokeToken(ctx context.Context, token string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	const path = "/installation/token"
@@ -100,7 +104,7 @@ func (g github) RevokeToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -123,11 +127,15 @@ func (g github) RetargetPull(ctx context.Context, number int, base string) error
 		return err
 	}
 	path := fmt.Sprintf("/repos/%s/pulls/%d", g.Repo, number)
+	auth, err := g.Bearer(ctx)
+	if err != nil {
+		return fmt.Errorf("github PATCH %s: %w", path, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, strings.TrimSuffix(g.API, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)

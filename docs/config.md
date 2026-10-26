@@ -5,6 +5,11 @@ at the repo root. The file is TOML. Every value is a quoted string. A key the
 file does not recognize is an error, so a typo fails loudly instead of being
 ignored.
 
+The runner reads the file from the base branch before any harness session. A
+missing file, or any error below, fails the job finally: one comment on the
+issue names the file and the error, no pull request opens, and the job is not
+retried. Push a fixed file and add the ready label again to make a new job.
+
 A minimal file:
 
 ```toml
@@ -176,7 +181,7 @@ serves:
 
 | Flag | Default | Overridden by |
 | --- | --- | --- |
-| `--ack-wait` | `5m` | never; the runner heartbeats every third of it |
+| `--ack-wait` | `5m` | the shared consumer's `AckWait`, when another runner created it first; the runner heartbeats every third of the lease in force |
 | `--stuck-after` | `3h` | never; a state change resets it |
 | `--gate-timeout` | `30m` | `gate_timeout` |
 | `--session-timeout` | `2h` | `session_timeout` |
@@ -189,10 +194,25 @@ minutes for a repo with `gate_timeout = "30m"`.
 `gate`, `check_wait`, and the `[automate]` switches have no runner or control
 flag. They come from the repo config alone.
 
+`--gate-pass-env` (`SCHMEIDE_GATE_PASS_ENV`) is a comma-separated list of
+variable names the gate sees on top of the base list. It defaults to empty. A
+`SCHMEIDE_` name is refused at startup with `--gate-pass-env lists <NAME>: the
+gate never sees a SCHMEIDE_ name`. The gate's `HOME` and `TMPDIR` are always a
+per-job scratch directory under `--work-dir`. Never list a secret. See
+[architecture/credentials.md](architecture/credentials.md#gate-environment) and
+JN-PR-021.
+
 `ack-wait` is the JetStream lease for a claimed job. A runner must stay
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
 the longer no-progress budget: when it expires the runner cancels the work and
 Naks the job for redelivery. They are operator settings, not repository keys.
+
+`ack-wait` is applied only by the runner that creates a consumer. All of a
+steward's runners share one consumer, and all `--pool` runners share another,
+so give every runner that shares a consumer the same `--ack-wait`. A runner
+whose value differs logs a warning and heartbeats at the consumer's lease. See
+[FAILURE-MODES.md](FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs) for how
+to change the lease.
 
 ## Errors
 

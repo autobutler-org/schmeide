@@ -23,11 +23,15 @@ func (g GitHub) graphql(ctx context.Context, query string, vars map[string]any, 
 	// api.github.com serves /graphql; GitHub Enterprise serves /api/graphql
 	// next to /api/v3.
 	endpoint := strings.TrimSuffix(strings.TrimSuffix(g.API, "/"), "/v3") + "/graphql"
+	auth, err := g.Bearer(ctx)
+	if err != nil {
+		return fmt.Errorf("github graphql: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

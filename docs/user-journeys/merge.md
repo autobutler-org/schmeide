@@ -154,6 +154,8 @@ commit has no check runs.
 **Notes:**
 
 - The fix round counts against `--max-review-rounds`.
+- Reading the log calls `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`,
+  which needs Actions: read. The job token carries it.
 - If the log cannot be read, the brief says "(schmeide could not read the log:
   ...)" instead of the tail.
 - Covered by `TestCIFixRoundThenMerge`.
@@ -267,11 +269,11 @@ answers 404), or the token may not read it (GitHub answers 403).
 **Notes:**
 
 - Reading protection needs the Administration: read permission. The control
-  node mints each job's token with only contents, pull_requests, issues, and
-  checks (`internal/control/token.go`), so against github.com the read is
-  expected to answer 403 even when the App has Administration: read. In
-  that case a branch that requires approvals reaches JN-MERGE-013, not
-  JN-MERGE-010.
+  node mints each job's token with administration: read
+  (`internal/control/token.go`, pinned by `TestTokenPerJob`), so against
+  github.com a protected branch answers 200 and reaches JN-MERGE-010. A 403
+  means the token was refused the read some other way; then a branch that
+  requires approvals reaches JN-MERGE-013, not JN-MERGE-010.
 - Covered by `TestMergeWhenGreenMergesAnUnprotectedBranch`.
 
 ---
@@ -358,13 +360,18 @@ merge (for example a conflict, or a rule the runner could not see).
 
 **Notes:**
 
-- A bottom that was rebased and then merged still counts as merged.
+- A bottom that was rebased and then merged still counts as merged. When
+  GitHub does not report a merge time for the pull request below, the runner
+  checks whether the base it last built on, or that pull request's latest head
+  (`refs/pull/<n>/head`, which outlives a deleted branch, then the base
+  branch), is in the default branch.
 - Covered by `TestMergeWhenGreenMergesAStackBottomFirst`,
   `TestMergeWhenGreenRetargetsAndRebasesAfterTheBottomMerges`,
   `TestMergeWhenGreenRetargetsWhenTheBottomIsRebasedThenMerged`,
   `TestMergeWhenGreenRebasesWhenGitHubRetargeted`,
   `TestMergeWhenGreenFollowsAMovingBase`,
-  `TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges`.
+  `TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges`,
+  `TestMergeWhenGreenRestacksAfterTheBottomIsRebasedAndMerged`.
 
 ---
 
@@ -406,7 +413,10 @@ without merging.
 
 **Notes:**
 
-- Covered by `TestMergeWhenGreenRefusesAStackOnAClosedPull`.
+- A pull request below that was rebased and then closed unmerged still
+  reads as closed: its latest head is not in the default branch.
+- Covered by `TestMergeWhenGreenRefusesAStackOnAClosedPull` and
+  `TestMergeWhenGreenRefusesAStackOnARebasedPullThatClosed`.
 
 ---
 

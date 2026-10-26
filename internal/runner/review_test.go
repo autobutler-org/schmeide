@@ -26,7 +26,7 @@ func (stubWorkspace) Resume(context.Context) error                  { return nil
 func (stubWorkspace) Count(context.Context, string) (int, error)    { return 0, nil }
 func (stubWorkspace) Close() error                                  { return nil }
 func (stubWorkspace) Restack(context.Context, string) (bool, error) { return false, nil }
-func (stubWorkspace) BaseMerged(context.Context, string) (bool, error) {
+func (stubWorkspace) BaseMerged(context.Context, string, int) (bool, error) {
 	return true, nil
 }
 
