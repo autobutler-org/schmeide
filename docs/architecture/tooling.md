@@ -82,6 +82,9 @@ Jobs of `ci.yml`:
 | `e2e` | `make test/e2e` | The journeys in [End-to-end journeys](#end-to-end-journeys). |
 | `scripts` | `make test/scripts` | Runs every `scripts/*_test.sh`. |
 
+The `main` ruleset requires the checks `build` (the job in `image.yml`), `lint`, `test`, `govulncheck`, `e2e`,
+and `scripts`, on a branch that is up to date with `main`, and allows squash merges only.
+
 `make check` (local) runs `check/format`, `check/tidy`, `check/vet`, `check/lint`, `test`, and `test/scripts`.
 It does not run the race tests, `check/vuln`, or e2e; those are CI jobs, so run `make test/race` or
 `make test/e2e` yourself when a change needs them.
