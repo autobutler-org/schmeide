@@ -272,6 +272,8 @@ persistent storage.
 **Notes:**
 
 - `schmeide status --json` shows each runner's `version`.
+- The runner re-publishes its registration every minute, so the warning
+  repeats once a minute while the skewed runner runs.
 - Covered by `TestRegistrationVersionSkew` and `TestSkewed`.
 
 ---

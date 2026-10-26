@@ -139,7 +139,7 @@ not change one that already exists.
 
 When the assignee has a live registration, the job stays on that steward's
 subject. A registration counts for `RegistrationTTL` (three minutes) after it
-was stored, and a runner is expected to publish it again every
+was stored, and a running runner publishes it again every
 `RegistrationInterval` (one minute), so a runner that stopped falls out of
 routing within three minutes. Several runners for one steward share one queue
 consumer, so each of that steward's jobs goes to one of them.

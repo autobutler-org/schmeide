@@ -77,10 +77,14 @@ runner.
 **Expected result:**
 
 - alice's pool runner does not take it. bob's runner takes it.
+- The same holds however long bob's runner has been running: it re-publishes
+  its registration every minute, so it never ages past the three-minute TTL
+  while it runs.
 
 **Notes:**
 
-- Covered by `internal/runner` `TestRegisteredStewardKeepsTheJobFromThePool`.
+- Covered by `internal/runner` `TestRegisteredStewardKeepsTheJobFromThePool`;
+  the refresh by `TestRunnerKeepsItsRegistrationAlive`.
 
 ---
 
@@ -235,9 +239,11 @@ it. alice runs a pool runner.
 - The control node logs nothing when a registration expires. It logs
   `msg="runner registered"` for every registration it stores, each refresh
   included.
-- Requires runners that re-publish their registration every
-  `control.RegistrationInterval`; a runner that registers only at startup
-  falls out of routing three minutes after it starts.
+- A running runner re-publishes its registration every
+  `control.RegistrationInterval` (`Runner.keepRegistered` in
+  `internal/runner/runner.go`) and stops when it shuts down, so only a stopped
+  or disconnected runner falls out of routing.
 - Covered by `internal/control` `TestRegistrationExpiresWithoutRefresh`,
   `TestExpiredRegistrationSendsTheNextJobToThePool`, and
-  `TestRestartKeepsOnlyLiveRegistrations`.
+  `TestRestartKeepsOnlyLiveRegistrations`, and `internal/runner`
+  `TestRunnerKeepsItsRegistrationAlive`.

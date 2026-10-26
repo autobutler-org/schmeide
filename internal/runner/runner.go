@@ -192,6 +192,11 @@ type Runner struct {
 	stages jetstream.KeyValue
 	// stage is how far the current job got. Only the job's goroutine uses it.
 	stage stage
+	// registration is what register published. Run publishes it again every
+	// registerEvery so the control node keeps the runner registered past
+	// control.RegistrationTTL.
+	registration  Registration
+	registerEvery time.Duration
 }
 
 // The stages a job records. A job recorded at stagePROpened or stageReview
@@ -291,7 +296,7 @@ func New(ctx context.Context, o Options, log *slog.Logger) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runner{opts: o, log: log, nc: nc, failures: map[string]int{}}
+	r := &Runner{opts: o, log: log, nc: nc, failures: map[string]int{}, registerEvery: control.RegistrationInterval}
 	if err := r.register(ctx, js); err != nil {
 		nc.Close()
 		return nil, err
@@ -353,9 +358,10 @@ func (r *Runner) register(ctx context.Context, js jetstream.JetStream) error {
 		r.stages = nil
 	}
 	host, _ := os.Hostname()
-	r.publish(control.RegisterSubject(r.opts.Steward, host), Registration{
+	r.registration = Registration{
 		Steward: r.opts.Steward, Harnesses: names, Host: host, Pool: r.opts.Pool, Version: r.opts.Version,
-	})
+	}
+	r.publish(control.RegisterSubject(r.opts.Steward, host), r.registration)
 	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := r.nc.FlushWithContext(flushCtx); err != nil {
@@ -387,11 +393,23 @@ func (r *Runner) sharedConsumer(ctx context.Context, js jetstream.JetStream, nam
 func (r *Runner) Close() { r.nc.Close() }
 
 // Run works jobs one at a time until ctx is canceled or the connection to the
-// control node is closed.
+// control node is closed. While it runs it publishes the runner's
+// registration again every control.RegistrationInterval, so the control node
+// does not expire it, and it stops publishing before it returns.
 //
 // ponytail: one job at a time per runner; run jobs concurrently (each already
 // has its own worktree) when a steward's queue backs up.
 func (r *Runner) Run(ctx context.Context) error {
+	refreshCtx, stop := context.WithCancel(ctx)
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		r.keepRegistered(refreshCtx)
+	}()
+	defer func() {
+		stop()
+		<-refreshed
+	}()
 	for ctx.Err() == nil {
 		msg, err := r.next()
 		switch {
@@ -409,6 +427,21 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// keepRegistered publishes the registration every registerEvery until ctx is
+// done. A failed publish is logged and the next tick tries again.
+func (r *Runner) keepRegistered(ctx context.Context) {
+	tick := time.NewTicker(r.registerEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			r.publish(control.RegisterSubject(r.registration.Steward, r.registration.Host), r.registration)
+		}
+	}
 }
 
 // next returns the steward's own job when one is waiting. A pool job is

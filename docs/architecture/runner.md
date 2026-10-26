@@ -46,6 +46,14 @@ terminal. `New` then:
 out and `--pool` is set, from the pool consumer. So a runner always takes its own steward's job first. It returns
 an error when the NATS connection is closed.
 
+While `Run` runs, `keepRegistered` publishes the same `Registration` again on `schmeide.runners.<steward>.<host>` (`control.RegisterSubject`) every
+`control.RegistrationInterval` (1 minute), including while a job is being worked. The control node counts a
+registration for `control.RegistrationTTL` (3 minutes), so this refresh is what keeps a long-running runner in pool
+routing and in `schmeide status`. A publish that fails is logged as `could not report to the control node` with
+the subject, and the next tick tries again; it does not stop the runner. When `ctx` is canceled or `Run` returns,
+the refresh stops before `Run` returns, so a stopped runner's registration expires three minutes after its last
+refresh.
+
 ## A job inside the runner
 
 ```mermaid

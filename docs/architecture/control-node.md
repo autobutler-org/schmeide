@@ -270,8 +270,8 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 ## Runner registration and status
 
 A runner publishes a `Registration{steward, harnesses, host, pool, version}` on
-`schmeide.runners.<steward>.<host>` (`RegisterSubject`) at startup and flushes, and is expected to publish it
-again every `RegistrationInterval` (1 minute) while it runs. In the host token, `.`, `*`, `>`, and white space
+`schmeide.runners.<steward>.<host>` (`RegisterSubject`) at startup and flushes, and publishes it again every
+`RegistrationInterval` (1 minute) while it runs (`Runner.keepRegistered`). In the host token, `.`, `*`, `>`, and white space
 become `_`, and an empty host is `_`. It then publishes a `Status{state, detail, attempts}` on its job's status
 subject at every state change. The control node publishes one `pending` status on that subject when it creates
 the job (see Publishing a job above); every runner state supersedes it, and the stream's one-message-per-subject
