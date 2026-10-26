@@ -194,6 +194,14 @@ minutes for a repo with `gate_timeout = "30m"`.
 `gate`, `check_wait`, and the `[automate]` switches have no runner or control
 flag. They come from the repo config alone.
 
+`--gate-pass-env` (`SCHMEIDE_GATE_PASS_ENV`) is a comma-separated list of
+variable names the gate sees on top of the base list. It defaults to empty. A
+`SCHMEIDE_` name is refused at startup with `--gate-pass-env lists <NAME>: the
+gate never sees a SCHMEIDE_ name`. The gate's `HOME` and `TMPDIR` are always a
+per-job scratch directory under `--work-dir`. Never list a secret. See
+[architecture/credentials.md](architecture/credentials.md#gate-environment) and
+JN-PR-021.
+
 `ack-wait` is the JetStream lease for a claimed job. A runner must stay
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
 the longer no-progress budget: when it expires the runner cancels the work and

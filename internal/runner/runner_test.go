@@ -519,11 +519,11 @@ func TestLintGateMismatchCommentsWithoutFailingTheJob(t *testing.T) {
 // TestJobLocksGateGitAndHarnessEnvironments runs one job and checks the three
 // environments that job starts. The harness session is harnessEnv: the base
 // list plus ANTHROPIC_, CLAUDE_, XAI_, and --pass-env, with no SCHMEIDE_ name.
-// newWorktree is called without an environment, so git sees only the variables
-// newWorktree appends and does not see SCHMEIDE_NATS_TOKEN. The gate command's
-// environment stays nil, so the gate inherits the runner process environment,
-// including SCHMEIDE_NATS_TOKEN and SCHMEIDE_TEST_GATE_PROOF, which is not on
-// the base list. --pass-env does not filter the gate.
+// newWorktree is called without a git environment, so git sees only the
+// variables newWorktree appends and does not see SCHMEIDE_NATS_TOKEN. The gate
+// is gateEnv: it sees PATH and SSL_CERT_FILE from the base list and a name
+// from --gate-pass-env, never SCHMEIDE_NATS_TOKEN, and its HOME and TMPDIR
+// are a scratch directory that is gone once the job ends.
 func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	const secret = "gate-sees-this-nats-secret"
 	dir := t.TempDir()
@@ -550,11 +550,19 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	}
 
 	w := newWorld(t)
-	gate := `printf '%s' "$SCHMEIDE_NATS_TOKEN" > "$SCHMEIDE_TEST_GATE_PROOF"`
+	// The gate writes its whole environment to the proof file, named through
+	// --gate-pass-env, and runs go so PATH and the scratch HOME are exercised.
+	gate := `go env GOROOT >/dev/null && env > "$GATE_PROOF"`
 	w.pushConfig(t, "gate = "+strconv.Quote(gate)+"\n")
 
+	realHome := t.TempDir()
 	t.Setenv("SCHMEIDE_NATS_TOKEN", secret)
 	t.Setenv("SCHMEIDE_TEST_GATE_PROOF", proof)
+	t.Setenv("GATE_PROOF", proof)
+	t.Setenv("SSL_CERT_FILE", "/certs/ca.pem")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("HOME", realHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(realHome, ".config"))
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var mu sync.Mutex
@@ -568,7 +576,9 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 		}
 		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600)
 	}}
-	w.start(t, "alice", h)
+	r, _ := w.runnerWith(t, "alice", h, false)
+	r.opts.GatePassEnv = []string{"GATE_PROOF", "SCHMEIDE_TEST_GATE_PROOF"}
+	w.run(t, r)
 	w.publish(t, "alice", 7)
 
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
@@ -581,8 +591,35 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gate proof: %v", err)
 	}
-	if string(gotProof) != secret {
-		t.Errorf("gate wrote %q, want SCHMEIDE_NATS_TOKEN %q", gotProof, secret)
+	gateEnv := strings.Split(strings.TrimSpace(string(gotProof)), "\n")
+	if slices.ContainsFunc(gateEnv, func(v string) bool { return strings.HasPrefix(v, "SCHMEIDE_") }) ||
+		strings.Contains(string(gotProof), secret) {
+		t.Errorf("gate environment has a SCHMEIDE_ name:\n%s", gotProof)
+	}
+	for _, want := range []string{"SSL_CERT_FILE=/certs/ca.pem", "GATE_PROOF=" + proof} {
+		if !slices.Contains(gateEnv, want) {
+			t.Errorf("gate environment lacks %s:\n%s", want, gotProof)
+		}
+	}
+	for _, leaked := range []string{"AWS_SECRET_ACCESS_KEY=", "XDG_CONFIG_HOME="} {
+		if slices.ContainsFunc(gateEnv, func(v string) bool { return strings.HasPrefix(v, leaked) }) {
+			t.Errorf("gate environment has %s:\n%s", leaked, gotProof)
+		}
+	}
+	var home, tmp string
+	for _, v := range gateEnv {
+		if h, ok := strings.CutPrefix(v, "HOME="); ok {
+			home = h
+		}
+		if d, ok := strings.CutPrefix(v, "TMPDIR="); ok {
+			tmp = d
+		}
+	}
+	if home == "" || home != tmp || !filepath.IsAbs(home) || home == realHome {
+		t.Errorf("gate HOME = %q, TMPDIR = %q, want one absolute scratch directory", home, tmp)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("gate scratch directory %s is still there after the job: %v", home, err)
 	}
 
 	gitLog, err := os.ReadFile(logPath)

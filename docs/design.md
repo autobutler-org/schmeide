@@ -327,21 +327,29 @@ node's own NATS connection uses a generated password
 `internal/runner/env.go` names what a job may see. The base list is `PATH`,
 `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `TZ`, `TMPDIR`, the proxy
 variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and the lowercase forms),
-`SSL_CERT_FILE`, `SSL_CERT_DIR`, any name starting with `LC_` or `XDG_`, and
-any name passed in `--pass-env`. A harness session also sees names starting
-with `ANTHROPIC_`, `CLAUDE_`, or `XAI_`. The session keeps those prefixes
-from the runner's own environment so an existing login still works.
-schmeide does not mint or store agent keys. The runner starts the session
-with that environment, so the session does not see the runner's `SCHMEIDE_*`
-settings, including its NATS token.
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, and any name starting with `LC_` or `XDG_`.
+A harness session sees the base list, any name passed in `--pass-env`, and
+names starting with `ANTHROPIC_`, `CLAUDE_`, or `XAI_`. The session keeps
+those prefixes from the runner's own environment so an existing login still
+works. schmeide does not mint or store agent keys. The runner starts the
+session with that environment, so the session does not see the runner's
+`SCHMEIDE_*` settings, including its NATS token.
 
-The worktree runs git and the gate with whatever environment it was given, and
-adds the installation token only to git's environment. The runner does not pass
-the base list when it creates the worktree (`internal/runner/runner.go`). Git's
-environment is then only the token variables, and the gate inherits the runner
-process's environment. The gate's output is not posted to the issue. The
-comment names the command and the failure, and the output tail stays in the
-runner's log.
+The gate sees the base list and any name passed in `--gate-pass-env`, and
+never a `SCHMEIDE_*` name: the runner refuses one in `--gate-pass-env`, and
+the filter drops it anyway. `HOME` and `TMPDIR` point at a scratch directory
+of the job's own under `--work-dir` (`scratch/<job>`), outside the checkout,
+and `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and
+`XDG_STATE_HOME` are dropped so those default under it too. Closing the
+worktree removes that directory. The gate also gets the repository's shared
+Go caches (`GOCACHE`, `GOMODCACHE`), so `go` and `make` still work with
+`PATH` and the certificate variables from the base list.
+
+Git gets its own environment: the worktree adds the installation token to
+it, and the runner gives it nothing else (`internal/runner/runner.go`), so
+the token never reaches the gate or the session. The gate's output is not
+posted to the issue. The comment names the command and the failure, and the
+output tail stays in the runner's log.
 
 ### Deployment
 
@@ -431,6 +439,7 @@ Not in the first slice, and not shipped:
 | How the runner is verified | Automated tests. The runner tests stand up the embedded queue, a fake GitHub REST API, and a fake harness. Intake tests use saved webhook payloads. | `internal/runner/runner_test.go`, `internal/harness/fake.go`, `internal/control/testdata` |
 | What a runner may authenticate as | A per-steward NATS token from `--runner-tokens`. A per-job GitHub App installation token scoped to that repository and to contents, pull requests, and issues write, and checks, administration, and actions read. No long-lived GitHub credential on the runner. | `internal/control/queue.go`, `internal/control/token.go` |
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
+| What the gate may see (#111) | The base list plus `--gate-pass-env`, never a `SCHMEIDE_*` name, with `HOME` and `TMPDIR` at a per-job scratch directory that closing the worktree removes. It no longer inherits the runner process environment. | `internal/runner/env.go`, `internal/runner/workspace.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
 | Merge default (#32, #197) | `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers have to be one linear stack, and the top of it is the base (#94); blockers that are not one chain fail the job, and the runner comments that they are not one linear stack and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |

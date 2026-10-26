@@ -505,3 +505,40 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
 **Notes:**
 
 - Covered by `TestReadyLabelIsConfigurable`.
+
+---
+
+### JN-PR-021: The gate runs in a locked-down environment
+
+**Preconditions:** A runner started with `SCHMEIDE_NATS_TOKEN`, an
+`ANTHROPIC_API_KEY`, and `--gate-pass-env GOPATH`; a repo whose gate is
+`env > "$TMPDIR/env.txt"; cat "$TMPDIR/env.txt"; test "$HOME" = "$TMPDIR"`.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Start a second runner with `--gate-pass-env SCHMEIDE_NATS_TOKEN`.
+
+**Expected result:**
+
+- Step 1: the gate passes and the pull request opens (JN-PR-012). The gate's
+  environment holds the base list (`PATH`, `USER`, `LANG`, the proxy and
+  certificate variables, `LC_*`, `XDG_*`) and `GOPATH`, plus `GOCACHE`,
+  `GOMODCACHE`, and `GOFLAGS`. It holds no `SCHMEIDE_*` name, no
+  `ANTHROPIC_*`, `CLAUDE_*`, or `XAI_*` name, and no job token. `HOME` and
+  `TMPDIR` are `<work-dir>/scratch/<repo_id>-<issue>`, and that directory is
+  gone once the job ends.
+- Step 2: the runner exits with code 2 and prints `schmeide runner:
+  --gate-pass-env lists SCHMEIDE_NATS_TOKEN: the gate never sees a SCHMEIDE_
+  name` and `Run 'schmeide runner --help' for usage.`
+
+**Notes:**
+
+- The gate still runs as the runner's OS user and can read that user's files
+  by absolute path. See `docs/architecture/credentials.md`, "Gate
+  environment".
+- Covered by `TestGateEnvKeepsBaseAndGatePassEnvAndDropsSecrets`,
+  `TestScratchHomeReplacesHomeTmpdirAndXDGDirs`,
+  `TestGateRunsInAScratchHomeThatCloseRemoves`,
+  `TestJobLocksGateGitAndHarnessEnvironments`, and
+  `TestMainRefusesASchmeideGatePassEnv` in `internal/runner`. No e2e test.

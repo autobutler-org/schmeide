@@ -175,6 +175,7 @@ A different origin asks again, even for the same work directory.
   cache/<repo_id>/
     go-build/                       GOCACHE shared by the gate and every session for this repository
     pkg/mod/                        GOMODCACHE, written with -modcacherw
+  scratch/<repo_id>-<issue>/        the gate's HOME and TMPDIR, mode 0700, removed by Close
 ```
 
 `newWorktree` (`workspace.go`):
@@ -187,7 +188,11 @@ A different origin asks again, even for the same work directory.
    directory from an interrupted attempt is removed first.
 4. Installs the ref guard and sets `core.hooksPath` in the worktree's own config.
 
-`Close` runs `git worktree remove --force` and deletes the local branch. The clone and the caches stay.
+Before step 1 it removes any leftover `scratch/<repo_id>-<issue>` and creates it again with mode `0700`. A
+failure there fails the job with `create the gate scratch directory: <err>; check that --work-dir is writable`.
+
+`Close` runs `git worktree remove --force`, deletes the local branch, and removes the scratch directory. The clone
+and the caches stay.
 
 Commits are made with `-c commit.gpgsign=false` as `--git-name` / `--git-email` (default `schmeide[bot]`), passed
 through `GIT_AUTHOR_*` and `GIT_COMMITTER_*`.
@@ -240,8 +245,10 @@ the session deadline killed it. The session leader also leads its own process gr
 `Workspace.Run` (`internal/runner/workspace.go`) runs `sh -c <gate>` in the worktree, in its own process session
 (`Setsid`), detached from the runner's terminal so `SIGTTOU` and `SIGTTIN` cannot stop it, with `cmd.Cancel`
 killing the session leader's process group.
-The environment is the runner process's own environment (the worktree is created with a nil env, so the gate
-falls back to `os.Environ()`), plus the Go cache variables. The deadline is `gate_timeout` from the repo config,
+The environment is `gateEnv(os.Environ(), --gate-pass-env)`: the base list, `LC_*` and `XDG_*`, and the
+`--gate-pass-env` names, never a `SCHMEIDE_*` name and never the harness prefixes. `scratchHome` then points `HOME`
+and `TMPDIR` at the job's scratch directory, and the Go cache variables are added. See
+[credentials.md](credentials.md#gate-environment). The deadline is `gate_timeout` from the repo config,
 or `--gate-timeout`. A failure posts the command and error on the issue but never the output; the last 4000
 bytes of output go to the runner log only (`gateOutcome`). A gate failure is final.
 
