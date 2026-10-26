@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,33 @@ func TestFakeagentReceivesWholeEnv(t *testing.T) {
 			}
 			if got, want := strings.TrimSpace(out.String()), "xai=xai-value secret=secret-value"; got != want {
 				t.Errorf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A session in the runner's process session would be a background group on
+// the runner's terminal and stop on SIGTTOU, so it must lead its own session.
+func TestFakeagentRunsInItsOwnSession(t *testing.T) {
+	for _, h := range fakeagentHarnesses() {
+		t.Run(h.Name(), func(t *testing.T) {
+			dir := t.TempDir()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- h.Run(ctx, Request{Dir: dir, Env: scriptEnv("edit child.pid $$\nhang")})
+			}()
+
+			pid := childPID(t, dir)
+			out, err := exec.Command("ps", "-o", "sid=", "-p", strconv.Itoa(pid)).Output()
+			cancel()
+			<-done
+			if err != nil {
+				t.Fatalf("ps for pid %d = %v", pid, err)
+			}
+			if sid := strings.TrimSpace(string(out)); sid != strconv.Itoa(pid) {
+				t.Errorf("session id = %s, want %d: the session shares the runner's session and terminal", sid, pid)
 			}
 		})
 	}

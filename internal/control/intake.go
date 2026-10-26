@@ -242,13 +242,16 @@ type Intake struct {
 	Publish func(ctx context.Context, job Job) (created bool, err error)
 }
 
-// Handle verifies one webhook delivery and publishes a job if it describes an
-// assigned, ready-labeled issue. event is the X-GitHub-Event header and
-// signature is the X-Hub-Signature-256 header.
-func (in Intake) Handle(ctx context.Context, event, signature string, body []byte) (Outcome, error) {
-	if err := VerifySignature(in.Secret, body, signature); err != nil {
-		return "", err
-	}
+// Verify checks one webhook delivery's X-Hub-Signature-256 header against
+// the secret. It returns an error wrapping ErrBadSignature on a mismatch.
+func (in Intake) Verify(body []byte, signature string) error {
+	return VerifySignature(in.Secret, body, signature)
+}
+
+// Handle publishes a job if a delivery describes an assigned, ready-labeled
+// issue. event is the X-GitHub-Event header. The caller must have checked
+// the body with Verify first.
+func (in Intake) Handle(ctx context.Context, event string, body []byte) (Outcome, error) {
 	if event != "issues" {
 		return OutcomeIgnored, nil
 	}

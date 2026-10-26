@@ -130,6 +130,11 @@ func newWorld(t *testing.T) *world {
 		if err := json.Unmarshal(m.Data, &s.Status); err != nil {
 			t.Error(err)
 		}
+		// The control node reports pending when it creates a job; the
+		// tests here watch what the runner reports.
+		if s.State == control.StatePending {
+			return
+		}
 		w.statuses <- s
 	}); err != nil {
 		t.Fatal(err)
@@ -402,7 +407,7 @@ func writes(files map[string]string) (*harness.Fake, *atomic.Int32) {
 func TestJobOpensPR(t *testing.T) {
 	w := newWorld(t)
 	registered := make(chan Registration, 1)
-	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice", func(m *nats.Msg) {
+	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice.*", func(m *nats.Msg) {
 		var reg Registration
 		if err := json.Unmarshal(m.Data, &reg); err != nil {
 			t.Error(err)
@@ -514,11 +519,11 @@ func TestLintGateMismatchCommentsWithoutFailingTheJob(t *testing.T) {
 // TestJobLocksGateGitAndHarnessEnvironments runs one job and checks the three
 // environments that job starts. The harness session is harnessEnv: the base
 // list plus ANTHROPIC_, CLAUDE_, XAI_, and --pass-env, with no SCHMEIDE_ name.
-// newWorktree is called without an environment, so git sees only the variables
-// newWorktree appends and does not see SCHMEIDE_NATS_TOKEN. The gate command's
-// environment stays nil, so the gate inherits the runner process environment,
-// including SCHMEIDE_NATS_TOKEN and SCHMEIDE_TEST_GATE_PROOF, which is not on
-// the base list. --pass-env does not filter the gate.
+// newWorktree is called without a git environment, so git sees only the
+// variables newWorktree appends and does not see SCHMEIDE_NATS_TOKEN. The gate
+// is gateEnv: it sees PATH and SSL_CERT_FILE from the base list and a name
+// from --gate-pass-env, never SCHMEIDE_NATS_TOKEN, and its HOME and TMPDIR
+// are a scratch directory that is gone once the job ends.
 func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	const secret = "gate-sees-this-nats-secret"
 	dir := t.TempDir()
@@ -545,11 +550,19 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	}
 
 	w := newWorld(t)
-	gate := `printf '%s' "$SCHMEIDE_NATS_TOKEN" > "$SCHMEIDE_TEST_GATE_PROOF"`
+	// The gate writes its whole environment to the proof file, named through
+	// --gate-pass-env, and runs go so PATH and the scratch HOME are exercised.
+	gate := `go env GOROOT >/dev/null && env > "$GATE_PROOF"`
 	w.pushConfig(t, "gate = "+strconv.Quote(gate)+"\n")
 
+	realHome := t.TempDir()
 	t.Setenv("SCHMEIDE_NATS_TOKEN", secret)
 	t.Setenv("SCHMEIDE_TEST_GATE_PROOF", proof)
+	t.Setenv("GATE_PROOF", proof)
+	t.Setenv("SSL_CERT_FILE", "/certs/ca.pem")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("HOME", realHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(realHome, ".config"))
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var mu sync.Mutex
@@ -563,7 +576,9 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 		}
 		return os.WriteFile(filepath.Join(req.Dir, "fix.txt"), []byte("fixed\n"), 0o600)
 	}}
-	w.start(t, "alice", h)
+	r, _ := w.runnerWith(t, "alice", h, false)
+	r.opts.GatePassEnv = []string{"GATE_PROOF", "SCHMEIDE_TEST_GATE_PROOF"}
+	w.run(t, r)
 	w.publish(t, "alice", 7)
 
 	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing pr_opened]"; got != want {
@@ -576,8 +591,35 @@ func TestJobLocksGateGitAndHarnessEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gate proof: %v", err)
 	}
-	if string(gotProof) != secret {
-		t.Errorf("gate wrote %q, want SCHMEIDE_NATS_TOKEN %q", gotProof, secret)
+	gateEnv := strings.Split(strings.TrimSpace(string(gotProof)), "\n")
+	if slices.ContainsFunc(gateEnv, func(v string) bool { return strings.HasPrefix(v, "SCHMEIDE_") }) ||
+		strings.Contains(string(gotProof), secret) {
+		t.Errorf("gate environment has a SCHMEIDE_ name:\n%s", gotProof)
+	}
+	for _, want := range []string{"SSL_CERT_FILE=/certs/ca.pem", "GATE_PROOF=" + proof} {
+		if !slices.Contains(gateEnv, want) {
+			t.Errorf("gate environment lacks %s:\n%s", want, gotProof)
+		}
+	}
+	for _, leaked := range []string{"AWS_SECRET_ACCESS_KEY=", "XDG_CONFIG_HOME="} {
+		if slices.ContainsFunc(gateEnv, func(v string) bool { return strings.HasPrefix(v, leaked) }) {
+			t.Errorf("gate environment has %s:\n%s", leaked, gotProof)
+		}
+	}
+	var home, tmp string
+	for _, v := range gateEnv {
+		if h, ok := strings.CutPrefix(v, "HOME="); ok {
+			home = h
+		}
+		if d, ok := strings.CutPrefix(v, "TMPDIR="); ok {
+			tmp = d
+		}
+	}
+	if home == "" || home != tmp || !filepath.IsAbs(home) || home == realHome {
+		t.Errorf("gate HOME = %q, TMPDIR = %q, want one absolute scratch directory", home, tmp)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("gate scratch directory %s is still there after the job: %v", home, err)
 	}
 
 	gitLog, err := os.ReadFile(logPath)
@@ -1320,9 +1362,10 @@ func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
 	}
 }
 
+// TestAutomateMergeNopeIsAConfigError keeps the default --max-attempts: a
+// config error is final on the first attempt.
 func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	w := newWorld(t)
-	w.maxAttempts = 1
 	w.pushConfig(t, testGateConfig+"[automate]\nmerge = \"nope\"\n")
 	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
@@ -1342,6 +1385,33 @@ func TestAutomateMergeNopeIsAConfigError(t *testing.T) {
 	assertNoMerge(t, w)
 	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "nope") || !strings.Contains(comments["7"][0], `automate.merge = "on"`) || !strings.Contains(comments["7"][0], `automate.merge = "off"`) || !strings.Contains(comments["7"][0], "did not open a pull request") {
 		t.Errorf("issue comments = %q, want a config error that names on and off", comments["7"])
+	}
+}
+
+func TestMissingConfigIsFinal(t *testing.T) {
+	w := newWorld(t)
+	src := t.TempDir()
+	git(t, src, "clone", "-q", w.bare, ".")
+	git(t, src, "rm", "-q", ".schmeide/config.toml")
+	git(t, src, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "drop config")
+	git(t, src, "push", "-q", "origin", "HEAD:main")
+	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Errorf("states = %s, want %s: a missing config is not retried", got, want)
+	}
+	assertSettled(t, w)
+	if sessions.Load() != 0 {
+		t.Errorf("sessions = %d, want none for a missing config", sessions.Load())
+	}
+	pulls, comments := w.gh.Snapshot()
+	if len(pulls) != 0 {
+		t.Errorf("pull requests = %+v, want none", pulls)
+	}
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], ".schmeide/config.toml: config file not found") || !strings.Contains(comments["7"][0], "did not open a pull request") {
+		t.Errorf("issue comments = %q, want one that says the config file is missing", comments["7"])
 	}
 }
 
@@ -1752,6 +1822,35 @@ func TestPoolNameIsNotASteward(t *testing.T) {
 	}
 }
 
+// TestSharedConsumersKeepTheFirstAckWait pins that a runner does not rewrite
+// a consumer another runner created, and heartbeats at the consumer's AckWait
+// rather than its own --ack-wait.
+func TestSharedConsumersKeepTheFirstAckWait(t *testing.T) {
+	w := newWorld(t)
+	h, _ := writes(nil)
+	w.ackWait = time.Second
+	w.runnerWith(t, "alice", h, true)
+	w.ackWait = time.Minute
+	second, _ := w.runnerWith(t, "alice", h, true)
+
+	js, err := jetstream.New(w.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, steward := range []string{"alice", control.PoolName} {
+		cons, err := js.Consumer(t.Context(), control.JobStream, control.ConsumerName(steward))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cons.CachedInfo().Config.AckWait; got != time.Second {
+			t.Errorf("%s consumer AckWait = %v, want the first runner's %v", steward, got, time.Second)
+		}
+	}
+	if second.ackWait != time.Second {
+		t.Errorf("second runner's ack wait = %v, want the consumers' %v", second.ackWait, time.Second)
+	}
+}
+
 func TestRegisteredStewardKeepsTheJobFromThePool(t *testing.T) {
 	w := newWorld(t)
 	w.track(t)
@@ -2076,15 +2175,8 @@ func TestTwoSideBySideDependenciesOpenNothing(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	states := w.await(t, "alice", 7)
-	if states[len(states)-1] != StateFailed {
-		t.Fatalf("states = %v, want the job failed", states)
-	}
-	for _, state := range states {
-		if state == StateWorking || state == StatePROpened {
-			t.Errorf("job went ahead: %v", states)
-			break
-		}
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed failed]"; got != want {
+		t.Fatalf("states = %s, want %s: side-by-side dependencies are not retried", got, want)
 	}
 	assertBlockedBeforeOpen(t, w, 7)
 	if got := sessions.Load(); got != 0 {

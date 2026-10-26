@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,23 @@ func TestPushPublishesACleanWorktree(t *testing.T) {
 	}
 }
 
+// A gate in the runner's process session would be a background group on the
+// runner's terminal and stop on SIGTTOU, so it must lead its own session.
+func TestGateRunsInItsOwnSession(t *testing.T) {
+	w, _ := newPushFixture(t)
+	out, err := w.Run(t.Context(), `echo "$$ $(ps -o sid= -p $$)"`)
+	if err != nil {
+		t.Fatalf("Run = %v; output %q", err, out)
+	}
+	ids := strings.Fields(out)
+	if len(ids) != 2 {
+		t.Fatalf("output = %q, want the pid and the session id", out)
+	}
+	if ids[0] != ids[1] {
+		t.Errorf("gate pid %s has session id %s: the gate shares the runner's session and terminal", ids[0], ids[1])
+	}
+}
+
 func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 	first, bare := newPushFixture(t)
 	planted := filepath.Join(first.repoDir, "planted")
@@ -94,6 +112,7 @@ func TestSecondWorktreeReusesCloneAndSharesGoCache(t *testing.T) {
 		branch:  "job-2",
 		id:      "job-2",
 		repoID:  first.spec.repoID,
+		token:   staticToken("t"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +172,7 @@ func newPushFixture(t *testing.T) (*worktree, string) {
 		url:      bare,
 		base:     "main",
 		branch:   "job",
-		token:    "gh" + "p_" + strings.Repeat("e", 36),
+		token:    staticToken("gh" + "p_" + strings.Repeat("e", 36)),
 		gitName:  "schmeide[bot]",
 		gitEmail: "bot@example.com",
 		id:       "job",
@@ -216,4 +235,26 @@ func TestNewWorktreeGuardsOtherJobBranches(t *testing.T) {
 		t.Fatalf("the clone has core.hooksPath %s", out)
 	}
 	git(t, w.repoDir, "branch", "-f", "2_two", w.spec.branch)
+}
+
+func TestGateRunsInAScratchHomeThatCloseRemoves(t *testing.T) {
+	t.Setenv("SCHMEIDE_NATS_TOKEN", "nats-secret")
+	w, _ := newPushFixture(t)
+	w.spec.gateEnv = gateEnv(os.Environ(), nil)
+	out, err := w.Run(t.Context(), `touch "$HOME/dotfile" "$TMPDIR/tmpfile" && echo "$HOME|$TMPDIR|$SCHMEIDE_NATS_TOKEN"`)
+	if err != nil {
+		t.Fatalf("gate: %v: %s", err, out)
+	}
+	if got, want := strings.TrimSpace(out), w.scratch+"|"+w.scratch+"|"; got != want {
+		t.Errorf("gate saw HOME|TMPDIR|SCHMEIDE_NATS_TOKEN = %q, want %q", got, want)
+	}
+	if strings.HasPrefix(w.scratch, w.dir) {
+		t.Errorf("scratch %s is inside the checkout %s, so a commit would take it", w.scratch, w.dir)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(w.scratch); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("scratch %s survived Close: %v", w.scratch, err)
+	}
 }

@@ -29,6 +29,7 @@ _schmeide() {
     'runner:run a runner'
     'doctor:check that this machine is ready to run a runner'
     'status:show registered runners and jobs'
+    'init:write a repo config and a control node config'
     'completion:print a shell completion script'
     'version:print the version'
   )
@@ -49,6 +50,7 @@ complete -c schmeide -n __fish_use_subcommand -a control -d 'Run the control nod
 complete -c schmeide -n __fish_use_subcommand -a runner -d 'Run a runner'
 complete -c schmeide -n __fish_use_subcommand -a doctor -d 'Check that this machine is ready'
 complete -c schmeide -n __fish_use_subcommand -a status -d 'Show runners and jobs'
+complete -c schmeide -n __fish_use_subcommand -a init -d 'Write a repo config and a control node config'
 complete -c schmeide -n __fish_use_subcommand -a completion -d 'Print a shell completion script'
 complete -c schmeide -n __fish_use_subcommand -a version -d 'Print the version'
 complete -c schmeide -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
@@ -27,8 +28,9 @@ func envName(flagName string) string {
 }
 
 // ParseFlags parses args into fs, then fills every flag that was not given
-// from its SCHMEIDE_<NAME> environment variable. It returns flag.ErrHelp when
-// help was asked for.
+// from its SCHMEIDE_<NAME> environment variable. A variable whose value does
+// not parse for its flag's type is an error that names the variable and shows
+// a valid value. It returns flag.ErrHelp when help was asked for.
 func ParseFlags(fs *flag.FlagSet, args []string) error {
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
@@ -39,12 +41,32 @@ func ParseFlags(fs *flag.FlagSet, args []string) error {
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	var errs []error
 	fs.VisitAll(func(f *flag.Flag) {
-		if v := os.Getenv(envName(f.Name)); v != "" && !given[f.Name] {
-			_ = f.Value.Set(v)
+		name := envName(f.Name)
+		if v := os.Getenv(name); v != "" && !given[f.Name] {
+			if f.Value.Set(v) != nil {
+				errs = append(errs, fmt.Errorf("%s is %q, which is not %s, unset it, or pass --%s", name, v, envExample(f.Value), f.Name))
+			}
 		}
 	})
-	return nil
+	return errors.Join(errs...)
+}
+
+// envExample describes the kind of value a flag takes and shows a valid one,
+// for the error ParseFlags returns.
+func envExample(v flag.Value) string {
+	if g, ok := v.(flag.Getter); ok {
+		switch g.Get().(type) {
+		case time.Duration:
+			return "a duration; set it to one such as 5m"
+		case int:
+			return "an integer; set it to one such as 3"
+		case bool:
+			return "a boolean; set it to true or false"
+		}
+	}
+	return "valid for this flag; set it to a valid value"
 }
 
 // FlagUsage lists the flags of fs with their environment variables and
@@ -83,7 +105,7 @@ func (h *harnessFlags) check() error {
 	return nil
 }
 
-func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFlags) {
+func runnerFlags() (fs *flag.FlagSet, o *Options, env *envFlags, h *harnessFlags) {
 	o = &Options{}
 	fs = flag.NewFlagSet("schmeide runner", flag.ContinueOnError)
 	fs.StringVar(&o.Steward, "steward", "", "Your GitHub login. The runner only takes jobs for issues assigned to this login. Required.")
@@ -101,12 +123,29 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, passEnv *string, h *harnessFla
 	fs.IntVar(&o.MaxReviewRounds, "max-review-rounds", defaultMaxReviewRounds, "How many reviewer sessions to run after the pull request is open. Each round is a fresh reviewer session. When the reviewer requests changes, the repo config sets automate.review_fix = \"on\", and a round remains, a fresh worker session applies the findings, the gate runs again, and the same branch is pushed. With review_fix off, the first request for changes leaves the pull request open for a person. Exhausting the rounds fails the job, comments on the issue, and leaves the pull request open. The factory merges the pull request only when the repo config sets automate.merge = \"on\". The default is a person.")
 	fs.DurationVar(&o.SessionTimeout, "session-timeout", repoconfig.DefaultSessionTimeout, "How long one harness session may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config session_timeout overrides this when it is set. An empty config value keeps this flag. The default is 2h.")
 	fs.DurationVar(&o.GateTimeout, "gate-timeout", repoconfig.DefaultGateTimeout, "How long the gate command may run before its process group is canceled and the job fails. A Go duration, for example 30m. The repo config gate_timeout overrides this when it is set. An empty config value keeps this flag. A gate timeout is not retried. The default is 30m.")
-	passEnv = fs.String("pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
+	env = &envFlags{}
+	fs.StringVar(&env.pass, "pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
+	fs.StringVar(&env.gatePass, "gate-pass-env", "", "Comma-separated names to add for the gate only, on top of the base list. A SCHMEIDE_ name is refused. Never list a secret.")
 	h = &harnessFlags{}
 	fs.StringVar(&h.claudeArgs, "claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
 	fs.StringVar(&h.grokArgs, "grok-args", "--permission-mode acceptEdits", "Flags for each Grok session. The default only lets a session edit files in its worktree. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
 	fs.BoolVar(&h.allowDangerous, "allow-dangerous-harness-args", false, "Accept --claude-args and --grok-args that skip permission checks: --dangerously-skip-permissions, or a --permission-mode other than acceptEdits. The default is off.")
-	return fs, o, passEnv, h
+	return fs, o, env, h
+}
+
+// envFlags are the raw --pass-env and --gate-pass-env values.
+type envFlags struct{ pass, gatePass string }
+
+// gatePassEnv parses --gate-pass-env and refuses a SCHMEIDE_ name, which
+// the gate never sees.
+func gatePassEnv(value string) ([]string, error) {
+	names := splitList(strings.ReplaceAll(value, " ", ""))
+	for _, name := range names {
+		if strings.HasPrefix(name, "SCHMEIDE_") {
+			return nil, fmt.Errorf("--gate-pass-env lists %s: the gate never sees a SCHMEIDE_ name", name)
+		}
+	}
+	return names, nil
 }
 
 // splitList splits a comma-separated flag value, dropping empty entries.
@@ -190,8 +229,10 @@ docs/permissions.md.
 
 A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_,
 and --pass-env, and does not see the runner's SCHMEIDE_* settings unless a
-name is passed that way. The gate inherits the runner process environment.
-Git sees only the installation-token variables. They still run as this
+name is passed that way. The gate sees the basic environment plus
+--gate-pass-env, never a SCHMEIDE_* name, and a HOME and TMPDIR of its own
+that are removed when the job ends. Git sees only the installation-token
+variables. They still run as this
 machine's user, so run the runner as a user that holds nothing else worth
 taking.
 
@@ -231,7 +272,7 @@ func confirm(in *bufio.Reader, out io.Writer) func(string) (bool, error) {
 // Main runs `schmeide runner` with the given arguments and returns its exit
 // code.
 func Main(args []string, stdout, stderr io.Writer) int {
-	fs, o, passEnv, h := runnerFlags()
+	fs, o, env, h := runnerFlags()
 	err := ParseFlags(fs, args)
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, Usage())
@@ -243,11 +284,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		err = h.check()
 	}
+	if err == nil {
+		o.PassEnv = splitList(strings.ReplaceAll(env.pass, " ", ""))
+		o.GatePassEnv, err = gatePassEnv(env.gatePass)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "schmeide runner: %v\nRun 'schmeide runner --help' for usage.\n", err)
 		return 2
 	}
-	o.PassEnv = splitList(strings.ReplaceAll(*passEnv, " ", ""))
 	o.Harnesses = harnesses(h.claudeArgs, h.grokArgs)
 	o.Output = stderr
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {

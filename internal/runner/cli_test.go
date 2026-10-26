@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/harness"
 )
@@ -92,8 +93,13 @@ func TestRunnerHelpDoesNotLimitHarnessesToClaude(t *testing.T) {
 
 func TestUsageDescribesTheGateEnvironment(t *testing.T) {
 	got := Usage()
-	if !strings.Contains(got, "The gate inherits the runner process environment.") {
-		t.Fatalf("Usage() does not say the gate inherits the runner process environment:\n%s", got)
+	if strings.Contains(got, "The gate inherits the runner process environment.") {
+		t.Fatalf("Usage() still says the gate inherits the runner process environment:\n%s", got)
+	}
+	for _, want := range []string{"--gate-pass-env, never a SCHMEIDE_* name", "a HOME and TMPDIR of its own"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Usage() does not say %q:\n%s", want, got)
+		}
 	}
 	if !strings.Contains(got, "A harness session sees the basic environment plus ANTHROPIC_, CLAUDE_, XAI_") {
 		t.Fatalf("Usage() does not say a session keeps XAI_:\n%s", got)
@@ -231,5 +237,57 @@ func TestDeliveryLeaseFlagDefaults(t *testing.T) {
 		if !strings.Contains(Usage(), want) {
 			t.Errorf("Usage() does not contain %q", want)
 		}
+	}
+}
+
+func TestGatePassEnvRefusesSchmeideNames(t *testing.T) {
+	got, err := gatePassEnv("GOPATH, NPM_CONFIG_CACHE")
+	if err != nil || !slices.Equal(got, []string{"GOPATH", "NPM_CONFIG_CACHE"}) {
+		t.Errorf("gatePassEnv = %q, %v, want GOPATH and NPM_CONFIG_CACHE", got, err)
+	}
+	if _, err := gatePassEnv("GOPATH,SCHMEIDE_NATS_TOKEN"); err == nil || !strings.Contains(err.Error(), "SCHMEIDE_NATS_TOKEN") {
+		t.Errorf("gatePassEnv with SCHMEIDE_NATS_TOKEN: err = %v, want one naming it", err)
+	}
+}
+
+func TestMainRefusesASchmeideGatePassEnv(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if code := Main([]string{"--steward", "a", "--gate-pass-env", "SCHMEIDE_NATS_TOKEN"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("Main = %d, want 2; stderr:\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--gate-pass-env lists SCHMEIDE_NATS_TOKEN") {
+		t.Errorf("stderr = %q, want it to name the refused variable", stderr.String())
+	}
+}
+
+func TestMainRejectsUnparsableEnv(t *testing.T) {
+	cases := []struct{ env, value, want string }{
+		{"SCHMEIDE_ACK_WAIT", "5 minutes", `SCHMEIDE_ACK_WAIT is "5 minutes", which is not a duration; set it to one such as 5m, unset it, or pass --ack-wait`},
+		{"SCHMEIDE_MAX_ATTEMPTS", "three", `SCHMEIDE_MAX_ATTEMPTS is "three", which is not an integer; set it to one such as 3, unset it, or pass --max-attempts`},
+		{"SCHMEIDE_POOL", "yes please", `SCHMEIDE_POOL is "yes please", which is not a boolean; set it to true or false, unset it, or pass --pool`},
+	}
+	for _, c := range cases {
+		t.Run(c.env, func(t *testing.T) {
+			t.Setenv(c.env, c.value)
+			var stdout, stderr bytes.Buffer
+			if code := Main([]string{"--steward", "me"}, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit code %d, want 2; stderr: %s", code, stderr.String())
+			}
+			want := "schmeide runner: " + c.want + "\nRun 'schmeide runner --help' for usage.\n"
+			if stderr.String() != want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestParseFlagsFlagWinsOverUnparsableEnv(t *testing.T) {
+	t.Setenv("SCHMEIDE_ACK_WAIT", "garbage")
+	fs, o, _, _ := runnerFlags()
+	if err := ParseFlags(fs, []string{"--ack-wait", "1m"}); err != nil {
+		t.Fatalf("ParseFlags() = %v, want nil: a given flag means its variable is not read", err)
+	}
+	if o.AckWait != time.Minute {
+		t.Errorf("ack wait = %v, want 1m", o.AckWait)
 	}
 }

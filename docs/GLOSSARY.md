@@ -11,7 +11,7 @@ pull request on a branch starting with `<issue number>_` make the top of their
 stack the base for the new pull request. Otherwise the base is the repository
 default branch. Two or more such blockers have to form one linear stack, each
 pull request based on the one below it; blockers side by side (a diamond) fail
-the job.
+the job finally.
 
 ## restack
 
@@ -71,12 +71,24 @@ the runner cancels the gate's process group, fails the job, and does not retry.
 
 A short-lived GitHub App token the control node mints for one job. It is limited
 to that job's repository and to the permissions a runner needs to push, open
-pull requests, comment, and read checks. GitHub expires it after one hour.
-Runners hold no long-lived GitHub credential.
+pull requests, comment, read checks, read branch protection, and read Actions
+job logs. GitHub expires it after one hour, so
+a runner asks the control node for a new one for the same job when the one it
+holds is within five minutes of expiry. Runners hold no long-lived GitHub
+credential.
+
+## pending
+
+The job state the control node records when it creates a job, before any
+runner has claimed it. `schmeide status` lists a pending job with how long it
+has waited. Not final: the runner's `claimed` replaces it. Not to be confused
+with [queued](#queued), which is a finished job in a merge queue.
 
 ## pool
 
-The fallback queue for a job whose assignee has no registered runner. A runner
+The fallback queue for a job whose assignee has never registered a runner.
+Registrations are kept in the control node's data directory and never expire,
+so a steward whose runner is offline still gets jobs on their own subject. A runner
 started with `--pool` (off by default) also takes pool jobs. Pool runners work
 one job at a time and take their own steward's job first.
 

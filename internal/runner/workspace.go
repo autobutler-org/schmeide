@@ -55,13 +55,18 @@ type Workspace interface {
 }
 
 type worktreeSpec struct {
-	workDir, url, base, branch, token string
-	gitName, gitEmail                 string
+	workDir, url, base, branch string
+	// token returns the job's current GitHub token.
+	token             func(context.Context) (string, error)
+	gitName, gitEmail string
 	// id names the worktree directory and repoID the clone it hangs off.
 	id, repoID string
-	// env is the environment for git and the gate, without the runner's own
-	// settings and secrets.
+	// env is the environment for git, without the runner's own settings and
+	// secrets. git adds the job's current token to it for each command.
 	env []string
+	// gateEnv is the environment for the gate, before HOME and TMPDIR are
+	// pointed at the job's scratch directory; see [gateEnv].
+	gateEnv []string
 }
 
 // worktree is the [Workspace] backed by a git worktree on the host.
@@ -70,7 +75,9 @@ type worktree struct {
 	repoDir, dir string
 	// cacheDir holds the Go build and module caches shared by the
 	// repository's jobs.
-	cacheDir      string
+	cacheDir string
+	// scratch is the gate's HOME and TMPDIR. Close removes it.
+	scratch       string
 	env           []string
 	baseRef, head string
 }
@@ -90,13 +97,9 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		repoDir: filepath.Join(s.workDir, "repos", s.repoID+".git"),
 		dir:     filepath.Join(s.workDir, "worktrees", s.id),
 		baseRef: "refs/remotes/origin/" + s.base,
-		// The token goes in through the environment so that it is never
-		// written to git config or shown in the process list.
+		// git adds the token to this for each command; see [worktree.git].
 		env: append(slices.Clone(s.env),
 			"GIT_TERMINAL_PROMPT=0",
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+s.token)),
 			"GIT_AUTHOR_NAME="+s.gitName, "GIT_AUTHOR_EMAIL="+s.gitEmail,
 			"GIT_COMMITTER_NAME="+s.gitName, "GIT_COMMITTER_EMAIL="+s.gitEmail,
 		),
@@ -107,11 +110,23 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		return nil, err
 	}
 	w.cacheDir = cacheDir
+	// HOME must be absolute too: the gate runs in the worktree.
+	scratch, err := filepath.Abs(filepath.Join(s.workDir, "scratch", s.id))
+	if err != nil {
+		return nil, err
+	}
+	w.scratch = scratch
 	if err := os.MkdirAll(w.repoDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create the work directory: %w; check that --work-dir is writable", err)
 	}
 	if err := os.RemoveAll(w.dir); err != nil {
 		return nil, fmt.Errorf("clear a leftover worktree: %w", err)
+	}
+	if err := os.RemoveAll(w.scratch); err != nil {
+		return nil, fmt.Errorf("clear a leftover gate scratch directory: %w", err)
+	}
+	if err := os.MkdirAll(w.scratch, 0o700); err != nil {
+		return nil, fmt.Errorf("create the gate scratch directory: %w; check that --work-dir is writable", err)
 	}
 	if _, err := os.Stat(filepath.Join(w.repoDir, "HEAD")); errors.Is(err, os.ErrNotExist) {
 		if _, err := w.git(ctx, w.repoDir, "init", "-q", "--bare"); err != nil {
@@ -144,10 +159,27 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	return w, nil
 }
 
+// basicAuth is the HTTP Basic credential git sends for an installation token.
+func basicAuth(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+// git runs one git command with the job's current token. The token goes in
+// through the environment so that it is never written to git config or
+// shown in the process list, and it is read for each command so that a push
+// late in a long job does not send an expired one.
 func (w *worktree) git(ctx context.Context, dir string, args ...string) (string, error) {
+	token, err := w.spec.token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = w.env
+	cmd.Env = append(slices.Clone(w.env),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(token),
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -182,14 +214,13 @@ func (w *worktree) Commit(ctx context.Context, message string) (bool, error) {
 func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = w.dir
-	// A nil spec env means the gate inherits the runner's environment.
-	env := w.spec.env
-	if env == nil {
-		env = os.Environ()
-	}
-	cmd.Env = w.GoCacheEnv(slices.Clone(env))
-	// Its own process group, so a canceled gate takes its children with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The gate never inherits the runner's environment: it gets the spec's
+	// gate environment, a scratch HOME and TMPDIR, and the Go caches.
+	cmd.Env = w.GoCacheEnv(scratchHome(w.spec.gateEnv, w.scratch))
+	// Its own process session, detached from the runner's terminal so
+	// SIGTTOU and SIGTTIN cannot stop it. The session leader also leads its
+	// own process group, so a canceled gate takes its children with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
@@ -367,5 +398,5 @@ func (w *worktree) Close() error {
 	openWorkspaces.Delete(w.dir)
 	_, rmErr := w.git(ctx, w.repoDir, "worktree", "remove", "--force", w.dir)
 	_, brErr := w.git(ctx, w.repoDir, "branch", "-q", "-D", w.spec.branch)
-	return errors.Join(rmErr, brErr)
+	return errors.Join(rmErr, brErr, os.RemoveAll(w.scratch))
 }

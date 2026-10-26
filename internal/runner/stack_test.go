@@ -421,7 +421,7 @@ func newStackRemote(t *testing.T) (src string, ws *worktree) {
 
 	ws, err := newWorktree(t.Context(), worktreeSpec{
 		workDir: t.TempDir(), url: bare, base: "1_x", branch: "2_x",
-		gitName: "schmeide[bot]", gitEmail: "bot@example.com", id: "2", repoID: "1",
+		gitName: "schmeide[bot]", gitEmail: "bot@example.com", id: "2", repoID: "1", token: staticToken("t"),
 	})
 	if err != nil {
 		t.Fatal(err)
