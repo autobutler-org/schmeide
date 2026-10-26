@@ -360,13 +360,18 @@ merge (for example a conflict, or a rule the runner could not see).
 
 **Notes:**
 
-- A bottom that was rebased and then merged still counts as merged.
+- A bottom that was rebased and then merged still counts as merged. When
+  GitHub does not report a merge time for the pull request below, the runner
+  checks whether the base it last built on, or that pull request's latest head
+  (`refs/pull/<n>/head`, which outlives a deleted branch, then the base
+  branch), is in the default branch.
 - Covered by `TestMergeWhenGreenMergesAStackBottomFirst`,
   `TestMergeWhenGreenRetargetsAndRebasesAfterTheBottomMerges`,
   `TestMergeWhenGreenRetargetsWhenTheBottomIsRebasedThenMerged`,
   `TestMergeWhenGreenRebasesWhenGitHubRetargeted`,
   `TestMergeWhenGreenFollowsAMovingBase`,
-  `TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges`.
+  `TestMergeWhenGreenRestacksARealBranchAfterTheBottomMerges`,
+  `TestMergeWhenGreenRestacksAfterTheBottomIsRebasedAndMerged`.
 
 ---
 
@@ -408,7 +413,10 @@ without merging.
 
 **Notes:**
 
-- Covered by `TestMergeWhenGreenRefusesAStackOnAClosedPull`.
+- A pull request below that was rebased and then closed unmerged still
+  reads as closed: its latest head is not in the default branch.
+- Covered by `TestMergeWhenGreenRefusesAStackOnAClosedPull` and
+  `TestMergeWhenGreenRefusesAStackOnARebasedPullThatClosed`.
 
 ---
 
