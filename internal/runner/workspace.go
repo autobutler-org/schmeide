@@ -44,21 +44,25 @@ type Workspace interface {
 	// rebased does not leave its old commits behind. A conflict leaves the
 	// branch as it was.
 	Restack(ctx context.Context, onto string) (moved bool, err error)
-	// BaseMerged reports whether the base the branch was last built on is
-	// in the remote branch trunk, which tells a stacked branch that the
-	// pull request below it merged.
-	BaseMerged(ctx context.Context, trunk string) (bool, error)
+	// BaseMerged reports whether the pull request below a stacked branch
+	// merged into the remote branch trunk: whether the base the branch was
+	// last built on, or the latest head of pull request number below, is in
+	// trunk. The latest head counts for a pull request below that was
+	// rebased and merged after the branch last built on it.
+	BaseMerged(ctx context.Context, trunk string, below int) (bool, error)
 	// Close removes the workspace.
 	Close() error
 }
 
 type worktreeSpec struct {
-	workDir, url, base, branch, token string
-	gitName, gitEmail                 string
+	workDir, url, base, branch string
+	// token returns the job's current GitHub token.
+	token             func(context.Context) (string, error)
+	gitName, gitEmail string
 	// id names the worktree directory and repoID the clone it hangs off.
 	id, repoID string
 	// env is the environment for git, without the runner's own settings and
-	// secrets. newWorktree adds the installation token to it.
+	// secrets. git adds the job's current token to it for each command.
 	env []string
 	// gateEnv is the environment for the gate, before HOME and TMPDIR are
 	// pointed at the job's scratch directory; see [gateEnv].
@@ -96,13 +100,9 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 		repoDir: filepath.Join(s.workDir, "repos", s.repoID+".git"),
 		dir:     filepath.Join(s.workDir, "worktrees", s.id),
 		baseRef: "refs/remotes/origin/" + s.base,
-		// The token goes in through the environment so that it is never
-		// written to git config or shown in the process list.
+		// git adds the token to this for each command; see [worktree.git].
 		env: append(slices.Clone(s.env),
 			"GIT_TERMINAL_PROMPT=0",
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+s.token)),
 			"GIT_AUTHOR_NAME="+s.gitName, "GIT_AUTHOR_EMAIL="+s.gitEmail,
 			"GIT_COMMITTER_NAME="+s.gitName, "GIT_COMMITTER_EMAIL="+s.gitEmail,
 		),
@@ -162,10 +162,27 @@ func newWorktree(ctx context.Context, s worktreeSpec) (*worktree, error) {
 	return w, nil
 }
 
+// basicAuth is the HTTP Basic credential git sends for an installation token.
+func basicAuth(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+// git runs one git command with the job's current token. The token goes in
+// through the environment so that it is never written to git config or
+// shown in the process list, and it is read for each command so that a push
+// late in a long job does not send an expired one.
 func (w *worktree) git(ctx context.Context, dir string, args ...string) (string, error) {
+	token, err := w.spec.token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = w.env
+	cmd.Env = append(slices.Clone(w.env),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(token),
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -203,8 +220,10 @@ func (w *worktree) Run(ctx context.Context, command string) (string, error) {
 	// The gate never inherits the runner's environment: it gets the spec's
 	// gate environment, a scratch HOME and TMPDIR, and the Go caches.
 	cmd.Env = w.GoCacheEnv(scratchHome(w.spec.gateEnv, w.scratch))
-	// Its own process group, so a canceled gate takes its children with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Its own process session, detached from the runner's terminal so
+	// SIGTTOU and SIGTTIN cannot stop it. The session leader also leads its
+	// own process group, so a canceled gate takes its children with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
@@ -242,7 +261,11 @@ func (w *worktree) Push(ctx context.Context) error {
 // spec's other secrets verbatim. A literal already on the base is not the
 // job's and does not count.
 func (w *worktree) scanSecrets(ctx context.Context) error {
-	found, err := secretscan.ScanDiff(ctx, w.dir, w.baseRef, append([]string{w.spec.token}, w.spec.secrets...))
+	token, err := w.spec.token(ctx)
+	if err != nil {
+		return err
+	}
+	found, err := secretscan.ScanDiff(ctx, w.dir, w.baseRef, append([]string{token}, w.spec.secrets...))
 	if err != nil {
 		return fmt.Errorf("scan the branch's changes for secrets: %w", err)
 	}
@@ -349,14 +372,37 @@ func (w *worktree) Restack(ctx context.Context, onto string) (bool, error) {
 	return true, nil
 }
 
-// BaseMerged implements [Workspace].
-func (w *worktree) BaseMerged(ctx context.Context, trunk string) (bool, error) {
+// BaseMerged implements [Workspace]. The latest head of the pull request
+// below is read from GitHub's refs/pull/<below>/head, which outlives a
+// deleted branch, and else from the base branch. A head that cannot be
+// fetched does not count, so a fetch that fails reads as not merged.
+func (w *worktree) BaseMerged(ctx context.Context, trunk string, below int) (bool, error) {
 	ref := "refs/remotes/origin/" + trunk
 	if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+refs/heads/"+trunk+":"+ref); err != nil {
 		return false, err
 	}
-	_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", w.baseRef, ref)
-	return err == nil, nil
+	onTrunk := func(rev string) bool {
+		_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", rev, ref)
+		return err == nil
+	}
+	if onTrunk(w.baseRef) {
+		return true, nil
+	}
+	var heads [][2]string
+	if below > 0 {
+		pull := fmt.Sprintf("refs/pull/%d/head", below)
+		heads = append(heads, [2]string{pull, fmt.Sprintf("refs/remotes/origin/pull/%d", below)})
+	}
+	heads = append(heads, [2]string{"refs/heads/" + w.spec.base, "refs/remotes/origin/" + w.spec.base})
+	for _, h := range heads {
+		if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+"+h[0]+":"+h[1]); err != nil {
+			continue
+		}
+		if onTrunk(h[1]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Close implements [Workspace].

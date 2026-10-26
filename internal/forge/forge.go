@@ -1,7 +1,8 @@
 // Package forge is the code host a runner job talks to: pull requests,
 // issue comments, check runs and their logs, merge, the merge queue, and
-// branch protection. GitHub implements it over HTTP. Fake implements it in
-// memory for tests.
+// branch protection. GitHub implements it over HTTP, asking for the job's
+// token before each call; it does not mint or refresh tokens itself. Fake
+// implements it in memory for tests.
 package forge
 
 import (
