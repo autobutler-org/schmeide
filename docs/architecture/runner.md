@@ -294,7 +294,10 @@ or the recorded round minus one when larger, so a redelivery does not repeat spe
 Only when `automate.merge = "on"` and review passed. `mergeWhenGreen` (`merge.go`):
 
 1. Reads the default branch. When the PR's base is not the default branch, `waitForStack` waits up to
-   `check_wait` for the PR below to merge: while it is open each poll restacks onto it; once it merged the PR is
+   `check_wait` for the PR below to merge: while it is open each poll restacks onto it. A closed PR below with no
+   `merged_at` still counts as merged when `Workspace.BaseMerged` finds the base this branch last built on, or the
+   PR below's latest head (`refs/pull/<n>/head`, else the base branch), in the default branch; a head that cannot
+   be fetched does not count. Once it merged the PR is
    retargeted with `RetargetPull` (REST `PATCH /pulls/<n>`) when GitHub has not already done so, and rebased onto
    the default branch.
 2. Reads branch protection on the base (`Forge.Protection`). Required approving reviews fail the job before the

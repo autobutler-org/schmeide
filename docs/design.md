@@ -196,8 +196,9 @@ waits up to `check_wait` for the one below to merge. Merging into the branch
 below would leave the change off the default branch. While the one below is
 open, each poll restacks: the branch is rebased onto the branch below, so the
 stack follows a base that moved, and force-pushed with a lease. Once the one
-below has merged, which the runner tells by the base it last built on being in
-the default branch, it retargets the pull request to the default branch, unless
+below has merged, which the runner tells by the base it last built on, or the
+latest head of the pull request below (`refs/pull/<n>/head`, else its branch),
+being in the default branch, it retargets the pull request to the default branch, unless
 GitHub already did on deleting the merged branch, and rebases it onto the
 default branch. The check wait then runs on the rebased head. A bottom that
 does not merge in time, one that closes without merging, or a rebase that

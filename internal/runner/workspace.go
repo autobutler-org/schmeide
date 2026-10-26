@@ -44,10 +44,12 @@ type Workspace interface {
 	// rebased does not leave its old commits behind. A conflict leaves the
 	// branch as it was.
 	Restack(ctx context.Context, onto string) (moved bool, err error)
-	// BaseMerged reports whether the base the branch was last built on is
-	// in the remote branch trunk, which tells a stacked branch that the
-	// pull request below it merged.
-	BaseMerged(ctx context.Context, trunk string) (bool, error)
+	// BaseMerged reports whether the pull request below a stacked branch
+	// merged into the remote branch trunk: whether the base the branch was
+	// last built on, or the latest head of pull request number below, is in
+	// trunk. The latest head counts for a pull request below that was
+	// rebased and merged after the branch last built on it.
+	BaseMerged(ctx context.Context, trunk string, below int) (bool, error)
 	// Close removes the workspace.
 	Close() error
 }
@@ -355,14 +357,37 @@ func (w *worktree) Restack(ctx context.Context, onto string) (bool, error) {
 	return true, nil
 }
 
-// BaseMerged implements [Workspace].
-func (w *worktree) BaseMerged(ctx context.Context, trunk string) (bool, error) {
+// BaseMerged implements [Workspace]. The latest head of the pull request
+// below is read from GitHub's refs/pull/<below>/head, which outlives a
+// deleted branch, and else from the base branch. A head that cannot be
+// fetched does not count, so a fetch that fails reads as not merged.
+func (w *worktree) BaseMerged(ctx context.Context, trunk string, below int) (bool, error) {
 	ref := "refs/remotes/origin/" + trunk
 	if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+refs/heads/"+trunk+":"+ref); err != nil {
 		return false, err
 	}
-	_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", w.baseRef, ref)
-	return err == nil, nil
+	onTrunk := func(rev string) bool {
+		_, err := w.git(ctx, w.dir, "merge-base", "--is-ancestor", rev, ref)
+		return err == nil
+	}
+	if onTrunk(w.baseRef) {
+		return true, nil
+	}
+	var heads [][2]string
+	if below > 0 {
+		pull := fmt.Sprintf("refs/pull/%d/head", below)
+		heads = append(heads, [2]string{pull, fmt.Sprintf("refs/remotes/origin/pull/%d", below)})
+	}
+	heads = append(heads, [2]string{"refs/heads/" + w.spec.base, "refs/remotes/origin/" + w.spec.base})
+	for _, h := range heads {
+		if _, err := w.git(ctx, w.repoDir, "fetch", "-q", w.spec.url, "+"+h[0]+":"+h[1]); err != nil {
+			continue
+		}
+		if onTrunk(h[1]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Close implements [Workspace].
