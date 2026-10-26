@@ -10,7 +10,7 @@ its flags and help text. Running with no arguments or `-h` prints the command li
 | `schmeide control` | `control.Main` (`internal/control/cli.go`) | The control node. See [Control node](control-node.md). |
 | `schmeide runner` | `runner.Main` (`internal/runner/cli.go`) | A runner. See [Runner](runner.md). |
 | `schmeide doctor` | `doctor.Main` (`internal/doctor/doctor.go`) | Checks a runner machine: git, gh, free disk, lint gate detection, each harness, the permission floor, and that a control node answers on NATS. `--fix` and `--json` are supported. |
-| `schmeide status` | `control.StatusMain` (`internal/control/status.go`) | Asks the control node on `schmeide.status-query.<steward>` and prints the steward's own live registrations and unfinished jobs, plus pool jobs for a pool steward. `--json` for the stable `Snapshot` form. |
+| `schmeide status` | `control.StatusMain` (`internal/control/status.go`) | Asks the control node on `schmeide.status-query.<steward>` and prints the steward's own live registrations and unfinished jobs, including `pending` jobs no runner has claimed, plus pool jobs for a pool steward, with how long each has been in its state. `--json` for the stable `Snapshot` form. |
 | `schmeide init` | `initMain` (`cmd/schmeide/init.go`) | Writes `.schmeide/config.toml` and `.schmeide/control.conf` (mode 0600) in the current directory, and refuses to overwrite either. |
 | `schmeide completion bash\|zsh\|fish` | `completionMain` (`cmd/schmeide/completion.go`) | Prints a completion script. |
 | `schmeide version` | `versionMain` (`cmd/schmeide/version.go`) | Prints `release.Version`. |
@@ -82,6 +82,9 @@ Jobs of `ci.yml`:
 | `e2e` | `make test/e2e` | The journeys in [End-to-end journeys](#end-to-end-journeys). |
 | `scripts` | `make test/scripts` | Runs every `scripts/*_test.sh`. |
 
+The `main` ruleset requires the checks `build` (the job in `image.yml`), `lint`, `test`, `govulncheck`, `e2e`,
+and `scripts`, on a branch that is up to date with `main`, and allows squash merges only.
+
 `make check` (local) runs `check/format`, `check/tidy`, `check/vet`, `check/lint`, `test`, and `test/scripts`.
 It does not run the race tests, `check/vuln`, or e2e; those are CI jobs, so run `make test/race` or
 `make test/e2e` yourself when a change needs them.
@@ -104,7 +107,7 @@ a runner. Running it is in [DEPLOYMENT.md](../DEPLOYMENT.md).
 | --- | --- | --- |
 | `harness.Fake` | `internal/harness/fake.go` | a harness, in process. `RunFunc` scripts each session. |
 | `forge.Fake` | `internal/forge/fake.go` | the `Forge` interface, in memory |
-| `fakegh.Server` | `internal/testutil/fakegh` | the GitHub REST endpoints the runner calls for one repository (repo, pulls, merge, issue comments, blocked-by, branch protection, check runs, Actions job logs) and a single-answer GraphQL stub. List endpoints honor `per_page` and `page`. Merge can be told to fail. |
+| `fakegh.Server` | `internal/testutil/fakegh` | the GitHub REST endpoints the runner calls for one repository (repo, pulls, merge, issue comments, blocked-by, branch protection, check runs, Actions job logs) and a single-answer GraphQL stub. List endpoints honor `per_page` and `page`. Merge can be told to fail. `Accept` adds a token that expires; an expired token gets `401 Bad credentials` and is recorded in `Calls` as `401 METHOD /path`. |
 | `cmd/fakeagent` | `cmd/fakeagent` | the `claude` and `grok` binaries |
 | saved webhooks | `internal/control/testdata/*.json` | GitHub `issues` deliveries for intake tests |
 
@@ -122,7 +125,8 @@ and `XAI_*`.
 Each journey (`newWorld`):
 
 1. Seeds a local bare origin with a `.schmeide/config.toml` holding the gate under test.
-2. Starts `fakegh` and a token minter `httptest` server.
+2. Starts `fakegh` and a token minter `httptest` server. `newWorldMinting` lets a journey choose each minted token
+   and its `expires_at`.
 3. Writes a fresh RSA App key (mode 0600) and starts `schmeide control` as a subprocess on free ports.
 4. Starts `schmeide runner` subprocesses with `SCHMEIDE_TRUST=1`, `--github-url file://…/origin`,
    `--github-api-url` pointing at `fakegh`, and `--ack-wait 3s`. Claude Code is the writer and Grok the reviewer.
@@ -133,6 +137,7 @@ Each journey (`newWorld`):
 | `TestJourneyLabeledIssueOpensOnePullRequest` | one PR on `1_add-a-greeting` against `main` with the session's title and `Closes #1`, the branch pushed, review passed |
 | `TestJourneyGateFailureCommentsAndOpensNoPullRequest` | gate `false` comments and opens no PR |
 | `TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest` | runner killed during review, the job redelivered to a second runner after the 3s lease, still one PR |
+| `TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest` | the first token expires during a 5s session; the runner gets a second one, opens one PR, the review passes, and GitHub never answers 401 (JN-FAIL-021) |
 
 ## Renovate
 

@@ -16,7 +16,7 @@ import (
 func TestRunnerKeepsItsRegistrationAlive(t *testing.T) {
 	w := newWorld(t)
 	registered := make(chan Registration, 64)
-	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice", func(m *nats.Msg) {
+	if _, err := w.client.Subscribe(RegisterSubjectPrefix+"alice.*", func(m *nats.Msg) {
 		var reg Registration
 		if err := json.Unmarshal(m.Data, &reg); err != nil {
 			t.Error(err)

@@ -269,3 +269,39 @@ func TestRevokeToken(t *testing.T) {
 		t.Fatalf("calls = %v, want two revokes", calls)
 	}
 }
+
+// TestAcceptedTokenExpires answers an accepted token until its expiry and
+// 401 Bad credentials from then on, as GitHub treats an installation token.
+func TestAcceptedTokenExpires(t *testing.T) {
+	s := New(t, repo, token)
+	now := time.Now()
+	s.Accept("fresh", now.Add(time.Hour))
+	s.Accept("expired", now)
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{
+		{token, http.StatusOK},
+		{"fresh", http.StatusOK},
+		{"expired", http.StatusUnauthorized},
+	} {
+		t.Run(tc.token, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.URL+"/repos/"+repo, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("GET with %q = %d, want %d", tc.token, resp.StatusCode, tc.want)
+			}
+		})
+	}
+	if calls := s.Calls(); calls[len(calls)-1] != "401 GET /repos/"+repo {
+		t.Errorf("calls = %q, want the expired call recorded as a 401", calls)
+	}
+}

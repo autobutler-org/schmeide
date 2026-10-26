@@ -23,7 +23,7 @@ TLS-terminating proxy.
 3. Set **Webhook secret** to a long random string and keep a copy.
 4. Under **Repository permissions**, set Contents: read and write, Pull
    requests: read and write, Issues: read and write, Checks: read-only,
-   Administration: read-only.
+   Administration: read-only, Actions: read-only.
 5. Under **Subscribe to events**, check **Issues**.
 6. Create the App and note its **App ID**.
 7. Generate a private key and save the `.pem` file.
@@ -37,10 +37,16 @@ TLS-terminating proxy.
 **Notes:**
 
 - schmeide does not create the App. This journey is manual.
-- The control node mints each job's token with only contents: write,
-  pull_requests: write, issues: write, and checks: read, limited to the job's
-  repository (`internal/control/token.go`). See JN-MERGE-011 for what that
-  means for the Administration permission.
+- The control node mints each job's token with contents: write,
+  pull_requests: write, issues: write, checks: read, administration: read, and
+  actions: read, limited to the job's repository (`internal/control/token.go`).
+  Administration: read lets the runner read branch protection before a
+  factory merge (JN-MERGE-010). Actions: read lets it read a failed check's
+  log for a CI fix round (JN-MERGE-006).
+- GitHub refuses a token that asks for a permission the App does not have, so
+  an App missing any of the six gets no job tokens (JN-FAIL-015). An existing
+  App that gains a permission needs the installation's owner to accept it.
+- The token request is pinned by `TestTokenPerJob`.
 - A key that group or other can read stops the control node (JN-SETUP-008).
 - No automated test. Related: [../permissions.md](../permissions.md),
   [../architecture/credentials.md](../architecture/credentials.md).
@@ -575,7 +581,7 @@ in.
   and worktrees.
 - The runner publishes its registration again every minute. Three minutes
   after a runner stops, it is no longer listed, and its steward's next job goes
-  to the pool (JN-POOL-008).
+  to the pool (JN-POOL-009).
 - Covered by `TestRunnerOnlyTakesItsStewardsJobs` and
   `TestTrackerRecordsRegisteredRunners`.
 
@@ -612,6 +618,9 @@ in.
 
 - A `--permission-mode` other than `acceptEdits` in `--claude-args` or
   `--grok-args` is refused the same way.
+- A `SCHMEIDE_<NAME>` value that does not parse for its flag, such as
+  `SCHMEIDE_ACK_WAIT="5 minutes"`, is refused with exit code 2 before anything
+  else is checked (JN-CLI-006).
 - A steward with `.`, `*`, `>`, `/`, `\`, or whitespace, or the reserved name
   `_pool`, fails with "steward "x" is not a GitHub login; pass your login with
   --steward", exit 1.
@@ -783,13 +792,12 @@ recorded yes for the pair.
 
 **Expected result:**
 
-- zsh lists `control`, `runner`, `doctor`, `status`, `completion`, and
-  `version`, each with a description.
+- zsh lists `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version`, each with a description.
 
 **Notes:**
 
-- The zsh script does not list `init`. The bash script does.
-- Covered by `TestCompletion`.
+- Covered by `TestCompletion` and `TestCompletionListsEveryCommand`.
 
 ---
 
@@ -804,11 +812,10 @@ recorded yes for the pair.
 
 **Expected result:**
 
-- fish lists `control`, `runner`, `doctor`, `status`, `completion`, and
-  `version` with descriptions. After `schmeide completion `, it offers `bash`,
-  `zsh`, and `fish`.
+- fish lists `control`, `runner`, `doctor`, `status`, `init`, `completion`,
+  and `version` with descriptions. After `schmeide completion `, it offers
+  `bash`, `zsh`, and `fish`.
 
 **Notes:**
 
-- The fish script does not list `init`.
-- Covered by `TestCompletion`.
+- Covered by `TestCompletion` and `TestCompletionListsEveryCommand`.

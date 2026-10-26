@@ -6,7 +6,7 @@ request, then reviews it and, when the repo asks, merges it. It works one job at
 
 | Package or file | Owns |
 | --- | --- |
-| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
+| `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`; a variable that does not parse for its flag is a usage error), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
 | `internal/runner/runner.go` | `Options`, `Connect`, `New`, `register`, `Run`, `next`, `handle` (delivery, heartbeat, retries, ack), `work`, `execute`, `open`, `brief`, `prText`, `BranchName`, `gateOutcome`, the stage record (`mark`, `recordedStage`) |
 | `internal/runner/workspace.go` | `Workspace` interface and the git `worktree` implementation: `newWorktree`, `Commit`, `Run` (the gate), `Push`, `Resume`, `Count`, `Restack`, `BaseMerged`, `Close` |
 | `internal/runner/review.go` | `review`, `reviewOnce`, `reviewer` (harness choice for review), `applyFindings`, `readVerdict`, `session` (every harness `Request`), `promptWithMap` |
@@ -37,7 +37,8 @@ terminal. `New` then:
    unlimited reconnects, then sends an empty request on `schmeide.token.<steward>`. Only a control node answers
    it, so a wrong URL fails here with a message saying what to check.
 3. `register`: requires `git` on `PATH`, runs `Check` on every harness and picks the first that passes as the
-   writer, creates or updates the steward consumer and, with `--pool`, the pool consumer, opens the
+   writer, opens the steward consumer and, with `--pool`, the pool consumer (`sharedConsumer`: created with
+   this runner's `--ack-wait` when missing, used unchanged when another runner created it), opens the
    `SCHMEIDE_STATUS` stream and `SCHMEIDE_STAGES` bucket (each optional, for older control nodes), and publishes
    the `Registration` with the names of every harness that passed.
 
@@ -45,7 +46,7 @@ terminal. `New` then:
 out and `--pool` is set, from the pool consumer. So a runner always takes its own steward's job first. It returns
 an error when the NATS connection is closed.
 
-While `Run` runs, `keepRegistered` publishes the same `Registration` again on `schmeide.runners.<steward>` every
+While `Run` runs, `keepRegistered` publishes the same `Registration` again on `schmeide.runners.<steward>.<host>` (`control.RegisterSubject`) every
 `control.RegistrationInterval` (1 minute), including while a job is being worked. The control node counts a
 registration for `control.RegistrationTTL` (3 minutes), so this refresh is what keeps a long-running runner in pool
 routing and in `schmeide status`. A publish that fails is logged as `could not report to the control node` with
@@ -65,9 +66,11 @@ stateDiagram-v2
     Lookup --> ResumeReview: open PR with the issue prefix, or stage record names one
     Lookup --> Done: closed PR, or outcome comment already posted
     Lookup --> Base: no PR
-    Base --> Failed: blockers not one linear stack
+    Base --> FinalFailed: blockers not one linear stack
     Base --> Worktree: base = default branch or top of stack
-    Worktree --> Session: stage worktree_ready
+    Worktree --> Config: stage worktree_ready
+    Config --> FinalFailed: config missing or invalid
+    Config --> Session: repoconfig.Load
     Session --> Failed: session error, timeout, no changes
     Session --> Gate: stage session_finished, commit
     Gate --> GateFailed: gate fails or times out
@@ -86,6 +89,7 @@ stateDiagram-v2
     Failed --> HandBack: attempts below --max-attempts
     HandBack --> [*]
     Failed --> [*]: comment, report, ack
+    FinalFailed --> [*]: comment, report, ack, no retry
     GateFailed --> [*]: comment, report, ack
     ReviewFailed --> [*]: comment, report, ack
     MergeFailed --> [*]: comment, report, ack
@@ -98,7 +102,10 @@ stateDiagram-v2
    attempt count from the last status on the job's status subject (`recordedAttempts`). Start the heartbeat
    goroutine. Report `claimed`.
 2. **Token.** Request the job's token on `schmeide.token.<steward>` with the job subject as the body. On failure,
-   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue.
+   `NakWithDelay(30s)` without counting an attempt, since without a token nothing can be posted on the issue. The
+   token is held in a `jobToken` (`internal/runner/token.go`) that every later GitHub call and git command asks,
+   and that requests a new one when the held one is within five minutes of expiry. See
+   [Credentials](credentials.md#refreshing-a-jobs-token).
 3. **Issue text.** A job with an empty title predates jobs carrying the issue text and fails with a message to
    relabel the issue.
 4. **Trust.** `trust.Check(workDir, origin, confirm)`. See [Trust prompt](#trust-prompt).
@@ -111,9 +118,11 @@ stateDiagram-v2
    - A closed PR ends the job as `pr_opened` with no comment.
    - An open PR resumes at review on its head and base.
 6. **Base.** With no PR, `baseBranch` picks the base (see [Stacked pull requests](#stacked-pull-requests)).
+   Blockers that are not one linear stack (`errNotOneStack`) fail the job finally.
 7. **Worktree.** `newWorktree`, then mark stage `worktree_ready`.
 8. **Repo config.** `repoconfig.Load` from the worktree, which is still the base branch. The gate, timeouts,
-   `check_wait`, and `[automate]` come from here, before any session runs. `warnLintGate` comments a warning
+   `check_wait`, and `[automate]` come from here, before any session runs. A load error (missing file or
+   invalid content) fails the job finally (`finalFailed`). `warnLintGate` comments a warning
    when the gate does not mention a detected `make check` target or pre-commit config.
 9. **Writer session** (`open`): report `working`, run the harness with `brief(job, gate)`, mark
    `session_finished`. Read `.schmeide/pr.md` for the PR title and body and delete it (`prText`). The issue title
@@ -125,7 +134,8 @@ stateDiagram-v2
 13. **Finish.** Comment the outcome on the issue with the marker appended, report the final state, delete the
     stage record, and `Ack`.
 14. **Revoke.** `Runner.revoke` calls `github.RevokeToken` (`github.go`), which sends
-    `DELETE /installation/token` with the delivery's token. It is deferred right after the token arrives, so it
+    `DELETE /installation/token` with the token the delivery holds at that point (`jobToken.current`, which does
+    not refresh; a token a refresh replaced is left to expire). It is deferred right after the token arrives, so it
     runs however the delivery ends: a final state, a `retrying` hand-back, a stuck-job drop, or a shutdown. It
     runs on a context a shutdown does not cancel, with a 30 second deadline. A failure logs "could not revoke the
     job's token; it expires within the hour" and changes nothing else. A delivery whose token request failed has
@@ -133,10 +143,14 @@ stateDiagram-v2
 
 ### Retries and acknowledgment
 
-The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried. When the
+The job is acknowledged only after a final outcome. Only outcomes in state `failed` are retried, and not those
+marked `final` by `finalFailed`: a repo config load error and blockers that are not one linear stack. A retry
+cannot change either, so they comment and ack on the first attempt. When the
 attempt count after this failure is below `--max-attempts`, the runner reports `retrying`, flushes so the count
 is stored on `SCHMEIDE_STATUS`, and `NakWithDelay(30s)`. Otherwise it comments and acks. The count lives in each
-status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A
+status's `attempts` field, so a restarted runner, or a different runner of the same steward, continues it. A new
+job for an issue whose last job ended `failed` starts at zero: the control node's `pending` status for the new job
+is the latest on the subject and carries no `attempts`. A
 `map[string]int` in the process is the fallback when the status stream cannot be read.
 
 Hand-backs that do not count: a failed token request, a shutdown (the parent context is canceled, so the job is
@@ -145,7 +159,9 @@ and `queued` are never retried.
 
 ### Heartbeat and the stuck watchdog
 
-The goroutine in `handle` sends `msg.InProgress()` every `AckWait/3`. Every `report` call signals a `progress`
+The goroutine in `handle` sends `msg.InProgress()` every third of the consumers' `AckWait` (`Runner.ackWait`,
+the shorter of the two for a `--pool` runner), which differs from `--ack-wait` when another runner created the
+consumer. Every `report` call signals a `progress`
 channel that resets a `--stuck-after` timer. When the timer fires, the goroutine cancels the work context with
 `errJobStuck` and `Nak`s the delivery. The job's processes are killed through their process groups, and
 `handle` returns without commenting or acking.
@@ -174,6 +190,7 @@ A different origin asks again, even for the same work directory.
   cache/<repo_id>/
     go-build/                       GOCACHE shared by the gate and every session for this repository
     pkg/mod/                        GOMODCACHE, written with -modcacherw
+  scratch/<repo_id>-<issue>/        the gate's HOME and TMPDIR, mode 0700, removed by Close
 ```
 
 `newWorktree` (`workspace.go`):
@@ -186,7 +203,11 @@ A different origin asks again, even for the same work directory.
    directory from an interrupted attempt is removed first.
 4. Installs the ref guard and sets `core.hooksPath` in the worktree's own config.
 
-`Close` runs `git worktree remove --force` and deletes the local branch. The clone and the caches stay.
+Before step 1 it removes any leftover `scratch/<repo_id>-<issue>` and creates it again with mode `0700`. A
+failure there fails the job with `create the gate scratch directory: <err>; check that --work-dir is writable`.
+
+`Close` runs `git worktree remove --force`, deletes the local branch, and removes the scratch directory. The clone
+and the caches stay.
 
 Commits are made with `-c commit.gpgsign=false` as `--git-name` / `--git-email` (default `schmeide[bot]`), passed
 through `GIT_AUTHOR_*` and `GIT_COMMITTER_*`.
@@ -219,8 +240,12 @@ in `.schmeide/pr.md` with a `Closes #N` line. The review and fix briefs (`review
 - `Output` is the runner's stderr.
 
 The prompt goes in on stdin: `claude --print <args>` and `grok -p - <args>`, where `<args>` defaults to
-`--permission-mode acceptEdits`. Each session runs in its own process group, which is killed with `SIGKILL` when
-the session ends for any reason or its context is canceled.
+`--permission-mode acceptEdits`. Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
+true}` in `internal/harness/claude.go` and `internal/harness/grok.go`), so it has no controlling terminal. A runner
+started in an interactive terminal passes that terminal to the session as `Output`; were the session only a
+background process group on it, the CLI's first terminal ioctl would get `SIGTTOU` and stop the session until
+the session deadline killed it. The session leader also leads its own process group, which is killed with
+`SIGKILL` (`syscall.Kill(-pid, SIGKILL)`) when the session ends for any reason or its context is canceled.
 
 ### Harness selection
 
@@ -232,9 +257,13 @@ the session ends for any reason or its context is canceled.
 
 ## The gate
 
-`Workspace.Run` runs `sh -c <gate>` in the worktree, in its own process group, with `cmd.Cancel` killing the group.
-The environment is the runner process's own environment (the worktree is created with a nil env, so the gate
-falls back to `os.Environ()`), plus the Go cache variables. The deadline is `gate_timeout` from the repo config,
+`Workspace.Run` (`internal/runner/workspace.go`) runs `sh -c <gate>` in the worktree, in its own process session
+(`Setsid`), detached from the runner's terminal so `SIGTTOU` and `SIGTTIN` cannot stop it, with `cmd.Cancel`
+killing the session leader's process group.
+The environment is `gateEnv(os.Environ(), --gate-pass-env)`: the base list, `LC_*` and `XDG_*`, and the
+`--gate-pass-env` names, never a `SCHMEIDE_*` name and never the harness prefixes. `scratchHome` then points `HOME`
+and `TMPDIR` at the job's scratch directory, and the Go cache variables are added. See
+[credentials.md](credentials.md#gate-environment). The deadline is `gate_timeout` from the repo config,
 or `--gate-timeout`. A failure posts the command and error on the issue but never the output; the last 4000
 bytes of output go to the runner log only (`gateOutcome`). A gate failure is final.
 
@@ -258,7 +287,8 @@ without force. `Restack` force-pushes with `--force-with-lease` pinned to the he
 `baseBranch` (`github.go`) reads the repository default branch and the issue's blocked-by list
 (`/issues/<n>/dependencies/blocked_by`). For each open blocker it looks for an open PR on `<blocker>_`. No such
 PR means the default branch. Otherwise the base is the head of the one PR whose chain of bases (`stackBelow`)
-contains every other blocker's head. Blockers that are not one chain fail the job with a comment. The worktree
+contains every other blocker's head. Blockers that are not one chain return `errNotOneStack`, and the job fails
+finally with one comment and no retry. The worktree
 is created from that base and the PR opens against it.
 
 ## Review loop
@@ -283,7 +313,10 @@ or the recorded round minus one when larger, so a redelivery does not repeat spe
 Only when `automate.merge = "on"` and review passed. `mergeWhenGreen` (`merge.go`):
 
 1. Reads the default branch. When the PR's base is not the default branch, `waitForStack` waits up to
-   `check_wait` for the PR below to merge: while it is open each poll restacks onto it; once it merged the PR is
+   `check_wait` for the PR below to merge: while it is open each poll restacks onto it. A closed PR below with no
+   `merged_at` still counts as merged when `Workspace.BaseMerged` finds the base this branch last built on, or the
+   PR below's latest head (`refs/pull/<n>/head`, else the base branch), in the default branch; a head that cannot
+   be fetched does not count. Once it merged the PR is
    retargeted with `RetargetPull` (REST `PATCH /pulls/<n>`) when GitHub has not already done so, and rebased onto
    the default branch.
 2. Reads branch protection on the base (`Forge.Protection`). Required approving reviews fail the job before the
@@ -306,6 +339,7 @@ green, but".
 | --- | --- | --- |
 | Gate does not mention a detected lint target | the `lintgate.Warning` text, job continues | none |
 | Work failed after `--max-attempts` | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
+| Repo config missing or invalid, or blockers not one linear stack (first attempt, no retry) | "schmeide could not finish this job and did not open a pull request:" plus the error | `failed` |
 | Gate failed or timed out, no PR | "schmeide did not open a pull request:" plus command and error, no output | `gate_failed` |
 | Gate failed on a fix round | "schmeide left the pull request open:" plus command, error, PR URL | `gate_failed` |
 | Review passed | "schmeide opened a pull request for this issue:" plus the URL and "The review passed." | `pr_opened` |

@@ -9,7 +9,22 @@ it does not do. It covers only behavior that is built. For the lifecycle see
 A runner writes the number of failed work outcomes on every job status. The
 status stream is stored in the control node's data directory, so a restarted
 runner restores the count before it claims the job. A restart does not grant a
-job a fresh retry budget.
+job a fresh retry budget. A new job for the same issue does: the control node
+stores a `pending` status with no count when it creates the job.
+
+## Pending status
+
+When the control node creates a job it stores a `pending` status for it, so
+`schmeide status` lists the job before a runner claims it (JN-CLI-016).
+
+- If that status cannot be stored, the job is still created and the control
+  node logs `could not record the job as pending; schmeide status will not list
+  it until a runner claims it`. The job appears once a runner reports
+  `claimed`.
+- If the job cannot be stored, the webhook fails as before and the `pending`
+  status is deleted, so no line is left for a job that does not exist.
+- A job a runner hands back keeps the runner's last state in status until the
+  next runner reports on it.
 
 - `--max-attempts` (default 3) is how many failed work outcomes the runners
   allow for a job. While the count is below that, the runner reports the job
@@ -19,11 +34,32 @@ job a fresh retry budget.
   on the issue and acknowledges the job.
 - A token hand-back does not consume an attempt. If the runner cannot get a
   GitHub token for the job, it hands the job back without commenting, because
-  the issue could not be reached anyway.
+  the issue could not be reached anyway. An App without one of the permissions
+  the control node asks for (Contents, Pull requests, Issues, Checks,
+  Administration, Actions) gets no token, so every job is handed back until
+  the App and its installation have them.
+- A job that outlives its token gets a new one. GitHub expires an installation
+  token an hour after it is minted. Before each GitHub call and git command the
+  runner checks the token it holds, and when that token is within five minutes
+  of expiry it asks the control node for another one for the same job. If that
+  request fails, the call that needed the token fails with "refresh the job's
+  GitHub token: ..." and the job fails like any other GitHub error (an attempt
+  is used). The outcome comment is still attempted with its own refresh; if
+  that fails too, the runner logs `msg="could not comment on the issue"` with
+  the refresh error, nothing reaches the issue, and `schmeide status` still
+  shows the job's final state.
 - A shutdown does not consume an attempt. If the runner is stopping, it hands
   the job back at once for another runner.
 - A gate failure is final. It is the session's own result, so it is not
   retried.
+- A missing or invalid `.schmeide/config.toml` is final. The runner reads it
+  from the base branch before any session, and a retry reads the same file.
+  The comment names the error from `internal/repoconfig`. Push a fixed config
+  and add the ready label again to make a new job.
+- Open blockers side by side, whose pull requests are not one linear stack,
+  are final. The blocked-by list does not change between attempts. The
+  comment says "are not one linear stack, and schmeide stacks only on a single
+  chain of blockers".
 - A review that is not passed after the allowed rounds is final. A fix whose
   gate fails is a gate failure and is final too.
 - A factory merge that does not land is final. The pull request already
@@ -69,6 +105,18 @@ A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
 
+### A runner started in a terminal
+
+A runner run from an interactive terminal passes its stderr, that terminal, to
+every harness session as output. Each harness session and gate command starts
+in its own process session (`Setsid` in `internal/harness/claude.go`,
+`internal/harness/grok.go`, and `internal/runner/workspace.go`), so it has no
+controlling terminal and `SIGTTOU` or `SIGTTIN` cannot stop it. Before this,
+a session was only a background process group on the runner's terminal: the
+CLI's first terminal ioctl stopped it (`ps` state `T`) and it sat until the
+session deadline fired and the job failed with "the claude-code session timed
+out". A session stopped that way now points at a build from before the fix.
+
 ## Registration refresh
 
 A runner re-publishes its registration every minute while `Run` runs
@@ -86,6 +134,21 @@ a runner owns a job it sends `InProgress` every third of that duration. The
 runner therefore has to remain connected to the control node throughout a
 long session. If the process dies or heartbeats stop, JetStream redelivers the
 job after the lease expires.
+
+The lease belongs to the shared consumer, not to each runner. The first runner
+to start for a steward (or the first `--pool` runner) creates the consumer with
+its `--ack-wait`, and later runners use it unchanged. A runner whose
+`--ack-wait` differs logs `a shared job consumer already has another ack wait;
+heartbeating at the consumer's` and heartbeats every third of the consumer's
+lease, so a mismatch cannot cause a redelivery of a job that is still being
+worked. To change the lease, delete the consumer (`runner-<steward>` or
+`runner-_pool` on `SCHMEIDE_JOBS`) with the `nats` CLI while no runner holds a
+job from it, then start a runner with the new `--ack-wait`.
+
+JetStream redelivers without limit: no `MaxDeliver` is set. The runner's
+attempt count is what ends retries, because it does not count hand-backs for a
+missing token, for shutdown, or for a dead runner, and a job stopped by
+`MaxDeliver` would end with no status and no issue comment.
 
 `--stuck-after` defaults to 3 hours and is a separate no-progress budget. Each
 reported job-state change resets it. If the budget expires, the runner cancels
@@ -115,8 +178,9 @@ A refused push is a failed work outcome, so it counts as an attempt.
 
 ## Token revocation
 
-When a delivery ends, the runner revokes the delivery's installation token with
-`DELETE /installation/token`. That happens after a final state, a retry, a
+When a delivery ends, the runner revokes the installation token the delivery
+holds with `DELETE /installation/token`. A token a refresh replaced earlier is
+not revoked; it was within five minutes of its expiry. That happens after a final state, a retry, a
 stuck-job drop, and a shutdown hand-back. If GitHub refuses the call or cannot
 be reached within 30 seconds, the runner logs
 `could not revoke the job's token; it expires within the hour` and nothing else

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/autobutler-org/schmeide/internal/release"
 	"github.com/nats-io/nats.go"
@@ -21,9 +22,11 @@ import (
 )
 
 const (
-	// RegisterSubjectPrefix plus a steward is the subject a runner announces
-	// itself on when it starts, and again every RegistrationInterval. The
-	// message is a Registration.
+	// RegisterSubjectPrefix plus a steward and a host (see RegisterSubject)
+	// is the subject a runner announces itself on when it starts, and again
+	// every RegistrationInterval. The message is a Registration. Runners from
+	// before the host token publish on the prefix plus the steward alone,
+	// which is still accepted.
 	RegisterSubjectPrefix = "schmeide.runners."
 	// StatusSubjectPrefix replaces "schmeide.jobs." in a job's subject to give
 	// the subject its Status messages are published on.
@@ -50,13 +53,33 @@ const (
 	RegistrationTTL = 3 * RegistrationInterval
 )
 
+// RegisterSubject is the subject a runner on host registers for steward on.
+// Each steward and host pair gets its own subject, so the status stream can
+// keep only the latest message per subject without losing another host's
+// registration. A character that NATS gives a meaning in a subject (".", "*",
+// ">", or white space) becomes "_" in the host token, and an empty host is "_".
+func RegisterSubject(steward, host string) string {
+	token := strings.Map(func(r rune) rune {
+		if r == '.' || r == '*' || r == '>' || unicode.IsSpace(r) {
+			return '_'
+		}
+		return r
+	}, host)
+	if token == "" {
+		token = "_"
+	}
+	return RegisterSubjectPrefix + steward + "." + token
+}
+
 // State is where a job stands. Gate failed, PR opened, failed, review failed,
 // merged, queued, and merge failed are final; retrying means an attempt failed
 // and the job will be delivered again, and reviewing is still in progress.
 type State string
 
-// The states a runner reports for a job.
+// The states a job's status can hold. The control node reports pending when
+// it creates a job; runners report the rest.
 const (
+	StatePending    State = "pending"
 	StateClaimed    State = "claimed"
 	StateWorking    State = "working"
 	StateRetrying   State = "retrying"
@@ -71,7 +94,7 @@ const (
 	StateMergeFailed  State = "merge_failed"
 )
 
-// final reports whether a job in this state is done.
+// final reports whether a job in this state is done. Pending is not.
 func (s State) final() bool {
 	switch s {
 	case StatePROpened, StateReviewFailed, StateMerged, StateQueued, StateMergeFailed:
@@ -84,7 +107,8 @@ func (s State) final() bool {
 // get a new job.
 func (s State) failure() bool { return s == StateGateFailed || s == StateFailed }
 
-// Status is the message a runner publishes when a job changes state.
+// Status is the message a runner publishes when a job changes state, and the
+// one the control node publishes with StatePending when it creates a job.
 type Status struct {
 	State State `json:"state"`
 	// Detail is the PR URL for StatePROpened and the reason for the failure
@@ -114,9 +138,14 @@ type Registration struct {
 type Tracker struct {
 	stream  jetstream.Stream
 	issues  jetstream.KeyValue
+	log     *slog.Logger
 	mu      sync.Mutex
 	runners []liveRegistration
 	jobs    map[string]Status
+	// since is when each job's latest status was stored.
+	since map[string]time.Time
+	// dropped are status sequences a failed Publish deleted; see forget.
+	dropped map[uint64]bool
 	// now is the clock. Nil means time.Now. Tests set it with setClock.
 	now func() time.Time
 }
@@ -156,12 +185,20 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	defer cancel()
 	// The same subjects runners already publish. JetStream stores each
 	// message because the stream listens on them; publishers stay unchanged.
+	// Every registration (one subject per steward and host) and every job's
+	// status (one subject per job) is replaced by the next one on its
+	// subject, and replay needs only the latest, so one message per subject
+	// is kept. CreateOrUpdateStream applies the limit to a stream an older
+	// control node created without it, which drops the older messages.
 	stream, err := q.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: StatusStream,
 		Subjects: []string{
 			RegisterSubjectPrefix + "*",
+			RegisterSubjectPrefix + "*.*",
 			StatusSubjectPrefix + "*.*.*",
 		},
+		MaxMsgsPerSubject: 1,
+		Discard:           jetstream.DiscardOld,
 		// Direct gets name the subject in the request subject, so NATS
 		// permissions can limit a runner to its own and pool job statuses.
 		AllowDirect: true,
@@ -173,7 +210,7 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read status stream: %w", err)
 	}
-	t := &Tracker{stream: stream, issues: q.issues, jobs: map[string]Status{}}
+	t := &Tracker{stream: stream, issues: q.issues, log: log, jobs: map[string]Status{}, since: map[string]time.Time{}}
 	if err := t.replay(ctx, stream, log, info.State); err != nil {
 		return nil, err
 	}
@@ -191,13 +228,16 @@ func (q *Queue) Track(log *slog.Logger) (*Tracker, error) {
 
 // replay applies the status stream in order. A malformed registration or a
 // junk status is dropped here the same way it is dropped live, so a restart
-// does not bring it back.
+// does not bring it back. A sequence the per-subject limit removed is skipped.
 func (t *Tracker) replay(ctx context.Context, stream jetstream.Stream, log *slog.Logger, state jetstream.StreamState) error {
 	if state.Msgs == 0 {
 		return nil
 	}
 	for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
 		msg, err := stream.GetMsg(ctx, seq)
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load status history: %w", err)
 		}
@@ -231,15 +271,18 @@ func (t *Tracker) observe(log *slog.Logger, seq uint64, stored time.Time, subjec
 	case strings.HasPrefix(subject, RegisterSubjectPrefix):
 		t.observeRegistration(log, stored, subject, data)
 	case strings.HasPrefix(subject, StatusSubjectPrefix):
-		t.observeStatus(log, seq, subject, data)
+		t.observeStatus(log, seq, stored, subject, data)
 	}
 }
 
 func (t *Tracker) observeRegistration(log *slog.Logger, stored time.Time, subject string, data []byte) {
 	var reg Registration
 	// The subject, not the payload, is what NATS permissions can pin to a
-	// steward, so the two must agree.
-	if err := json.Unmarshal(data, &reg); err != nil || RegisterSubjectPrefix+reg.Steward != subject {
+	// steward, so the two must agree. The host must agree too, so a steward
+	// and host pair has one subject and the per-subject limit keeps its
+	// latest registration.
+	if err := json.Unmarshal(data, &reg); err != nil ||
+		(subject != RegisterSubject(reg.Steward, reg.Host) && subject != RegisterSubjectPrefix+reg.Steward) {
 		log.Warn("dropping a malformed runner registration", "subject", subject, "err", err)
 		return
 	}
@@ -259,7 +302,7 @@ func (t *Tracker) observeRegistration(log *slog.Logger, stored time.Time, subjec
 	t.runners = append(t.runners, liveRegistration{Registration: reg, stored: stored})
 }
 
-func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, data []byte) {
+func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subject string, data []byte) {
 	var status Status
 	if err := json.Unmarshal(data, &status); err != nil || status.State == "" {
 		log.Warn("dropping a malformed job status", "subject", subject, "err", err)
@@ -268,12 +311,33 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, subject string, da
 	job := jobSubjectPrefix + strings.TrimPrefix(subject, StatusSubjectPrefix)
 	log.Info("job state", "job", job, "state", string(status.State), "detail", status.Detail)
 	t.mu.Lock()
+	if t.dropped[seq] {
+		t.mu.Unlock()
+		return
+	}
 	t.jobs[job] = status
+	t.since[job] = at
 	t.mu.Unlock()
 	if status.State.final() {
 		if err := t.finish(seq, job, status.State); err != nil {
 			log.Error("could not record the job's final state", "job", job, "state", string(status.State), "err", err)
 		}
+	}
+}
+
+// forget drops the pending status stored at seq for a job whose Publish
+// failed, whether or not it has been observed yet, so the job's steward is
+// not shown a job that was never stored.
+func (t *Tracker) forget(seq uint64, job string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dropped == nil {
+		t.dropped = map[uint64]bool{}
+	}
+	t.dropped[seq] = true
+	if t.jobs[job].State == StatePending {
+		delete(t.jobs, job)
+		delete(t.since, job)
 	}
 }
 
@@ -356,12 +420,16 @@ func (t *Tracker) JobStatus(subject string) (Status, bool) {
 	return status, ok
 }
 
-// JobState is one unfinished job in a Snapshot.
+// JobState is one unfinished job in a Snapshot: pending until a runner
+// reports on it, then the runner's latest state.
 type JobState struct {
 	// Subject is the job's subject (see Job.Subject).
 	Subject string `json:"subject"`
 	State   State  `json:"state"`
 	Detail  string `json:"detail,omitempty"`
+	// Since is when the latest status was stored: for a pending job, when
+	// it was queued.
+	Since time.Time `json:"since"`
 }
 
 // Snapshot is what `schmeide status` reports. Its JSON form is stable.
@@ -399,7 +467,7 @@ func (t *Tracker) Snapshot(steward string) Snapshot {
 	for subject, status := range t.jobs {
 		mine := strings.HasPrefix(subject, own) || pool != "" && strings.HasPrefix(subject, pool)
 		if mine && !status.State.final() {
-			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail})
+			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail, Since: t.since[subject]})
 		}
 	}
 	t.mu.Unlock()
@@ -440,9 +508,9 @@ func (s Snapshot) WriteText(w io.Writer) {
 		fmt.Fprintln(w, "No queued or running jobs.")
 		return
 	}
-	fmt.Fprintln(tw, "JOB\tSTATE\tDETAIL")
+	fmt.Fprintln(tw, "JOB\tSTATE\tFOR\tDETAIL")
 	for _, j := range s.Jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", j.Subject, j.State, j.Detail)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.Subject, j.State, time.Since(j.Since).Round(time.Second), j.Detail)
 	}
 	tw.Flush()
 }
@@ -452,8 +520,10 @@ func StatusUsage() string {
 	return `schmeide status shows your runners that are registered with the control node
 and your jobs that are queued or running. A steward whose runner was started
 with --pool also sees queued and running pool jobs. Other stewards' runners and
-jobs are not shown. It connects to the control node's NATS as a steward, the
-same way a runner does, and asks the control node.
+jobs are not shown. A job no runner has claimed yet is "pending"; FOR is how
+long a job has been in its state, so for a pending job it is how long the job
+has waited. It connects to the control node's NATS as a steward, the same way a
+runner does, and asks the control node. Running it changes nothing.
 
 Usage:
   schmeide status --steward <github login> [--json] [flags]
@@ -469,7 +539,8 @@ Flags:
         This steward's NATS token: the one the control node's --runner-tokens lists for --steward.
         Env: SCHMEIDE_NATS_TOKEN
   --json
-        Print one JSON object with "runners" and "jobs" instead of text.
+        Print one JSON object with "runners" and "jobs" instead of text. Each
+        job's "since" is when it entered its state.
   -h, --help
         Show this help.
 `
