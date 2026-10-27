@@ -146,6 +146,149 @@ CLI's first terminal ioctl stopped it (`ps` state `T`) and it sat until the
 session deadline fired and the job failed with "the claude-code session timed
 out". A session stopped that way now points at a build from before the fix.
 
+The fix shipped in v0.0.3 (#242). Runners older than that started each
+session with `Setpgid` instead of `Setsid`. The usual trigger was a shell the
+session started that ran the operator's shell startup files: a `stty` call
+there (prezto's runs one) touched the terminal, `SIGTTOU` stopped the
+session's whole process group, and the job sat until the 2 hour
+`--session-timeout`. Run `schmeide version` on the runner machine; anything
+older than v0.0.3 (or a `dev` build from before #242) needs an upgrade. No
+flag or config key works around it on an old runner.
+
+## The gate fails on every job because of the runner's environment
+
+The gate does not run where the operator's shell runs. `worktree.Run` in
+`internal/runner/workspace.go` runs it with `sh -c` in a worktree that `git
+worktree add` created fresh for the job, with this environment:
+
+- `gateEnv` in `internal/runner/env.go`: only the base names (`PATH`, `HOME`,
+  `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `TZ`, `TMPDIR`, the
+  `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` variables in both cases,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`), every `LC_*` and `XDG_*` name, and the
+  names in `--gate-pass-env`. No `SCHMEIDE_*` name, ever.
+- `scratchHome` in the same file then drops `HOME`, `TMPDIR`,
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME`,
+  and sets `HOME` and `TMPDIR` to `<work-dir>/scratch/<repo_id>-<issue>`.
+  That directory is emptied when the job starts and removed when it ends.
+- `goCacheEnv` in `internal/runner/cache.go` adds `GOCACHE`, `GOMODCACHE`,
+  and `GOFLAGS` pointing at `<work-dir>/cache/<repo_id>`. Only Go gets a
+  cache that outlives the job.
+
+So anything a toolchain keeps in the home directory or in untracked files is
+missing, even though the same command passes in the operator's own checkout:
+
+- Resolved packages that are not committed: Dart's `.dart_tool/` in the
+  checkout and `~/.pub-cache`, a `node_modules/`, a Python virtualenv, and
+  the like.
+- SDK and tool caches under `~/.cache`, `~/.config`, or other dotfiles.
+- Environment variables the shell profile sets (`PUB_CACHE`, `JAVA_HOME`, a
+  version manager's shims) when they are not on the base list or in
+  `--gate-pass-env`.
+
+A toolchain on `PATH` that is older than the version the repo pins fails the
+same way. That is the runner machine's state, not the change's.
+
+### What it looks like
+
+Every job fails at the gate within minutes, whatever the issue asks for. The
+gate is never retried (see [Attempts](#attempts)), so each job fails once and
+the issue gets, from `Runner.gateOutcome` in `internal/runner/runner.go`:
+
+```text
+schmeide did not open a pull request: the gate command `<gate>` failed: exit status 2. The gate's output is in the runner's log.
+```
+
+The exit status is whatever the gate returned; `make` returns 2. When the
+gate fails in a review fix round after the pull request is open, the comment
+starts "schmeide left the pull request open:" and ends with the pull request
+URL. The output never reaches the issue. The runner logs
+`level=WARN msg="gate failed"` with the last 4000 bytes of it in `output`.
+
+Running schmeide against a Flutter repo whose gate was `make check test` gave
+two examples in that log line:
+
+- No `.dart_tool/` in the fresh worktree and no `~/.pub-cache` in the scratch
+  `HOME`, so `dart format` could not read the repo's lint settings and
+  formatted with its defaults. `check/format/flutter` logged `Failed to
+  resolve package URI "package:flutter_lints/flutter.yaml"` and `Formatted
+  1894 files (131 changed)`, and failed.
+- The runner machine's Flutter SDK was 3.47.7 and the pubspec pinned 3.47.8:
+  `Because quark requires Flutter SDK version 3.47.8, version solving
+  failed.`
+
+### Diagnose
+
+Run the gate on unmodified `main` in a fresh clone, with the environment
+`gateEnv` and `scratchHome` build. Add each name the runner's
+`--gate-pass-env` lists, and any `LC_*`, `XDG_*`, `TZ`, proxy, or
+`SSL_CERT_*` variable the runner has (but not the four `XDG_*_HOME` names
+`scratchHome` drops):
+
+```sh
+repo=$(mktemp -d) scratch=$(mktemp -d)
+git clone -q --depth 1 https://github.com/<owner>/<repo> "$repo"
+cd "$repo"
+env -i PATH="$PATH" USER="$USER" LOGNAME="$LOGNAME" SHELL="$SHELL" \
+  TERM="$TERM" LANG="$LANG" HOME="$scratch" TMPDIR="$scratch" \
+  sh -c '<the gate from .schmeide/config.toml>'
+```
+
+If that fails, the environment is the cause, not the sessions' changes. If it
+passes in the operator's normal shell but fails here, the difference between
+the two environments is the missing piece.
+
+### Fix
+
+- **Make the gate resolve its own dependencies.** For example `gate =
+  "flutter pub get && make check test"`, or a `check` target in the
+  Makefile that depends on a target running `flutter pub get` (`npm ci`,
+  `uv sync`, and so on for other toolchains). This also makes the gate pass
+  in any other fresh clone, such as CI.
+- **Pass cache locations with `--gate-pass-env`** (or
+  `SCHMEIDE_GATE_PASS_ENV`), so the gate reuses a cache instead of
+  downloading everything into a scratch `HOME` every job. For example set
+  `PUB_CACHE=$HOME/.pub-cache` in the runner's environment and start it with
+  `--gate-pass-env PUB_CACHE`. Listing `HOME`, `TMPDIR`, or one of the
+  `XDG_*_HOME` names does nothing, because `scratchHome` replaces or drops
+  them after the list is applied. Never list a secret. See
+  [config.md](config.md#runner-flags).
+- **Keep the runner machine's SDKs at the versions the repo pins.** Upgrade
+  the SDK on `PATH` of the user that runs `schmeide runner` when a repo
+  raises its pin.
+
+Relabel each failed issue after the fix (JN-PR-005). See JN-FAIL-024.
+
+## Sessions cannot run commands under the default permission floor
+
+Both `--claude-args` and `--grok-args` default to `--permission-mode
+acceptEdits` ([permissions.md](permissions.md)). `ClaudeCode.Run` in
+`internal/harness/claude.go` starts `claude --print --output-format
+stream-json --verbose --permission-mode acceptEdits`. In `--print` mode no one
+can answer a permission prompt, so Claude Code refuses each Bash tool call,
+and the session's own output (on the runner's stderr) shows tool results
+saying "This command requires approval". The session can edit files but
+cannot run the repo's formatter, linter, or tests. Its mistakes only surface
+when the gate runs, which fails the job (see above) with no fix round before
+the pull request is open.
+
+This default is deliberate: a session that may run commands can do anything
+the runner's OS user can. To opt in, widen the session flags and accept that
+risk explicitly:
+
+```sh
+schmeide runner --steward <login> \
+  --claude-args "--permission-mode auto" --allow-dangerous-harness-args
+```
+
+or `SCHMEIDE_CLAUDE_ARGS="--permission-mode auto"` with
+`SCHMEIDE_ALLOW_DANGEROUS_HARNESS_ARGS=true`. Without
+`--allow-dangerous-harness-args` the runner refuses to start with
+`--claude-args contains "--permission-mode auto", which lets a session skip
+its permission checks; remove it, or pass --allow-dangerous-harness-args to
+accept that (see docs/permissions.md)`. Read
+[permissions.md](permissions.md#opting-in) before turning it on, and run the
+runner as a user that holds nothing else worth taking. See JN-FAIL-025.
+
 ## Registration refresh
 
 A runner re-publishes its registration every minute while `Run` runs

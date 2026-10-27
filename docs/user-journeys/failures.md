@@ -2,7 +2,8 @@
 
 Covers what the runner does when a job goes wrong: retries, timeouts, the
 secret scan, delivery heartbeats, redelivery after a dead runner, stuck jobs,
-and the branch guards. Implemented in `internal/runner` (`runner.go`,
+the branch guards, a gate that fails because of the runner's environment, and
+sessions the permission floor keeps from running commands. Implemented in `internal/runner` (`runner.go`,
 `workspace.go`), `internal/control/queue.go`, `internal/secretscan`, and
 `internal/refguard`. See [../FAILURE-MODES.md](../FAILURE-MODES.md).
 
@@ -633,3 +634,93 @@ writer session stalls: it makes one API request and then writes nothing more.
   session, retry, comment) and `TestRunHarnessIdle` (silent reviewer, a
   session that keeps writing, the session timeout still applying), and
   `internal/harness` `TestClaudeRun` (the stream-json flags).
+
+---
+
+### JN-FAIL-024: Every job fails the gate because of the runner's environment
+
+**Preconditions:** A repo whose gate needs state that is not in git or not in
+the gate's environment: resolved packages such as Dart's `.dart_tool/` and
+`~/.pub-cache` or a `node_modules/`, an SDK cache in the home directory, or an
+SDK version newer than the one on the runner's `PATH`. The same gate passes in
+the operator's own checkout.
+
+**Steps:**
+
+1. Assign and label any issue, even one that asks for a one-line change.
+2. Read the runner's `level=WARN msg="gate failed"` line.
+3. Clone the repo fresh and run the gate on unmodified `main` with `env -i`,
+   the base names, and `HOME` and `TMPDIR` set to an empty directory, as in
+   [../FAILURE-MODES.md](../FAILURE-MODES.md#diagnose).
+4. Fix the cause: make the gate resolve its own dependencies (for example
+   `gate = "flutter pub get && make check test"`), pass the cache location
+   with `--gate-pass-env PUB_CACHE`, or upgrade the SDK on the runner. Then
+   remove and re-add `schmeide:ready`.
+
+**Expected result:**
+
+- Step 1: the job fails at the gate within minutes, whatever the change. The
+  issue gets "schmeide did not open a pull request: the gate command `<gate>`
+  failed: exit status 2. The gate's output is in the runner's log." (the exit
+  status is the gate's own; `make` returns 2). The job is not retried
+  (JN-FAIL-006).
+- Step 2: the `output` tail names the missing piece. On a Flutter repo that was
+  `Failed to resolve package URI "package:flutter_lints/flutter.yaml"` with
+  `Formatted 1894 files (131 changed)`, or `Because quark requires Flutter SDK
+  version 3.47.8, version solving failed.` on a machine with 3.47.7.
+- Step 3: the gate fails the same way on `main`, which shows the environment,
+  not the session's change, is the cause.
+- Step 4: the new job's gate passes and the pull request opens (JN-PR-012).
+
+**Notes:**
+
+- The gate runs in a fresh `git worktree add` checkout with `gateEnv` and
+  `scratchHome` (`internal/runner/env.go`) and `goCacheEnv`
+  (`internal/runner/cache.go`). Only Go's caches outlive the job.
+- `HOME`, `TMPDIR`, and the `XDG_*_HOME` names in `--gate-pass-env` have no
+  effect: `scratchHome` replaces or drops them.
+- The environment is covered by `TestGateEnvKeepsBaseAndGatePassEnvAndDropsSecrets`
+  and `TestScratchHomeReplacesHomeTmpdirAndXDGDirs`, and the comment by
+  `TestGateFailureOpensNoPR`, in `internal/runner`. No test runs a real
+  toolchain.
+
+---
+
+### JN-FAIL-025: The default permission floor stops a session from running commands
+
+**Preconditions:** A runner started with the default `--claude-args`
+(`--permission-mode acceptEdits`). A repo whose gate runs a formatter, a
+linter, or tests.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Watch the session's output on the runner's stderr.
+3. Stop the runner and start it with `--claude-args "--permission-mode auto"`
+   and no `--allow-dangerous-harness-args`.
+4. Start it again with `--claude-args "--permission-mode auto"
+   --allow-dangerous-harness-args` (or `SCHMEIDE_CLAUDE_ARGS="--permission-mode
+   auto"` and `SCHMEIDE_ALLOW_DANGEROUS_HARNESS_ARGS=true`), and relabel the
+   issue.
+
+**Expected result:**
+
+- Step 2: each Bash tool call comes back "This command requires approval",
+  because `--print` mode has no one to approve it. The session edits files
+  but runs nothing. A mistake a formatter or test would have caught shows up
+  only as a gate failure (JN-PR-014).
+- Step 3: the runner exits with code 2 and prints `--claude-args contains
+  "--permission-mode auto", which lets a session skip its permission checks;
+  remove it, or pass --allow-dangerous-harness-args to accept that (see
+  docs/permissions.md)`.
+- Step 4: the runner starts, and the session can run the repo's commands with
+  every right of the runner's OS user.
+
+**Notes:**
+
+- The floor is deliberate. See [../permissions.md](../permissions.md) and
+  [../FAILURE-MODES.md](../FAILURE-MODES.md#sessions-cannot-run-commands-under-the-default-permission-floor).
+- "This command requires approval" is Claude Code's text, not schmeide's.
+- Covered by `TestClaudeRun` and `TestWideningArg` in `internal/harness`, and
+  `TestHarnessArgsPermissionFloor` and `TestMainRefusesWideningHarnessArgs` in
+  `internal/runner`. No test runs the real claude CLI.

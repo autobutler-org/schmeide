@@ -16,6 +16,13 @@ A minimal file:
 gate = "make check test"
 ```
 
+The gate runs in a fresh worktree with a trimmed environment and a scratch
+`HOME` and `TMPDIR`, so untracked files (`.dart_tool/`, `node_modules/`) and
+caches in the runner's home are not there. A gate that passes in your own
+checkout can fail on every job. Have it resolve its own dependencies, for
+example `gate = "flutter pub get && make check test"`, and see
+[FAILURE-MODES.md](FAILURE-MODES.md#the-gate-fails-on-every-job-because-of-the-runners-environment).
+
 A file that sets every key:
 
 ```toml
@@ -200,7 +207,9 @@ variable names the gate sees on top of the base list. It defaults to empty. A
 gate never sees a SCHMEIDE_ name`. The gate's `HOME` and `TMPDIR` are always a
 per-job scratch directory under `--work-dir`. Never list a secret. See
 [architecture/credentials.md](architecture/credentials.md#gate-environment) and
-JN-PR-021.
+JN-PR-021. To reuse a toolchain cache across jobs, set its variable in the
+runner's environment and list it, for example `--gate-pass-env PUB_CACHE`.
+Listing `HOME`, `TMPDIR`, or an `XDG_*_HOME` name has no effect.
 
 `ack-wait` is the JetStream lease for a claimed job. A runner must stay
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
