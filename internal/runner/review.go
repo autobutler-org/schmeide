@@ -11,7 +11,6 @@ import (
 
 	"github.com/autobutler-org/schmeide/internal/control"
 	"github.com/autobutler-org/schmeide/internal/harness"
-	"github.com/autobutler-org/schmeide/internal/repoconfig"
 	"github.com/autobutler-org/schmeide/internal/repomap"
 )
 
@@ -192,18 +191,10 @@ func (r *Runner) reviewer(ctx context.Context) harness.Harness {
 }
 
 // reviewOnce runs one fresh reviewer session and reads its verdict. The
-// deadline matches runSession's.
+// deadlines match runSession's.
 func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job, sessionLimit time.Duration) (reviewVerdict, string, error) {
 	h := r.reviewer(ctx)
-	if sessionLimit <= 0 {
-		sessionLimit = repoconfig.DefaultSessionTimeout
-	}
-	sessionCtx, cancel := context.WithTimeout(ctx, sessionLimit)
-	defer cancel()
-	err := h.Run(sessionCtx, r.session(ws.Dir(), reviewBrief(job)))
-	if err != nil && errors.Is(sessionCtx.Err(), context.DeadlineExceeded) {
-		err = timeoutError{what: "the " + h.Name() + " reviewer session"}
-	}
+	err := r.runHarness(ctx, h, h.Name()+" reviewer", sessionLimit, r.session(ws.Dir(), reviewBrief(job)))
 	if err := finishSessionErr(h.Name()+" reviewer", err); err != nil {
 		return 0, "", err
 	}

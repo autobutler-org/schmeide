@@ -42,7 +42,7 @@ sequenceDiagram
     R->>Q: stage worktree_ready (SCHMEIDE_STAGES)
     R->>W: repoconfig.Load, lintgate.Detect
     R->>Q: status working
-    R->>X: Run(brief + repomap), session env, session_timeout
+    R->>X: Run(brief + repomap), session env, session_timeout, 15m idle limit
     X->>W: edits files, writes .schmeide/pr.md
     R->>Q: stage session_finished
     R->>W: prText, Commit
@@ -290,6 +290,15 @@ sequenceDiagram
     end
 ```
 
-Deadlines are child contexts: `runSession` wraps each harness run in `session_timeout` (or `--session-timeout`),
-and `runGate` wraps the gate in `gate_timeout` (or `--gate-timeout`). Both kill their process group on expiry,
-and the resulting error is a `timeoutError` whose text carries no command output.
+Deadlines are child contexts: `runHarness` (called by `runSession` for worker sessions and by `reviewOnce` for
+reviewer sessions) wraps each harness run in `session_timeout` (or `--session-timeout`), and `runGate` wraps the
+gate in `gate_timeout` (or `--gate-timeout`). Both kill their process group on expiry, and the resulting error
+is a `timeoutError` whose text carries no command output.
+
+`runHarness` also enforces the session idle limit, `sessionIdleLimit` in `internal/runner/runner.go` (15
+minutes). It wraps `Request.Output` in an `idleWriter` that resets a `time.AfterFunc` timer on every write; when
+the timer fires it cancels the session context with the cause `errSessionIdle`, and the harness kills the
+process group as on a timeout. The error is a `timeoutError` with `idle` set, whose text is "the claude-code
+session produced no output for 15m0s", so it is retried, kept unwrapped by `finishSessionErr`, and commented
+exactly like a session timeout. The idle limit lives in the runner rather than in each harness so Claude Code
+and Grok, writer and reviewer, all get it from one place.

@@ -220,6 +220,8 @@ fix breaks the gate.
   <url>" followed by one of:
   - "the grok reviewer session did not finish: ..." (session failed)
   - "the grok reviewer session timed out" (session timeout, JN-FAIL-004)
+  - "the grok reviewer session produced no output for 15m0s" (session idle
+    limit, JN-FAIL-023)
   - "the reviewer did not write .schmeide/review.md with a first line of
     "pass" or "changes": ..." (no file)
   - "the reviewer wrote "maybe" as its verdict; the first line of

@@ -12,6 +12,8 @@
 // The default for both is a person. A harness session is canceled after the session timeout (default 2
 // hours) and the gate after the gate timeout (default 30 minutes). The repo
 // config keys session_timeout and gate_timeout override those flags. A
+// harness session, worker or reviewer, is also canceled when its output has
+// been silent for 15 minutes; that limit has no flag or config key. A
 // timeout cancels that process group, fails the job, and comments on the
 // issue. The comment does not include the command's output. A job's GitHub
 // token comes from the control node and is replaced with a new one when it
@@ -69,6 +71,11 @@ const (
 )
 
 var pollWait = time.Second
+
+// sessionIdleLimit is how long a harness session may write no output before
+// it is canceled. A single tool call, such as a Bash command, can run for ten
+// minutes without the session printing anything, so the limit sits above that.
+var sessionIdleLimit = 15 * time.Minute
 
 // The messages a runner publishes are defined by the control node, which
 // subscribes to them.
@@ -707,26 +714,70 @@ func (r *Runner) deadlinesFor(cfg repoconfig.Config) deadlines {
 	}
 }
 
-// timeoutError is a session or gate canceled at its deadline. The text is
-// what the issue comment reports, and it carries no command output.
+// timeoutError is a session or gate canceled at its deadline, or a session
+// canceled when its output went silent for idle. The text is what the issue
+// comment reports, and it carries no command output.
 type timeoutError struct {
 	what string
+	idle time.Duration
 }
 
-func (e timeoutError) Error() string { return e.what + " timed out" }
+func (e timeoutError) Error() string {
+	if e.idle > 0 {
+		return fmt.Sprintf("%s produced no output for %s", e.what, e.idle)
+	}
+	return e.what + " timed out"
+}
 
-// runSession runs one harness session. The deadline is a child context, so
-// the harness's process-group kill runs when it fires and a shutdown of the
-// parent still cancels the session.
+// errSessionIdle is the cancel cause when a session's output goes silent.
+var errSessionIdle = errors.New("session produced no output")
+
+// idleWriter passes writes to w and pushes the idle deadline back on each one.
+type idleWriter struct {
+	w     io.Writer
+	timer *time.Timer
+	limit time.Duration
+}
+
+func (i idleWriter) Write(p []byte) (int, error) {
+	i.timer.Reset(i.limit)
+	if i.w == nil {
+		return len(p), nil
+	}
+	return i.w.Write(p)
+}
+
+// runSession runs one worker session with the runner's own harness.
 func (r *Runner) runSession(ctx context.Context, limit time.Duration, req harness.Request) error {
+	return r.runHarness(ctx, r.harness, r.harness.Name(), limit, req)
+}
+
+// runHarness runs one session of h, worker or reviewer. Both deadlines are
+// child contexts, so the harness's process-group kill runs when either fires
+// and a shutdown of the parent still cancels the session: limit bounds the
+// whole session, and sessionIdleLimit bounds the silence between writes to
+// req.Output. kind names the session in the error, for example "claude-code"
+// or "grok reviewer".
+func (r *Runner) runHarness(ctx context.Context, h harness.Harness, kind string, limit time.Duration, req harness.Request) error {
 	if limit <= 0 {
 		limit = repoconfig.DefaultSessionTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	err := r.harness.Run(ctx, req)
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return timeoutError{what: "the " + r.harness.Name() + " session"}
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	idle := sessionIdleLimit
+	timer := time.AfterFunc(idle, func() { stop(errSessionIdle) })
+	defer timer.Stop()
+	req.Output = idleWriter{w: req.Output, timer: timer, limit: idle}
+	err := h.Run(ctx, req)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(context.Cause(ctx), errSessionIdle):
+		return timeoutError{what: "the " + kind + " session", idle: idle}
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return timeoutError{what: "the " + kind + " session"}
 	}
 	return err
 }

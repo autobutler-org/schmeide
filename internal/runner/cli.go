@@ -220,6 +220,10 @@ gate_timeout, which are Go durations such as 30m. An empty value keeps the
 flag. A gate timeout is not retried. A session timeout before the pull
 request is open counts toward --max-attempts.
 
+A harness session whose output has been silent for 15m is also canceled,
+and the issue comment says the session "produced no output for 15m0s". It
+is retried like a session timeout. The limit has no flag or config key.
+
 The permission floor is the same for Claude Code and Grok: a session may edit
 files in its worktree, and it is not handed flags that skip permission
 checks. The runner refuses to start when --claude-args or --grok-args
