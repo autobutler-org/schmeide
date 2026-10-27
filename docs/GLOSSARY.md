@@ -116,6 +116,13 @@ A process on a machine with an agent harness already installed and logged in.
 It connects out to the control node, takes its steward's jobs one at a time,
 and takes each job to a pull request.
 
+## session idle limit
+
+How long a harness session, worker or reviewer, may write no output before the
+runner cancels it: 15 minutes, with no flag or config key. The failure reads
+"the <harness> session produced no output for 15m0s" and is retried like a
+session timeout.
+
 ## session timeout
 
 The longest one harness session may run. The `session_timeout` config key

@@ -101,6 +101,35 @@ command's output.
 - A session timeout before the pull request is open counts as a failed
   attempt.
 
+### A session that goes silent
+
+A harness session, worker or reviewer, is also canceled when its output has
+been silent for 15 minutes (`sessionIdleLimit` in `internal/runner/runner.go`),
+however much of the session timeout is left. This catches a session that
+stalls after its first API request and would otherwise sit until the two hour
+default. Fifteen minutes sits above the ten minutes one Bash tool call may run
+without the session printing anything. The limit has no flag or config key.
+
+`Runner.runHarness` wraps `Request.Output` in a writer that pushes the limit
+back on every write, and cancels the session's context when the limit passes.
+The harness kills the session's process group as it does for a timeout. The
+attempt fails with "the claude-code session produced no output for 15m0s" (or
+"the grok reviewer session produced no output for 15m0s" for a reviewer), and
+the job is handled exactly as a session timeout:
+
+- Before the pull request is open it counts as a failed attempt and is retried
+  up to `--max-attempts`. The retrying status detail is "attempt 1 of 3 failed:
+  the claude-code session produced no output for 15m0s".
+- After the last attempt the issue gets "schmeide could not finish this job and
+  did not open a pull request:" followed by that text. No session output is in
+  the comment.
+- In a reviewer or fix session after the pull request is open it is final and
+  the pull request stays open.
+
+Claude Code runs with `--output-format stream-json --verbose`, so the runner's
+stderr shows each event of the session as it happens, including the last one
+before it went silent.
+
 A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.

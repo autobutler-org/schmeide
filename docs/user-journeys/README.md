@@ -45,7 +45,7 @@ journey's number is not reused.
 | [issue-to-pr.md](issue-to-pr.md) (`JN-PR`) | Assign and label an issue, webhook intake, the branch, the brief, the gate, opening the pull request, stacked pull requests |
 | [review.md](review.md) (`JN-REV`) | Reviewer rounds after the pull request opens, review fix rounds |
 | [merge.md](merge.md) (`JN-MERGE`) | Factory merge: check wait, merge queue, CI fix round, branch protection, stacks |
-| [failures.md](failures.md) (`JN-FAIL`) | Retries, timeouts, secret scan, token revocation, heartbeats, redelivery, stuck jobs, branch guards, a runner in a terminal, token refresh |
+| [failures.md](failures.md) (`JN-FAIL`) | Retries, timeouts, silent sessions, secret scan, token revocation, heartbeats, redelivery, stuck jobs, branch guards, a runner in a terminal, token refresh |
 | [pool.md](pool.md) (`JN-POOL`) | Pool runners and jobs whose steward has no registered runner |
 | [cli.md](cli.md) (`JN-CLI`) | `schmeide` commands, help, environment variables, `status`, `version`, `init`, `completion` |
 | [operations.md](operations.md) (`JN-OPS`) | Running the control node container, NATS TLS, restarts, version skew, logs |

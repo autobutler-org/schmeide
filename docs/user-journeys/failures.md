@@ -594,3 +594,42 @@ installation tokens.
   `TestJobOutlivingItsTokenOpensPR` (the revoke uses the refreshed token) in
   `internal/runner`, and
   `TestRevokeToken` in `internal/testutil/fakegh`.
+
+---
+
+### JN-FAIL-023: A session goes silent
+
+**Preconditions:** A runner with the default `--session-timeout` of 2h. The
+writer session stalls: it makes one API request and then writes nothing more.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Watch the runner's stderr. Claude Code runs with `--output-format
+   stream-json --verbose`, so each session event is printed as one JSON line
+   as it happens, and the last line shows where the session stopped.
+
+**Expected result:**
+
+- 15 minutes after the session's last output, long before the session
+  timeout, the session's whole process group is killed.
+- The attempt fails with "the claude-code session produced no output for
+  15m0s", not "timed out". The job's status goes to `retrying` with the
+  detail "attempt 1 of 3 failed: the claude-code session produced no output
+  for 15m0s", and the job is retried (JN-FAIL-001).
+- After the last attempt the issue gets "schmeide could not finish this job
+  and did not open a pull request:" followed by "the claude-code session
+  produced no output for 15m0s". No session output is in the comment.
+- A session that keeps writing, however slowly, is not killed by the idle
+  limit; the session timeout still bounds it (JN-FAIL-004).
+
+**Notes:**
+
+- The limit is 15 minutes because one Bash tool call may run for up to 10
+  minutes with no output. It has no flag or config key.
+- A reviewer that goes silent fails with "the grok reviewer session produced
+  no output for 15m0s", which is final like a reviewer timeout (JN-REV-009).
+- Covered by `internal/runner` `TestSessionIdleLimitRetriesThenFails` (silent
+  session, retry, comment) and `TestRunHarnessIdle` (silent reviewer, a
+  session that keeps writing, the session timeout still applying), and
+  `internal/harness` `TestClaudeRun` (the stream-json flags).

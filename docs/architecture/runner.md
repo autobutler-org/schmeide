@@ -239,8 +239,11 @@ in `.schmeide/pr.md` with a `Closes #N` line. The review and fix briefs (`review
   [Credentials](credentials.md#harness-session-environment) for the list.
 - `Output` is the runner's stderr.
 
-The prompt goes in on stdin: `claude --print <args>` and `grok -p - <args>`, where `<args>` defaults to
-`--permission-mode acceptEdits`. Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
+The prompt goes in on stdin: `claude --print --output-format stream-json --verbose <args>` and `grok -p -
+<args>`, where `<args>` defaults to `--permission-mode acceptEdits`. With `stream-json`, Claude Code writes each
+event (system init, assistant message, tool use, tool result, final result) to `Output` as one JSON line as it
+happens, so the runner's stderr shows where a session stopped. Nothing in the runner parses this output: the
+writer's results are the worktree and `.schmeide/pr.md`, and the reviewer's verdict is `.schmeide/review.md`. Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
 true}` in `internal/harness/claude.go` and `internal/harness/grok.go`), so it has no controlling terminal. A runner
 started in an interactive terminal passes that terminal to the session as `Output`; were the session only a
 background process group on it, the CLI's first terminal ioctl would get `SIGTTOU` and stop the session until

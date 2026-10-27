@@ -160,7 +160,7 @@ func TestClaudeRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "args=--print --permission-mode acceptEdits\npwd=" + realDir + "\nprompt=--fix the bug\n"
+	want := "args=--print --output-format stream-json --verbose --permission-mode acceptEdits\npwd=" + realDir + "\nprompt=--fix the bug\n"
 	if out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
 	}
@@ -182,11 +182,11 @@ func TestClaudeRunArgsReplaceDefault(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	claude := fakeClaude(t, `echo "args=$*"`)
-	claude.Args = []string{"--verbose"}
+	claude.Args = []string{"--model", "opus"}
 	if err := claude.Run(t.Context(), Request{Dir: dir, Output: &out}); err != nil {
 		t.Fatalf("Run = %v", err)
 	}
-	want := "args=--print --verbose\n"
+	want := "args=--print --output-format stream-json --verbose --model opus\n"
 	if out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
 	}

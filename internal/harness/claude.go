@@ -11,7 +11,9 @@ import (
 	"time"
 )
 
-// ClaudeCode drives the locally installed claude CLI.
+// ClaudeCode drives the locally installed claude CLI. Run passes
+// --output-format stream-json --verbose, so Request.Output gets one JSON
+// event per line as the session works rather than only the final result.
 type ClaudeCode struct {
 	// Bin is the claude executable. Empty means "claude" on PATH.
 	Bin string
@@ -92,8 +94,11 @@ func (c *ClaudeCode) Run(ctx context.Context, req Request) error {
 	if args == nil {
 		args = []string{"--permission-mode", "acceptEdits"}
 	}
-	// The prompt goes in on stdin so it is never parsed as a flag.
-	cmd := exec.CommandContext(ctx, bin, append([]string{"--print"}, args...)...)
+	// The prompt goes in on stdin so it is never parsed as a flag. stream-json
+	// (which needs --verbose with --print) writes each event as a JSON line as
+	// it happens, so the output shows where a session stopped; plain --print
+	// writes only the final result.
+	cmd := exec.CommandContext(ctx, bin, append([]string{"--print", "--output-format", "stream-json", "--verbose"}, args...)...)
 	cmd.Dir = req.Dir
 	cmd.Env = req.Env
 	cmd.Stdin = strings.NewReader(req.Prompt)
