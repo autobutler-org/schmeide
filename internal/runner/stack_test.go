@@ -109,8 +109,8 @@ func newStackForge(pending int, conclusion string) *stackForge {
 }
 
 func TestMergeWhenGreenMergesSlowGreenChecks(t *testing.T) {
-	// Twenty pending reads outlast a fixed poll; the backoff keeps polling
-	// until the wait ends.
+	// Twenty pending reads outlast a short pause; the backoff keeps polling
+	// until the checks complete with success.
 	gh := newStackForge(20, "success")
 	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", gh.pulls[0].HTMLURL, time.Minute, nil)
 	if out.state != StateMerged {
@@ -121,22 +121,32 @@ func TestMergeWhenGreenMergesSlowGreenChecks(t *testing.T) {
 	}
 }
 
-func TestMergeWhenGreenDoesNotMergeRedChecks(t *testing.T) {
-	gh := newStackForge(3, "failure")
-	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", gh.pulls[0].HTMLURL, time.Minute, nil)
-	if out.state != StateMergeFailed || !strings.Contains(out.comment, "check run ci finished with failure") {
-		t.Fatalf("outcome = %+v, want merge failed naming the red check", out)
+func TestMergeWhenGreenStaysOnRedChecks(t *testing.T) {
+	gh := newStackForge(0, "failure")
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	out := (&Runner{}).mergeWhenGreen(ctx, headWorkspace{}, gh, 1, "main", gh.pulls[0].HTMLURL, time.Minute, nil)
+	if out != (outcome{}) {
+		t.Fatalf("outcome = %+v, want the job still open while the check is red", out)
 	}
 	if got := gh.Merged(); len(got) != 0 {
 		t.Fatalf("merged %v, want nothing", got)
 	}
+	if gh.reads < 2 {
+		t.Fatalf("check reads = %d, want more than one poll", gh.reads)
+	}
 }
 
-func TestMergeWhenGreenSaysHowLongItWaited(t *testing.T) {
+func TestMergeWhenGreenStaysWhileChecksArePending(t *testing.T) {
 	gh := newStackForge(1<<30, "success")
-	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", gh.pulls[0].HTMLURL, 30*time.Millisecond, nil)
-	if out.state != StateMergeFailed || !strings.Contains(out.detail, "still in_progress") || !strings.Contains(out.detail, "check_wait") {
-		t.Fatalf("outcome = %+v, want merge failed naming the pending check and check_wait", out)
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	out := (&Runner{}).mergeWhenGreen(ctx, headWorkspace{}, gh, 1, "main", gh.pulls[0].HTMLURL, 30*time.Millisecond, nil)
+	if out != (outcome{}) {
+		t.Fatalf("outcome = %+v, want the job still open after check_wait while the check is pending", out)
+	}
+	if got := gh.Merged(); len(got) != 0 {
+		t.Fatalf("merged %v, want nothing", got)
 	}
 }
 
@@ -198,18 +208,27 @@ func TestMergeWhenGreenRefusesAStackOnAClosedPull(t *testing.T) {
 	}
 }
 
-func TestMergeWhenGreenSaysWhyAGreenPullDidNotMerge(t *testing.T) {
+func TestMergeWhenGreenRetriesWhenGitHubRefuses(t *testing.T) {
 	gh := &refusingForge{Fake: &forge.Fake{Checks: []forge.CheckRun{{Name: "ci", Status: "completed", Conclusion: "success"}}}}
-	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
-	if out.state != StateMergeFailed || !strings.Contains(out.detail, "CI is green, but GitHub refused the merge: not mergeable") {
-		t.Fatalf("outcome = %+v, want merge failed saying CI was green and why it did not merge", out)
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	out := (&Runner{}).mergeWhenGreen(ctx, headWorkspace{}, gh, 1, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
+	if out != (outcome{}) {
+		t.Fatalf("outcome = %+v, want the job still open after GitHub refused the merge", out)
+	}
+	if gh.refused < 2 {
+		t.Fatalf("refused merges = %d, want more than one try", gh.refused)
 	}
 }
 
 // refusingForge is a forge.Fake whose merges fail.
-type refusingForge struct{ *forge.Fake }
+type refusingForge struct {
+	*forge.Fake
+	refused int
+}
 
-func (refusingForge) MergePull(context.Context, int) error {
+func (f *refusingForge) MergePull(context.Context, int) error {
+	f.refused++
 	return errors.New("not mergeable")
 }
 

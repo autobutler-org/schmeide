@@ -91,7 +91,7 @@ const (
 )
 
 // judgeChecks reports whether the head commit's check runs are green. No
-// check runs is not green: that stays pending until the wait ends. A
+// check runs is not green: that stays pending and the job keeps polling. A
 // completed run whose conclusion is success or skipped counts as green.
 // GitHub reports a path-filtered job, and a matrix job that did not run, as
 // completed with conclusion skipped. Any other completed conclusion is red,
@@ -142,14 +142,41 @@ func merged(prURL string) outcome {
 	}
 }
 
-// enqueued is the outcome when the base branch has a merge queue: the queue
-// merges the pull request, so the job ends as queued.
-func enqueued(prURL string) outcome {
+// queueMerged is the outcome once a merge queue has merged the pull request.
+// Adding it to the queue is not the end of the job.
+func queueMerged(prURL string) outcome {
 	return outcome{
-		state:   StateQueued,
+		state:   StateMerged,
 		detail:  prURL,
-		comment: "schmeide added the pull request to the merge queue after the review passed and CI succeeded: " + prURL,
+		comment: "the merge queue merged the pull request after the review passed and CI succeeded: " + prURL,
 	}
+}
+
+// pullSettled reports a pull request that has merged, or that closed without
+// merging. viaQueue is set once this job added it to a merge queue, and
+// selects that comment. An open pull request is not settled. A missing pull
+// request is not settled either: the list can lag behind the one just opened.
+func pullSettled(ctx context.Context, gh forge.Forge, issue int, prURL string, viaQueue bool) (outcome, bool) {
+	p, ok, err := gh.IssuePull(ctx, issue, "all")
+	if err != nil {
+		if ctx.Err() != nil {
+			return outcome{}, true
+		}
+		return mergeFailed(prURL, fmt.Errorf("could not read the pull request for issue #%d: %w", issue, err)), true
+	}
+	if !ok {
+		return outcome{}, false
+	}
+	if p.MergedAt != "" {
+		if viaQueue {
+			return queueMerged(prURL), true
+		}
+		return merged(prURL), true
+	}
+	if p.State == "closed" {
+		return mergeFailed(prURL, errors.New("the pull request closed without merging, so schmeide stopped waiting")), true
+	}
+	return outcome{}, false
 }
 
 func mergeFailed(prURL string, err error) outcome {
@@ -172,27 +199,28 @@ func mergeBlocked(base string, p forge.Protection) error {
 }
 
 // mergeWhenGreen polls check runs on the pull request's head commit and
-// merges with a merge commit when every one has succeeded. When the base
-// branch has a merge queue, it adds the pull request to the queue instead.
-// Polls back off from checkPoll to checkPollMax, and the last one lands on
-// the end of the wait. The first failed check runs fix once, when fix is not
-// nil, with the end of that check's log, and polling goes on at the new head
-// within the same wait. A failed check after that, or a wait of the repo's
-// check_wait that does not end in success, leaves the pull request open.
-// That failure is final: the pull request already exists, and a redelivery
-// would treat it as done.
+// merges with a merge commit when every completed run succeeded or was
+// skipped. When the base branch has a merge queue, it adds the pull request
+// to the queue and keeps watching until that queue merges it. The job stays
+// in progress until the pull request has merged. A red check, a head commit
+// with no check runs, and a merge GitHub refuses do not finish it. Polls
+// back off from checkPoll to checkPollMax. The first failed check runs fix
+// once, when fix is not nil, with the end of that check's log, and polling
+// goes on at the new head. There is no second fix round. A fix round that
+// itself fails is final, and so is a pull request that closes without merging.
 //
 // A pull request stacked on another one, whose base is not the default
 // branch, merges only after the one below it: it first waits, for up to
 // check_wait, until the one below merges, restacking as that branch moves,
 // and is then retargeted to the default branch and rebased onto it; see
 // [waitForStack]. Merging it into the branch below would leave its change off
-// the default branch.
+// the default branch. check_wait bounds that stack wait. It does not end the
+// wait for this pull request's own checks.
 //
 // Before the check wait, branch protection on the base is read, and a merge
-// it makes impossible fails without waiting. Every failure after the checks
-// are green says so, so a pull request that looks ready names why it was not
-// merged.
+// it makes impossible fails without waiting. A failure to read the merge
+// queue, or to add the pull request to it, is final and says the checks were
+// green.
 func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forge, issue int, base, prURL string, wait time.Duration, fix ciFix) outcome {
 	trunk, err := gh.DefaultBranch(ctx)
 	if err != nil {
@@ -228,12 +256,21 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 	if err != nil {
 		return mergeFailed(prURL, err)
 	}
-	deadline := time.Now().Add(wait)
-	detail := "the head commit has no check runs, so CI is not green"
 	delay := checkPoll
+	enqueued := false
 	for {
 		if ctx.Err() != nil {
 			return outcome{}
+		}
+		if out, done := pullSettled(ctx, gh, issue, prURL, enqueued); done {
+			return out
+		}
+		if enqueued {
+			if !sleepFor(ctx, delay) {
+				return outcome{}
+			}
+			delay = min(2*delay, checkPollMax)
+			continue
 		}
 		runs, err := gh.CheckRuns(ctx, sha)
 		if err != nil {
@@ -242,11 +279,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 			}
 			return mergeFailed(prURL, fmt.Errorf("could not read check runs for %s: %w", sha, err))
 		}
-		verdict, why := judgeChecks(runs)
-		if why != "" {
-			detail = why
-		}
-		switch verdict {
+		switch verdict, _ := judgeChecks(runs); verdict {
 		case checksGreen:
 			if ctx.Err() != nil {
 				return outcome{}
@@ -265,19 +298,21 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 					}
 					return mergeFailed(prURL, fmt.Errorf("CI is green, but schmeide could not add the pull request to the merge queue: %w", err))
 				}
-				return enqueued(prURL)
+				enqueued = true
+				continue
 			}
 			if err := gh.MergePull(ctx, number); err != nil {
 				if ctx.Err() != nil {
 					return outcome{}
 				}
-				return mergeFailed(prURL, fmt.Errorf("CI is green, but GitHub refused the merge: %w", err))
+				// The pull request is still open. Try again on the next poll.
+				break
 			}
 			return merged(prURL)
 		case checksRed:
 			run, ok := ciwatch.NeedsTail(runs, fix == nil)
 			if !ok {
-				return mergeFailed(prURL, errors.New(why))
+				break
 			}
 			out, stop := fix(ctx, run, logTail(ctx, gh, run))
 			fix = nil
@@ -294,10 +329,7 @@ func (r *Runner) mergeWhenGreen(ctx context.Context, ws Workspace, gh forge.Forg
 			delay = checkPoll
 			continue
 		}
-		if !time.Now().Before(deadline) {
-			return mergeFailed(prURL, fmt.Errorf("%s after waiting %s (check_wait)", detail, wait))
-		}
-		if !sleepUntil(ctx, delay, deadline) {
+		if !sleepFor(ctx, delay) {
 			return outcome{}
 		}
 		delay = min(2*delay, checkPollMax)
@@ -410,6 +442,18 @@ func stackedOn(base string) (int, error) {
 		return 0, fmt.Errorf("the pull request targets %s, which is neither the default branch nor a schmeide branch, so schmeide did not merge it", base)
 	}
 	return issue, nil
+}
+
+// sleepFor sleeps for delay. It returns false when ctx ends first.
+func sleepFor(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // sleepUntil sleeps for delay, cut short at deadline so the last poll lands

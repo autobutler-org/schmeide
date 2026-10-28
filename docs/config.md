@@ -61,15 +61,16 @@ gate = "make check test"
 
 ### check_wait
 
-How long a factory merge waits for the head commit's check runs to succeed,
-including the fix round's new head.
+How long a stacked pull request waits for the one below it to merge. It does
+not end the wait for this pull request's own check runs. That wait runs until
+the pull request has merged. The runner reads the check runs after one
+second, then backs off, doubling the pause up to 30 seconds, and keeps
+reading. A red check, a head with no check runs, and a merge GitHub refuses
+do not finish the job.
 A Go duration such as `90s`, `10m`, or `1h30m`; it must be positive. Absent
-or empty means `2m`. The key only matters when `automate.merge = "on"`. The runner
-reads the check runs after one second, then backs off, doubling the pause up to
-30 seconds, and reads them once more at the end of the wait. If the wait ends
-without success, the pull request stays open, and the comment names the check
-that was not green and the wait. A stacked pull request gets a wait of its own
-for the pull request below it to merge, before this one.
+or empty means `2m`. The key only matters when `automate.merge = "on"`. A
+stacked pull request gets this wait for the pull request below it to merge,
+before its own check wait, which does not stop at this duration.
 
 ```toml
 check_wait = "10m"
@@ -121,11 +122,11 @@ Whether the runner merges a pull request after review has passed and CI is
 green.
 
 - `"off"` leaves the pull request for a person.
-- `"on"` has the runner merge it once every check run on the head commit
-  has succeeded (see `check_wait`). A completed check whose conclusion is
-  `skipped` counts as success. A conclusion of `failure`, `cancelled`,
-  `timed_out`, or empty does not, and a run that has not completed stays
-  pending. Before the wait, the job fails if the
+- `"on"` has the runner keep the job in progress until the pull request has
+  merged. A completed check whose conclusion is `skipped` counts as success.
+  A conclusion of `failure`, `cancelled`, `timed_out`, or empty does not, and
+  a run that has not completed stays pending. A red check, an empty check
+  list, and a merge GitHub refuses do not finish the job. Before the wait, the job fails if the
   base branch's protection, when the runner can read it, requires one or more
   approving reviews: the runner cannot supply that review, the pull request
   stays open, and nothing is merged or enqueued. A 404 or a 403 on the read
@@ -133,10 +134,11 @@ green.
   request stays open. Required status checks are not this failure.
   - The first red check runs one writer fix round when a review round
     remains. It counts against `--max-review-rounds`. There is no second fix
-    round. A check that is still red, or a wait that ends without success,
-    leaves the pull request open.
+    round. A fix round that itself fails leaves the pull request open. A
+    check that is still red does not finish the job.
   - When the base branch has a merge queue, green checks add the pull request
-    to the queue instead of merging it. The job is reported queued.
+    to the queue instead of merging it. The job stays in progress until the
+    queue merges it, then reports `merged`. It is not reported `queued`.
   - A pull request stacked on another schmeide pull request merges bottom
     first. Before the check wait it waits, for up to `check_wait`, for the pull
     request below to merge, rebasing onto that branch as it moves. Once it

@@ -192,9 +192,14 @@ the same branch is pushed so the open PR updates. With review_fix off, the
 first request for changes leaves the PR open for a person. A passing review
 finishes the job. The factory merges the pull request only when the repo
 config sets automate.merge = "on". The default is a person. Factory merge
-waits for every check run on the head commit to succeed for check_wait
-(default 2m), a top-level key, e.g. check_wait = "10m", reading them with
-backoff. A
+keeps reading check runs, with backoff, until the pull request is merged. A
+completed check whose conclusion is skipped counts as success. A red check,
+a head commit with no check runs, and a merge GitHub refuses do not finish
+the job. Adding the pull request to a merge queue does not finish it either:
+the runner waits until that queue merges it. check_wait (default 2m), a
+top-level key, e.g. check_wait = "10m", is how long a stacked pull request
+waits for the one below it. It does not end the wait for this pull request's
+checks. A
 stacked pull request merges only after the one below it. Exhausting the
 rounds fails the job, comments on the issue, and leaves the pull request
 open. The outcome is reported to the control node and commented on the issue.

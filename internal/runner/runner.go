@@ -8,8 +8,9 @@
 // defaults to off, it also takes a job whose steward has no registered
 // runner, one job at a time, its own first. The writer gets review fix
 // rounds only when the repo config sets automate.review_fix = "on", and the
-// factory merges the pull request only when it sets automate.merge = "on".
-// The default for both is a person. A harness session is canceled after the session timeout (default 2
+// factory merges the pull request only when it sets automate.merge = "on",
+// and that job stays in progress until the pull request has merged. The
+// default for both is a person. A harness session is canceled after the session timeout (default 2
 // hours) and the gate after the gate timeout (default 30 minutes). The repo
 // config keys session_timeout and gate_timeout override those flags. A
 // harness session, worker or reviewer, is also canceled when its output has
@@ -656,9 +657,13 @@ func (r *Runner) handle(ctx context.Context, msg jetstream.Msg) {
 	// outcomes. The JetStream delivery count is not that number: a token
 	// hand-back and a shutdown hand-back are deliveries too. A gate failure
 	// is the session's own result and is not retried. A review that does not
-	// pass is final too: its rounds are spent. A factory merge that does not
-	// land is final as well. So is a failure marked final, such as a missing
-	// or invalid repo config, which a retry cannot change.
+	// pass is final too: its rounds are spent. A factory merge that returns
+	// without merging is final as well: required reviews, a stack that cannot
+	// move, a fix round that fails, or a merge queue that cannot be read or
+	// written. A check list that is not green, and a merge GitHub refuses,
+	// are not returned; that job keeps polling until the pull request merges.
+	// A failure marked final, such as a missing or invalid repo config, is
+	// final too, because a retry cannot change it.
 	if out.state == StateFailed && !out.final {
 		r.attempts++
 		r.failures[job.Subject()] = r.attempts

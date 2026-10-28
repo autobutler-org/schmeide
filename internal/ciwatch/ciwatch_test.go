@@ -20,6 +20,8 @@ func TestNeedsTail(t *testing.T) {
 		{"first failure", []Run{green, queued, red}, false, red, true},
 		{"after the fix round", []Run{green, red}, true, Run{}, false},
 		{"green and pending", []Run{green, queued}, false, Run{}, false},
+		{"skipped is not a failure", []Run{{Name: "build-android", Status: "completed", Conclusion: "skipped"}, red}, false, red, true},
+		{"only skipped", []Run{{Name: "build-android", Status: "completed", Conclusion: "skipped"}}, false, Run{}, false},
 		{"no runs", nil, false, Run{}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

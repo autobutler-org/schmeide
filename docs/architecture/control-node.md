@@ -305,7 +305,9 @@ the sequence after the replay, so no message is applied twice.
 Because only the latest message per subject is kept, a status can be replaced before the live ordered consumer
 reads it. The tracker then applies the newer one instead. This only matters for a final state followed at once
 by another status on the same subject: `pr_opened` followed by `reviewing` skips recording `pr_opened` on the
-issue record, and the later `merged`, `queued`, `merge_failed`, or `review_failed` records the final state. A
+issue record, and the later `merged`, `merge_failed`, or `review_failed` records the final state. An
+older runner could also record `queued`, which is still final; this runner reports `merged` once the queue
+has merged the pull request. A
 malformed message on a job's status subject replaces that job's stored status; only a runner holding that
 steward's token can publish there.
 
@@ -342,7 +344,8 @@ delay. A job pushed out of `SCHMEIDE_JOBS` by `MaxMsgs` while still unclaimed wo
 | `failed` | yes, failure | Work failed `--max-attempts` times. |
 | `pr_opened` | yes | Review passed, or an earlier attempt's pull request was found closed. |
 | `review_failed` | yes | Review rejected with `review_fix` off, rounds ran out, or a post-PR step failed. |
-| `merged`, `queued` | yes | Factory merge merged, or enqueued in the merge queue. |
+| `merged` | yes | Factory merge merged the pull request, including one the merge queue merged. |
+| `queued` | yes | An older runner reported this when it added the pull request to the merge queue and stopped. This runner waits and reports `merged` instead. |
 | `merge_failed` | yes | Factory merge did not land. |
 
 ## Token minting

@@ -24,11 +24,12 @@ as it was and fails the job, asking a person to rebase.
 
 ## check_wait
 
-An optional key in `.schmeide/config.toml` that sets how long a factory merge
-waits for every check run on the pull request head to succeed. A completed
-check whose conclusion is `skipped` counts as success. It is a Go
-duration and defaults to two minutes. The wait covers the fix round's new head.
-An unparseable or non-positive value is a config error. It only matters when
+An optional key in `.schmeide/config.toml` that sets how long a stacked pull
+request waits for the one below it to merge. It does not end the wait for
+this pull request's own check runs: that wait runs until the pull request
+has merged. A completed check whose conclusion is `skipped` counts as
+success. It is a Go duration and defaults to two minutes. An unparseable or
+non-positive value is a config error. It only matters when
 `automate.merge = "on"`.
 
 ## control node
@@ -40,18 +41,20 @@ installation token for each job a runner asks for.
 ## factory merge
 
 The `automate.merge = "on"` setting in `.schmeide/config.toml`. After review passes,
-the runner waits `check_wait` for every check run on the head to succeed. A
+the runner keeps reading check runs until the pull request has merged. A
 completed check whose conclusion is `skipped` counts as success. A conclusion
 of `failure`, `cancelled`, `timed_out`, or empty does not, and a run that has
-not completed stays pending. The first red check runs one fix round when a
-review round remains, then polling
-continues on the new head inside the same wait. There is no second fix round.
-A check that is still red, or a wait that ends without success, leaves the pull
-request open. Green checks merge the pull request with a merge commit, or, when
-the base branch has a merge queue, add it to the queue and the job is reported
-queued. If branch protection can be read and requires approving reviews, the
-job fails before the wait and nothing is merged or enqueued. A 404 or 403 on
-that read does not fail the job. No check runs does not count as green. Absent,
+not completed stays pending. Neither of those finishes the job, and neither
+does a merge GitHub refuses: the next poll tries again. The first red check
+runs one fix round when a review round remains, then polling continues on the
+new head. There is no second fix round. Green checks merge the pull request
+with a merge commit, or, when the base branch has a merge queue, add it to
+the queue and keep watching until the queue merges it. The job then ends
+`merged`. It is not reported `queued`. If branch protection can be read and
+requires approving reviews, the job fails before the wait and nothing is
+merged or enqueued. A 404 or 403 on that read does not fail the job. No check
+runs does not count as green, and the job stays open until runs appear.
+`check_wait` bounds only the wait for the pull request below a stack. Absent,
 empty, and `"off"` leave the merge to a person.
 
 ## fix round
@@ -87,7 +90,8 @@ delivery ends. Runners hold no long-lived GitHub credential.
 The job state the control node records when it creates a job, before any
 runner has claimed it. `schmeide status` lists a pending job with how long it
 has waited. Not final: the runner's `claimed` replaces it. Not to be confused
-with [queued](#queued), which is a finished job in a merge queue.
+with [queued](#queued), which an older runner recorded when it stopped after
+adding a pull request to a merge queue.
 
 ## pool
 
@@ -97,8 +101,11 @@ one job at a time and take their own steward's job first.
 
 ## queued
 
-The finished job state when a factory merge added the pull request to the base
-branch's merge queue. It is not merged yet. Status does not keep listing it.
+A finished job state an older runner recorded when it added the pull request
+to the base branch's merge queue and stopped, before the queue had merged it.
+This runner does not report it. It waits until the queue merges the pull
+request and reports `merged`. Status still treats a recorded `queued` state
+as final and does not keep listing it.
 
 ## ready label
 

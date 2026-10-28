@@ -7,10 +7,17 @@ and branch protection in `internal/forge/github.go`. See
 [../config.md](../config.md#automatemerge) and
 [../GLOSSARY.md](../GLOSSARY.md#factory-merge).
 
-Every factory merge failure is final: the job ends `merge_failed`, is not
-retried, and the pull request stays open. Its comment is "schmeide failed this
-job and left the pull request open: <url>" followed by a blank line and the
-reason quoted in each journey below.
+A factory merge failure the runner returns is final: the job ends
+`merge_failed`, is not retried, and the pull request stays open. Its comment
+is "schmeide failed this job and left the pull request open: <url>" followed
+by a blank line and the reason quoted in each journey below.
+
+The runner does not return while the pull request is still open because the
+checks are not green, because the head commit has no check runs, or because
+GitHub refused the merge. It keeps polling, with the same backoff, until the
+pull request has merged. `check_wait` bounds only the wait for the pull
+request below a stack (JN-MERGE-016). It does not end this pull request's
+own wait.
 
 Durations in messages use Go's format, for example `2m0s`.
 
@@ -39,8 +46,8 @@ Durations in messages use Go's format, for example `2m0s`.
 ### JN-MERGE-002: Green checks merge the pull request
 
 **Preconditions:** `merge = "on"`. The repository's CI reports check runs on
-pull request heads, and they pass within `check_wait` (default 2m). The base
-branch has no merge queue and does not require approving reviews.
+pull request heads, and they pass. The base branch has no merge queue and
+does not require approving reviews.
 
 **Steps:**
 
@@ -49,8 +56,7 @@ branch has no merge queue and does not require approving reviews.
 **Expected result:**
 
 - The runner reads check runs on the head commit after 1 second, then backs
-  off, doubling the pause up to 30 seconds, with a last read at the end of
-  the wait.
+  off, doubling the pause up to 30 seconds. It does not stop at `check_wait`.
 - Once every check run has completed with `success`, or with `skipped`, the
   pull request is merged with a merge commit (not squash, not rebase). A
   `skipped` conclusion is a path-filtered job, or a matrix job that did not
@@ -60,7 +66,8 @@ branch has no merge queue and does not require approving reviews.
 
 **Notes:**
 
-- A check that is still queued or in progress keeps the wait going.
+- A check that is still queued or in progress keeps the wait going
+  (JN-MERGE-005). An empty list does too (JN-MERGE-004).
 - Covered by `TestFactoryMergeWhenChecksSucceed`,
   `TestMergeWhenGreenMergesWithoutMergeQueue`,
   `TestMergeWhenGreenMergesSlowGreenChecks`.
@@ -77,16 +84,19 @@ branch has no merge queue and does not require approving reviews.
 
 **Expected result:**
 
-- The pull request is added to the merge queue, not merged directly.
-- The issue gets: "schmeide added the pull request to the merge queue after
-  the review passed and CI succeeded: <url>".
-- The job ends `queued` and leaves `schmeide status`. The queue merges it.
+- The pull request is added to the merge queue, not merged directly. That
+  does not finish the job.
+- The runner keeps reading the pull request until `merged_at` is set.
+- The issue gets: "the merge queue merged the pull request after the review
+  passed and CI succeeded: <url>". The job ends `merged`. It is not reported
+  `queued`.
 
 **Notes:**
 
-- A failure here says "CI is green, but schmeide could not read the merge
-  queue: ..." or "CI is green, but schmeide could not add the pull request to
-  the merge queue: ...".
+- A failure to read the queue, or to add the pull request to it, is final.
+  It says "CI is green, but schmeide could not read the merge queue: ..." or
+  "CI is green, but schmeide could not add the pull request to the merge
+  queue: ...".
 - `enqueuePullRequest` needs Merge queues: write. The job token asks for
   `merge_queues: write` (`internal/control/token.go`, pinned by
   `TestTokenPerJob`). An installation that has not accepted that permission
@@ -95,32 +105,40 @@ branch has no merge queue and does not require approving reviews.
 
 ---
 
-### JN-MERGE-004: No check runs is not green
+### JN-MERGE-004: No check runs does not end the job
 
-**Preconditions:** `merge = "on"`. The repository has no CI, so the head
-commit has no check runs.
+**Preconditions:** `merge = "on"`. The head commit has no check runs when
+the review passes. `check_wait` may be short. Later, the same head grows
+check runs that completed with `success`, or with `skipped`.
 
 **Steps:**
 
 1. Assign and label an issue. The review passes.
+2. Leave the head with no check runs for longer than `check_wait`.
+3. Let the check runs appear.
 
 **Expected result:**
 
-- The runner waits the whole `check_wait`.
-- The reason is "the head commit has no check runs, so CI is not green after
-  waiting 2m0s (check_wait)". Nothing is merged.
+- Past `check_wait`, the job is still in progress. The issue has no comment
+  that says "no check runs" or "left the pull request open". Nothing is
+  merged yet.
+- When the runs appear and each one completed with `success` or `skipped`,
+  the pull request merges as in JN-MERGE-002.
+- The issue gets: "schmeide merged the pull request after the review passed
+  and CI succeeded: <url>".
 
 **Notes:**
 
-- Covered by `TestFactoryMergeWithNoCheckRunsDoesNotMerge` and
-  `TestMergeWhenGreenSaysHowLongItWaited`.
+- An empty list is still not green. The runner polls again instead of
+  finishing.
+- Covered by `TestFactoryMergeMergesAfterEmptyChecks`.
 
 ---
 
-### JN-MERGE-005: A check that does not finish in time
+### JN-MERGE-005: A check that is still running does not end the job
 
 **Preconditions:** `merge = "on"`. One check run is still `in_progress` when
-`check_wait` ends.
+`check_wait` ends. It later completes with `success`.
 
 **Steps:**
 
@@ -128,14 +146,19 @@ commit has no check runs.
 
 **Expected result:**
 
-- The reason is "check run <name> is still in_progress, so CI is not green
-  after waiting <wait> (check_wait)".
+- The job stays in progress through `check_wait`. It does not comment
+  "check run <name> is still in_progress, so CI is not green after waiting
+  <wait> (check_wait)".
+- When the run completes with `success`, the pull request merges as in
+  JN-MERGE-002.
 
 **Notes:**
 
-- Raise `check_wait` for slow CI (JN-CFG-010), and raise the runner's
-  `--stuck-after` if the wait can be longer than it (JN-FAIL-014).
-- Covered by `TestMergeWhenGreenSaysHowLongItWaited`.
+- Raise the runner's `--stuck-after` if the wait can be longer than it
+  (JN-FAIL-014). A wait that long is handed back and the next delivery
+  keeps waiting. `check_wait` does not lengthen this poll (JN-CFG-010).
+- Covered by `TestMergeWhenGreenStaysWhileChecksArePending` and
+  `TestMergeWhenGreenMergesSlowGreenChecks`.
 
 ---
 
@@ -154,8 +177,8 @@ commit has no check runs.
 - A fresh worker session gets the check's name, its conclusion, and that log
   tail, and fixes the failure. The commit is "Apply review feedback for
   #<n>". The gate runs, and the same branch is pushed.
-- Polling starts over on the new head inside the same `check_wait`. Green
-  checks merge as in JN-MERGE-002.
+- Polling starts over on the new head. Green checks merge as in
+  JN-MERGE-002. `check_wait` does not end that poll.
 
 **Notes:**
 
@@ -170,7 +193,8 @@ commit has no check runs.
 
 ### JN-MERGE-007: Still red after the fix round
 
-**Preconditions:** As JN-MERGE-006, but a check fails on the fixed head too.
+**Preconditions:** As JN-MERGE-006, but a check fails on the fixed head too,
+and a later poll of that head is green.
 
 **Steps:**
 
@@ -178,9 +202,9 @@ commit has no check runs.
 
 **Expected result:**
 
-- No second fix round. The reason is "check run <name> finished with failure,
-  so CI is not green". The pull request stays open and the job is not
-  retried.
+- No second fix round. The job stays in progress while the check stays red.
+  The pull request stays open. The issue is not told the job failed.
+- When a later poll is green, the pull request merges as in JN-MERGE-002.
 
 **Notes:**
 
@@ -191,7 +215,8 @@ commit has no check runs.
 ### JN-MERGE-008: A red check with no review round left
 
 **Preconditions:** `merge = "on"`. The review passed on its last round (for
-example round 3 of 3, or `--max-review-rounds 1`). A check fails.
+example round 3 of 3, or `--max-review-rounds 1`). A check fails, and a
+later poll is green.
 
 **Steps:**
 
@@ -199,13 +224,14 @@ example round 3 of 3, or `--max-review-rounds 1`). A check fails.
 
 **Expected result:**
 
-- No fix round. The job fails at once with "check run <name> finished with
-  failure, so CI is not green".
+- No fix round, and the failed check's log is not read.
+- The job stays in progress while the check stays red.
+- When a later poll is green, the pull request merges as in JN-MERGE-002.
 
 **Notes:**
 
 - Covered by `TestCIFixSkippedWhenRoundsSpent` and
-  `TestMergeWhenGreenDoesNotMergeRedChecks`.
+  `TestMergeWhenGreenStaysOnRedChecks`.
 
 ---
 
@@ -307,7 +333,8 @@ network error.
 ### JN-MERGE-013: GitHub refuses the merge
 
 **Preconditions:** `merge = "on"`. Checks are green, but GitHub refuses the
-merge (for example a conflict, or a rule the runner could not see).
+merge (for example a conflict, or a rule the runner could not see). It
+accepts a later try.
 
 **Steps:**
 
@@ -315,14 +342,20 @@ merge (for example a conflict, or a rule the runner could not see).
 
 **Expected result:**
 
-- The reason is "CI is green, but GitHub refused the merge: <GitHub's error>".
+- The refusal does not finish the job. The pull request stays open, and the
+  issue is not told the job failed.
+- The runner tries the merge again on the next poll. When GitHub accepts it,
+  the job ends `merged` and the comment is the one in JN-MERGE-002.
 
 **Notes:**
 
-- Every failure after the checks are green starts with "CI is green, but", so
-  a pull request that looks ready says why it was not merged.
-- Covered by `TestFactoryMergeRefusedByGitHub` and
-  `TestMergeWhenGreenSaysWhyAGreenPullDidNotMerge`.
+- A failure to read the merge queue, or to add the pull request to it, is
+  still final and starts with "CI is green, but".
+- A pull request that closes with no `merged_at` finishes the job. The
+  reason is "the pull request closed without merging, so schmeide stopped
+  waiting".
+- Covered by `TestFactoryMergeRetriesWhenGitHubRefuses` and
+  `TestMergeWhenGreenRetriesWhenGitHubRefuses`.
 
 ---
 
@@ -475,6 +508,6 @@ run can be `build-android`, `build-backend`, `build-linux`, or
 - A completed conclusion of `failure`, `cancelled`, `timed_out`, or empty is
   still red, and that run is the one named, even when an earlier run was
   `skipped`.
-- A list of only `skipped` runs is green. An empty list is still not green
-  (JN-MERGE-004).
+- A list of only `skipped` runs is green. An empty list is still not green,
+  and the job stays open until runs appear (JN-MERGE-004).
 - Covered by `TestJudgeChecks`.

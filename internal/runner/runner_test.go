@@ -1345,24 +1345,41 @@ func TestFactoryMergeWhenACheckFails(t *testing.T) {
 		{Name: "test", Status: "completed", Conclusion: "success"},
 		{Name: "lint", Status: "completed", Conclusion: "failure"},
 	})
-	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
+	h, sessions := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+	// Writer, reviewer, and one CI fix. The check stays red, so the job does
+	// not finish.
+	deadline := time.Now().Add(5 * time.Second)
+	for sessions.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("sessions = %d, want the writer, the reviewer, and one CI fix", sessions.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if merges, _ := w.gh.Merges(); merges != 0 {
+		t.Fatalf("merges = %d, want none while the check stays red", merges)
+	}
+	if sessions.Load() != 3 {
+		t.Fatalf("sessions = %d, want no second CI fix", sessions.Load())
+	}
+	w.gh.SetChecks([]fakegh.CheckRun{{Name: "lint", Status: "completed", Conclusion: "success"}})
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merged]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	assertSettled(t, w)
-	if merges, _ := w.gh.Merges(); merges != 0 {
-		t.Errorf("merges = %d, want none", merges)
+	if sessions.Load() != 3 {
+		t.Errorf("sessions = %d, want no second CI fix", sessions.Load())
 	}
-	assertNoMerge(t, w)
-	pulls, comments := w.gh.Snapshot()
-	if len(pulls) != 1 {
-		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	if merges, _ := w.gh.Merges(); merges != 1 {
+		t.Errorf("merges = %d, want 1", merges)
 	}
-	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], "failure") || !strings.Contains(comments["7"][0], pulls[0].URL) {
-		t.Errorf("issue comments = %q, want the failed check and the open pull request", comments["7"])
+	_, comments := w.gh.Snapshot()
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "schmeide merged the pull request") || strings.Contains(comments["7"][0], "left the pull request open") {
+		t.Errorf("issue comments = %q, want the merged pull request and no give-up", comments["7"])
 	}
 }
 
@@ -1389,63 +1406,110 @@ func TestFactoryMergeRefusedByRequiredReviews(t *testing.T) {
 	}
 }
 
-// TestFactoryMergeRefusedByGitHub has green checks but a merge GitHub
-// refuses, which must fail the job rather than report it merged.
-func TestFactoryMergeRefusedByGitHub(t *testing.T) {
-	for _, tt := range []struct {
-		status int
-		says   string
-	}{
-		{http.StatusMethodNotAllowed, "Pull Request is not mergeable"},
-		{http.StatusConflict, "Head branch was modified"},
-	} {
-		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
+// TestFactoryMergeRetriesWhenGitHubRefuses has green checks and a merge
+// GitHub refuses, then accepts. The job stays unfinished while the pull
+// request is open and merges once GitHub accepts it.
+func TestFactoryMergeRetriesWhenGitHubRefuses(t *testing.T) {
+	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusConflict} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			w := newWorld(t)
 			w.pushConfig(t, testMergeConfig)
 			w.gh.SetChecks([]fakegh.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}})
-			w.gh.FailMerge(tt.status)
+			w.gh.FailMerge(status)
 			h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 			w.start(t, "alice", h)
 			w.publish(t, "alice", 7)
 
-			if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if time.Now().After(deadline) {
+					t.Fatalf("GitHub was not asked to merge; calls %v", w.gh.Calls())
+				}
+				refused := false
+				for _, call := range w.gh.Calls() {
+					if strings.Contains(call, "/merge") {
+						refused = true
+					}
+				}
+				merges, _ := w.gh.Merges()
+				if refused && merges == 0 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			_, comments := w.gh.Snapshot()
+			for _, comment := range comments["7"] {
+				if strings.Contains(comment, "left the pull request open") {
+					t.Fatalf("commented a give-up while GitHub was refusing: %q", comment)
+				}
+			}
+			w.gh.AllowMerge()
+
+			if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merged]"; got != want {
 				t.Errorf("states = %s, want %s", got, want)
 			}
 			assertSettled(t, w)
-			if merges, _ := w.gh.Merges(); merges != 0 {
-				t.Errorf("merges = %d, want none", merges)
+			if merges, _ := w.gh.Merges(); merges != 1 {
+				t.Errorf("merges = %d, want 1", merges)
 			}
 			pulls, comments := w.gh.Snapshot()
-			if len(pulls) != 1 || pulls[0].State != "open" {
-				t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+			if len(pulls) != 1 || !pulls[0].Merged {
+				t.Fatalf("pull requests = %+v, want the pull request merged", pulls)
 			}
-			if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], strconv.Itoa(tt.status)) || !strings.Contains(comments["7"][0], tt.says) {
-				t.Errorf("issue comments = %q, want a failure naming GitHub's %d", comments["7"], tt.status)
+			if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "schmeide merged the pull request") || strings.Contains(comments["7"][0], "left the pull request open") {
+				t.Errorf("issue comments = %q, want one that says schmeide merged the pull request", comments["7"])
 			}
 		})
 	}
 }
 
-// The repo's check_wait bounds the poll. The default of 2m would outlast the
-// test's timeout.
-func TestFactoryMergeWithNoCheckRunsDoesNotMerge(t *testing.T) {
+// TestFactoryMergeMergesAfterEmptyChecks keeps the job open through a head
+// commit with no check runs, past check_wait, and merges once runs appear.
+func TestFactoryMergeMergesAfterEmptyChecks(t *testing.T) {
 	w := newWorld(t)
 	w.pushConfig(t, testGateConfig+"check_wait = \"20ms\"\n[automate]\nmerge = \"on\"\n")
 	h, _ := writes(map[string]string{"fix.txt": "fixed\n"})
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
+	deadline := time.Now().Add(5 * time.Second)
+	var sawAt time.Time
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("check runs were not read; calls %v", w.gh.Calls())
+		}
+		for _, call := range w.gh.Calls() {
+			if strings.Contains(call, "check-runs") && sawAt.IsZero() {
+				sawAt = time.Now()
+			}
+		}
+		if !sawAt.IsZero() && time.Since(sawAt) > 40*time.Millisecond {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	assertNoMerge(t, w)
+	_, comments := w.gh.Snapshot()
+	for _, comment := range comments["7"] {
+		if strings.Contains(comment, "no check runs") || strings.Contains(comment, "left the pull request open") {
+			t.Fatalf("commented a give-up while the check list was empty: %q", comment)
+		}
+	}
+	w.gh.SetChecks([]fakegh.CheckRun{
+		{Name: "test", Status: "completed", Conclusion: "success"},
+		{Name: "build-android", Status: "completed", Conclusion: "skipped"},
+	})
+
+	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merged]"; got != want {
 		t.Errorf("states = %s, want %s", got, want)
 	}
 	assertSettled(t, w)
-	assertNoMerge(t, w)
-	pulls, comments := w.gh.Snapshot()
-	if len(pulls) != 1 {
-		t.Fatalf("pull requests = %+v, want the pull request left open", pulls)
+	if merges, _ := w.gh.Merges(); merges != 1 {
+		t.Errorf("merges = %d, want 1", merges)
 	}
-	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "no check runs") || !strings.Contains(comments["7"][0], "left the pull request open") {
-		t.Errorf("issue comments = %q, want one that says there are no check runs", comments["7"])
+	_, comments = w.gh.Snapshot()
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "schmeide merged the pull request") {
+		t.Errorf("issue comments = %q, want one that says schmeide merged the pull request", comments["7"])
 	}
 }
 

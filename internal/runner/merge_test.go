@@ -29,9 +29,11 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var calls []string
+	var enqueued bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := r.Method + " " + r.URL.Path
 		reply := `{}`
+		markQueued := false
 		switch r.URL.Path {
 		case "/repos/" + testRepo:
 			reply = `{"default_branch":"main"}`
@@ -42,6 +44,14 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 			return
 		case "/repos/" + testRepo + "/pulls/9/merge":
 			reply = `{"merged":true}`
+		case "/repos/" + testRepo + "/pulls":
+			mu.Lock()
+			landed := enqueued
+			mu.Unlock()
+			reply = `[{"html_url":"https://github.com/o/r/pull/9","state":"open","merged_at":"","head":{"ref":"1_change"},"base":{"ref":"main"}}]`
+			if landed {
+				reply = `[{"html_url":"https://github.com/o/r/pull/9","state":"closed","merged_at":"2026-10-27T00:00:00Z","head":{"ref":"1_change"},"base":{"ref":"main"}}]`
+			}
 		case "/graphql":
 			var req struct {
 				Query     string         `json:"query"`
@@ -54,6 +64,7 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 			case strings.Contains(req.Query, "enqueuePullRequest"):
 				call = "graphql enqueue " + req.Variables["id"].(string)
 				reply = `{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"id":"MQE_1"}}}}`
+				markQueued = true
 			case strings.Contains(req.Query, "mergeQueue"):
 				call = "graphql mergeQueue " + req.Variables["branch"].(string)
 				reply = `{"data":{"repository":{"mergeQueue":null}}}`
@@ -71,6 +82,9 @@ func mergeServer(t *testing.T, queue bool) (*httptest.Server, func() []string) {
 		}
 		mu.Lock()
 		calls = append(calls, call)
+		if markQueued {
+			enqueued = true
+		}
 		mu.Unlock()
 		_, _ = w.Write([]byte(reply))
 	}))
@@ -86,12 +100,12 @@ func TestMergeWhenGreenEnqueuesWithMergeQueue(t *testing.T) {
 	srv, calls := mergeServer(t, true)
 	gh := forge.GitHub{API: srv.URL, Repo: testRepo, Token: testToken}
 	out := (&Runner{}).mergeWhenGreen(t.Context(), headWorkspace{}, gh, 1, "main", "https://github.com/o/r/pull/9", time.Minute, nil)
-	if out.state != StateQueued || !strings.Contains(out.comment, "merge queue") {
-		t.Fatalf("outcome = %+v, want queued with a merge queue comment", out)
+	if out.state != StateMerged || !strings.Contains(out.comment, "the merge queue merged the pull request") {
+		t.Fatalf("outcome = %+v, want merged by the merge queue", out)
 	}
 	got := strings.Join(calls(), "\n")
-	if !strings.Contains(got, "graphql enqueue PR_9") || !strings.Contains(got, "graphql mergeQueue main") {
-		t.Fatalf("calls = %s, want the queue read for main and PR_9 enqueued", got)
+	if strings.Count(got, "graphql enqueue PR_9") != 1 || !strings.Contains(got, "graphql mergeQueue main") {
+		t.Fatalf("calls = %s, want the queue read for main and PR_9 enqueued once", got)
 	}
 	if strings.Contains(got, "/pulls/9/merge") {
 		t.Fatalf("calls = %s, want no direct merge", got)
