@@ -85,6 +85,10 @@ branch has no merge queue and does not require approving reviews.
 - A failure here says "CI is green, but schmeide could not read the merge
   queue: ..." or "CI is green, but schmeide could not add the pull request to
   the merge queue: ...".
+- `enqueuePullRequest` needs Merge queues: write. The job token asks for
+  `merge_queues: write` (`internal/control/token.go`, pinned by
+  `TestTokenPerJob`). An installation that has not accepted that permission
+  gets no token at all (JN-FAIL-015), rather than a failure at this step.
 - Covered by `TestMergeWhenGreenEnqueuesWithMergeQueue`.
 
 ---

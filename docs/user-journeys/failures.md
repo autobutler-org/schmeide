@@ -368,7 +368,8 @@ change for an hour (for example a session that hangs under a longer
 **Preconditions:** The control node cannot mint an installation token, for
 example because the App was uninstalled from the repository, or because the
 App or its installation lacks one of the permissions the token asks for
-(Contents, Pull requests, Issues, Checks, Administration, Actions).
+(Contents, Pull requests, Issues, Checks, Administration, Actions,
+Workflows, Merge queues).
 
 **Steps:**
 
