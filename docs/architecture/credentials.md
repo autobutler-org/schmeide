@@ -150,8 +150,15 @@ log.
 `--runner-tokens` on the control node is `<login>:<token>,...`. `ParseRunnerTokens` refuses an empty list, a
 duplicate steward, a steward with subject syntax or `/` or `\`, and `_pool`. Each entry becomes a NATS user named
 after the steward with the token as its password and `runnerPermissions(steward)` as its permissions (see
-[Control node](control-node.md#runner-permissions)). A runner, `schmeide status`, and `schmeide doctor` pass the
-same pair as `--steward` and `--nats-token`.
+[Control node](control-node.md#runner-permissions)). A runner, `schmeide status`, `schmeide doctor`, and `schmeide dashboard` pass
+the same pair as `--steward` and `--nats-token`.
+
+`schmeide dashboard` holds that token for as long as it runs and serves what it reads over plain HTTP on `--addr`
+with no login. The default, `127.0.0.1:7878`, is reachable only from the same machine, and the dashboard refuses a
+request whose `Host` is not a loopback name. An address beyond loopback shows the steward's runners and jobs, and
+lets anyone who can reach it spend the steward's claude account on questions. The dashboard logs a warning at
+startup when that is the case. Its claude session gets the dashboard's environment, so it uses the claude login on
+that machine, and it has no tools: the factory state reaches it only as text in the prompt.
 
 What a stolen steward token gives: that steward's jobs (including issue text), its token subject (and so
 installation tokens for its jobs' repositories), its stage records, pool jobs and their stage records and

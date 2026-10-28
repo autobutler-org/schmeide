@@ -22,7 +22,7 @@ func TestCompletion(t *testing.T) {
 			if code := run([]string{"completion", shell}, &out, &errb); code != 0 {
 				t.Fatalf("exit %d: %s", code, errb.String())
 			}
-			for _, w := range []string{"control", "runner", "doctor", "status", "completion"} {
+			for _, w := range []string{"control", "runner", "doctor", "status", "dashboard", "completion"} {
 				if !strings.Contains(out.String(), w) {
 					t.Errorf("script missing %q", w)
 				}

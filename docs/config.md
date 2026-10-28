@@ -228,6 +228,25 @@ whose value differs logs a warning and heartbeats at the consumer's lease. See
 [FAILURE-MODES.md](FAILURE-MODES.md#delivery-heartbeats-and-stuck-jobs) for how
 to change the lease.
 
+## Dashboard flags
+
+`schmeide dashboard` runs on a steward's machine and needs no repo key. It
+reads `SCHMEIDE_STEWARD`, `SCHMEIDE_NATS_URL`, and `SCHMEIDE_NATS_TOKEN` like
+`schmeide status`. Its other flags have no environment variable.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--steward` | none, required | The GitHub login whose runners and jobs the page shows. |
+| `--nats-url` | `nats://127.0.0.1:4222` | The control node's NATS, its `--nats-addr`. |
+| `--nats-token` | none | The steward's NATS token from the control node's `--runner-tokens`. |
+| `--addr` | `127.0.0.1:7878` | Where the page is served. On a loopback address, a request whose `Host` is not a loopback name is refused. Any other address logs a warning at startup, because the page has no login and its ask panel runs on the steward's claude account. |
+| `--interval` | `5s` | How often the dashboard asks the control node for status. Zero or negative is a usage error. |
+| `--model` | `sonnet` | The claude `--model` the ask panel uses. Empty is a usage error. |
+| `--claude` | `claude` | The claude executable the ask panel runs. It has to be installed and logged in for the ask panel to answer; the rest of the page works without it. |
+
+See [architecture/dashboard.md](architecture/dashboard.md) and JN-CLI-017 to
+JN-CLI-019.
+
 ## Control node settings
 
 `schmeide control --help` lists every control node setting, and

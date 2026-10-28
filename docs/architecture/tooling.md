@@ -11,6 +11,7 @@ its flags and help text. Running with no arguments or `-h` prints the command li
 | `schmeide runner` | `runner.Main` (`internal/runner/cli.go`) | A runner. See [Runner](runner.md). |
 | `schmeide doctor` | `doctor.Main` (`internal/doctor/doctor.go`) | Checks a runner machine: git, gh, free disk, lint gate detection, each harness, the permission floor, and that a control node answers on NATS. `--fix` and `--json` are supported. |
 | `schmeide status` | `control.StatusMain` (`internal/control/status.go`) | Asks the control node on `schmeide.status-query.<steward>` and prints the steward's own live registrations and unfinished jobs, including `pending` jobs no runner has claimed, plus pool jobs for a pool steward, with how long each has been in its state. `--json` for the stable `Snapshot` form. |
+| `schmeide dashboard` | `dashboard.Main` (`internal/dashboard/dashboard.go`) | Serves a local page of the steward's runners, unfinished jobs, jobs finished in the last 24 hours, and an activity log, refreshed from the same status query, with an ask panel that runs the claude CLI with no tools. See [Dashboard](dashboard.md). |
 | `schmeide init` | `initMain` (`cmd/schmeide/init.go`) | Writes `.schmeide/config.toml` and `.schmeide/control.conf` (mode 0600) in the current directory, and refuses to overwrite either. |
 | `schmeide completion bash\|zsh\|fish` | `completionMain` (`cmd/schmeide/completion.go`) | Prints a completion script. |
 | `schmeide version` | `versionMain` (`cmd/schmeide/version.go`) | Prints `release.Version`. |
@@ -18,10 +19,11 @@ its flags and help text. Running with no arguments or `-h` prints the command li
 Runner and control settings share one convention: every flag can come from `SCHMEIDE_<FLAG_NAME>` and a flag
 wins over the environment. The control node also reads a `--config` file, which the environment wins over.
 
-`cmd/fakeagent` is a test stand-in for an agent CLI. It ignores its arguments and stdin and runs the script in
-`FAKEAGENT_SCRIPT`, one step per line: `edit <path> <text>`, `stderr <text>`, `exit <n>`, `sleep <seconds>`, and
-`hang`. Text expands `$NAME` from the environment and `$$` to the process ID. It lets tests drive the real
-`harness.ClaudeCode` and `harness.Grok` process code, including process-group kills.
+`cmd/fakeagent` is a test stand-in for an agent CLI. It runs the script in `FAKEAGENT_SCRIPT`, one step per line:
+`edit <path> <text>`, `stdout <text>`, `stderr <text>`, `args <path>` (write its arguments to path, one per line),
+`stdin <path>` (copy its stdin to path), `exit <n>`, `sleep <seconds>`, and `hang`. Text expands `$NAME` from the environment and `$$` to the process ID. It lets tests drive the real
+`harness.ClaudeCode` and `harness.Grok` process code, including process-group kills, and the dashboard's
+`dashboard.Claude`.
 
 ## Makefile targets
 
@@ -137,6 +139,7 @@ Each journey (`newWorld`):
 | `TestJourneyLabeledIssueOpensOnePullRequest` | one PR on `1_add-a-greeting` against `main` with the session's title and `Closes #1`, the branch pushed, review passed |
 | `TestJourneyGateFailureCommentsAndOpensNoPullRequest` | gate `false` comments and opens no PR |
 | `TestJourneyKilledRunnerJobIsRedeliveredWithoutASecondPullRequest` | runner killed during review, the job redelivered to a second runner after the 3s lease, still one PR |
+| `TestJourneyDashboardShowsTheStewardsJobsAndAnswers` | a `schmeide dashboard` beside the control node and runner lists the gate-failed job under `finished` with its repo and title, puts it first in the activity log, and answers a question through the fake claude CLI (JN-CLI-017, JN-CLI-018) |
 | `TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest` | the first token expires during a 5s session; the runner gets a second one, opens one PR, the review passes, and GitHub never answers 401 (JN-FAIL-021) |
 
 ## Renovate

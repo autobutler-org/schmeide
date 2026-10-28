@@ -603,7 +603,7 @@ func TestStatusStreamKeepsOnlyTheLatestMessagePerSubject(t *testing.T) {
 	if got, ok := tracker.JobStatus(job.Subject()); !ok || got != wantStatus {
 		t.Errorf("status after restart = %+v, %v; want %+v", got, ok, wantStatus)
 	}
-	if snap := tracker.Snapshot("alice"); !reflect.DeepEqual(snap.Runners, wantRunners) {
+	if snap := tracker.Snapshot("alice", StatusQuery{}); !reflect.DeepEqual(snap.Runners, wantRunners) {
 		t.Errorf("Snapshot runners = %+v, want %+v", snap.Runners, wantRunners)
 	}
 }
@@ -716,5 +716,90 @@ func TestRestartKeepsOnlyLiveRegistrations(t *testing.T) {
 	advance(tracker, RegistrationTTL+time.Second)
 	if got := tracker.Runners(); len(got) != 0 {
 		t.Errorf("runners = %+v, want none once the stored registration is older than the TTL", got)
+	}
+}
+
+func TestStatusCarriesRepoAndTitle(t *testing.T) {
+	q, tracker, url := startStatus(t)
+	runner := startFakeRunner(t, q)
+	job := Job{Repo: "o/r", RepoID: 7, Issue: 1, Steward: "hubot", InstallationID: 1, Title: "Add a greeting", Pool: true}
+	if created, err := q.Publish(t.Context(), job); err != nil || !created {
+		t.Fatalf("Publish = %v, %v", created, err)
+	}
+	eventually(t, func() bool { _, ok := tracker.JobStatus(job.Subject()); return ok })
+	runner.publish(RegisterSubjectPrefix+"hubot", Registration{Steward: "hubot", Harnesses: []string{"claude"}, Host: "laptop", Pool: true})
+	eventually(t, func() bool { return tracker.poolRunner("hubot") })
+
+	if got := statusJobs(t, url)[job.Subject()]; got.Repo != job.Repo || got.Title != job.Title {
+		t.Errorf("pending job = %+v, want repo %q and title %q", got, job.Repo, job.Title)
+	}
+
+	// An older runner's status names neither, so the pending status's are kept.
+	runner.report(job, StateWorking, "")
+	eventually(t, func() bool { s, _ := tracker.JobStatus(job.Subject()); return s.State == StateWorking })
+	if got := statusJobs(t, url)[job.Subject()]; got.Repo != job.Repo || got.Title != job.Title {
+		t.Errorf("working job from an older runner = %+v, want repo %q and title %q kept", got, job.Repo, job.Title)
+	}
+
+	// A runner's own repo and title win.
+	runner.publish(StatusSubjectPrefix+strings.TrimPrefix(job.Subject(), jobSubjectPrefix), Status{State: StateReviewing, Repo: "o/renamed", Title: "Add a better greeting"})
+	eventually(t, func() bool { s, _ := tracker.JobStatus(job.Subject()); return s.State == StateReviewing })
+	if got := statusJobs(t, url)[job.Subject()]; got.Repo != "o/renamed" || got.Title != "Add a better greeting" {
+		t.Errorf("reviewing job = %+v, want the runner's repo and title", got)
+	}
+}
+
+// queryFinished asks for the steward's snapshot with finished jobs.
+func queryFinished(t *testing.T, url, steward string) Snapshot {
+	t.Helper()
+	nc, err := nats.Connect(url, nats.UserInfo(steward, steward+"-token"), nats.CustomInboxPrefix(InboxPrefix(steward)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	snap, err := QueryStatus(nc, steward, StatusQuery{Finished: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestStatusQueryListsFinishedJobsOnRequest(t *testing.T) {
+	q, tracker, url := startStatus(t)
+	runner := startFakeRunner(t, q)
+	job := func(steward string, issue int) Job {
+		return Job{Repo: "o/r", RepoID: 7, Issue: issue, Steward: steward, InstallationID: 1, Title: "t"}
+	}
+	runner.report(job("hubot", 1), StateWorking, "")
+	runner.report(job("hubot", 2), StateMerged, "https://github.com/o/r/pull/3")
+	runner.report(job("hubot", 3), StateGateFailed, "make check failed")
+	runner.report(job("carol", 4), StateMerged, "https://github.com/o/r/pull/5")
+	eventually(t, func() bool { _, ok := tracker.JobStatus(job("carol", 4).Subject()); return ok })
+
+	snap := queryFinished(t, url, "hubot")
+	snap.Jobs = withoutSince(t, snap.Jobs)
+	snap.Finished = withoutSince(t, snap.Finished)
+	wantJobs := []JobState{{Subject: job("hubot", 1).Subject(), State: StateWorking}}
+	wantFinished := []JobState{
+		{Subject: job("hubot", 2).Subject(), State: StateMerged, Detail: "https://github.com/o/r/pull/3"},
+		{Subject: job("hubot", 3).Subject(), State: StateGateFailed, Detail: "make check failed"},
+	}
+	if !reflect.DeepEqual(snap.Jobs, wantJobs) || !reflect.DeepEqual(snap.Finished, wantFinished) {
+		t.Errorf("snapshot = %+v, want jobs %+v and finished %+v", snap, wantJobs, wantFinished)
+	}
+
+	// `schmeide status` does not ask, so its reply has no finished jobs.
+	var plain map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(runStatus(t, url, "--json")), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain["finished"]; ok {
+		t.Errorf("schmeide status --json = %v, want no finished key", plain)
+	}
+
+	// A job that finished longer ago than FinishedWindow is left out.
+	advance(tracker, FinishedWindow+time.Second)
+	if got := queryFinished(t, url, "hubot").Finished; len(got) != 0 {
+		t.Errorf("finished after the window = %+v, want none", got)
 	}
 }

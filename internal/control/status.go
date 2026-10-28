@@ -117,6 +117,12 @@ type Status struct {
 	// Attempts is the number of failed work outcomes so far. It is omitted
 	// for zero so statuses written by older runners remain compatible.
 	Attempts int `json:"attempts,omitempty"`
+	// Repo and Title are the job's repository ("owner/name") and issue
+	// title. The control node's pending status and this version's runners
+	// set them; an older runner leaves them empty, and the tracker then keeps
+	// the ones the job's earlier status named.
+	Repo  string `json:"repo,omitempty"`
+	Title string `json:"title,omitempty"`
 }
 
 // Registration is the message a runner publishes when it starts.
@@ -315,6 +321,9 @@ func (t *Tracker) observeStatus(log *slog.Logger, seq uint64, at time.Time, subj
 		t.mu.Unlock()
 		return
 	}
+	if prev, ok := t.jobs[job]; ok && status.Repo == "" && status.Title == "" {
+		status.Repo, status.Title = prev.Repo, prev.Title
+	}
 	t.jobs[job] = status
 	t.since[job] = at
 	t.mu.Unlock()
@@ -427,9 +436,24 @@ type JobState struct {
 	Subject string `json:"subject"`
 	State   State  `json:"state"`
 	Detail  string `json:"detail,omitempty"`
+	// Repo and Title are the job's repository and issue title, when a
+	// status named them (see Status).
+	Repo  string `json:"repo,omitempty"`
+	Title string `json:"title,omitempty"`
 	// Since is when the latest status was stored: for a pending job, when
 	// it was queued.
 	Since time.Time `json:"since"`
+}
+
+// FinishedWindow is how far back a status query that asks for finished jobs
+// looks: a job is listed when its final state was stored within it.
+const FinishedWindow = 24 * time.Hour
+
+// StatusQuery is the body of a status query. An empty body is the zero
+// StatusQuery, which is what `schmeide status` sends.
+type StatusQuery struct {
+	// Finished asks for Snapshot.Finished as well.
+	Finished bool `json:"finished,omitempty"`
 }
 
 // Snapshot is what `schmeide status` reports. Its JSON form is stable.
@@ -437,6 +461,10 @@ type Snapshot struct {
 	Runners []Registration `json:"runners"`
 	// Jobs are the jobs whose latest state is not final, by subject.
 	Jobs []JobState `json:"jobs"`
+	// Finished are the jobs whose final state was stored within
+	// FinishedWindow, by subject. It is only filled when the query asks for
+	// it, and omitted otherwise.
+	Finished []JobState `json:"finished,omitempty"`
 }
 
 // StatusReply answers a status query. Error is set instead of the Snapshot
@@ -450,8 +478,10 @@ type StatusReply struct {
 // Snapshot is what `schmeide status` shows the steward: the steward's own
 // live registrations, and the unfinished jobs on the steward's subject. A
 // steward with a live pool runner also sees unfinished pool jobs, which that
-// runner may take. Other stewards' runners and jobs are left out.
-func (t *Tracker) Snapshot(steward string) Snapshot {
+// runner may take. Other stewards' runners and jobs are left out. When query
+// asks for finished jobs, the same jobs that reached a final state within
+// FinishedWindow are listed too.
+func (t *Tracker) Snapshot(steward string, query StatusQuery) Snapshot {
 	snap := Snapshot{Runners: []Registration{}, Jobs: []JobState{}}
 	for _, r := range t.Runners() {
 		if r.Steward == steward {
@@ -464,26 +494,49 @@ func (t *Tracker) Snapshot(steward string) Snapshot {
 		pool = jobSubjectPrefix + PoolName + "."
 	}
 	t.mu.Lock()
+	now := time.Now()
+	if t.now != nil {
+		now = t.now()
+	}
 	for subject, status := range t.jobs {
 		mine := strings.HasPrefix(subject, own) || pool != "" && strings.HasPrefix(subject, pool)
-		if mine && !status.State.final() {
-			snap.Jobs = append(snap.Jobs, JobState{Subject: subject, State: status.State, Detail: status.Detail, Since: t.since[subject]})
+		if !mine {
+			continue
+		}
+		job := JobState{Subject: subject, State: status.State, Detail: status.Detail, Repo: status.Repo, Title: status.Title, Since: t.since[subject]}
+		switch {
+		case !status.State.final():
+			snap.Jobs = append(snap.Jobs, job)
+		case query.Finished && now.Sub(job.Since) < FinishedWindow:
+			snap.Finished = append(snap.Finished, job)
 		}
 	}
 	t.mu.Unlock()
-	slices.SortFunc(snap.Jobs, func(a, b JobState) int { return strings.Compare(a.Subject, b.Subject) })
+	bySubject := func(a, b JobState) int { return strings.Compare(a.Subject, b.Subject) }
+	slices.SortFunc(snap.Jobs, bySubject)
+	if query.Finished {
+		if snap.Finished == nil {
+			snap.Finished = []JobState{}
+		}
+		slices.SortFunc(snap.Finished, bySubject)
+	}
 	return snap
 }
 
 // ServeStatus answers requests on a steward's status query subject with
-// that steward's Snapshot. Track must have run.
+// that steward's Snapshot. The request body is a StatusQuery; an empty or
+// unreadable one is the zero StatusQuery. Track must have run.
 func (q *Queue) ServeStatus(log *slog.Logger) error {
 	if q.tracker == nil {
 		return errors.New("serve status queries: the status stream is not tracked yet")
 	}
 	_, err := q.nc.Subscribe(StatusQuerySubjectPrefix+"*", func(m *nats.Msg) {
 		steward := strings.TrimPrefix(m.Subject, StatusQuerySubjectPrefix)
-		data, _ := json.Marshal(StatusReply{Snapshot: q.tracker.Snapshot(steward)})
+		var query StatusQuery
+		if len(m.Data) > 0 {
+			_ = json.Unmarshal(m.Data, &query) // a body this node cannot read asks for nothing extra
+		}
+		data, _ := json.Marshal(StatusReply{Snapshot: q.tracker.Snapshot(steward, query)})
 		if err := m.Respond(data); err != nil {
 			log.Error("status reply failed", "steward", steward, "err", err)
 		}
@@ -546,11 +599,18 @@ Flags:
 `
 }
 
-// queryStatus asks the control node for the steward's Snapshot.
-func queryStatus(nc *nats.Conn, steward string) (Snapshot, error) {
+// QueryStatus asks the control node for the steward's Snapshot. nc must be
+// connected as the steward, with InboxPrefix(steward) as its inbox prefix.
+// A zero query sends an empty body. A control node from before StatusQuery
+// ignores the body, so Finished stays empty.
+func QueryStatus(nc *nats.Conn, steward string, query StatusQuery) (Snapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
-	msg, err := nc.RequestWithContext(ctx, StatusQuerySubjectPrefix+steward, nil)
+	var body []byte
+	if query != (StatusQuery{}) {
+		body, _ = json.Marshal(query)
+	}
+	msg, err := nc.RequestWithContext(ctx, StatusQuerySubjectPrefix+steward, body)
 	if errors.Is(err, nats.ErrNoResponders) {
 		return Snapshot{}, errors.New("the control node does not answer status queries; upgrade `schmeide control` to this version")
 	}
@@ -604,7 +664,7 @@ func StatusMain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer nc.Close()
-	snap, err := queryStatus(nc, *steward)
+	snap, err := QueryStatus(nc, *steward, StatusQuery{})
 	if err != nil {
 		fmt.Fprintf(stderr, "schmeide status: %v\n", err)
 		return 1

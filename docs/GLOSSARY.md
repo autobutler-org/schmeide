@@ -38,6 +38,27 @@ The single `schmeide control` process. It receives GitHub webhooks, holds the
 job queue in an embedded NATS server with JetStream, and mints a GitHub
 installation token for each job a runner asks for.
 
+## activity log
+
+The list of job states `schmeide dashboard` has seen, newest first, each at
+the time the control node stored that state. It lives in the dashboard's
+memory, keeps the newest 200 events, and starts over when the dashboard
+restarts. A state that came and went between two polls is not in it.
+
+## ask panel
+
+The "Ask the factory" part of the dashboard. It sends a question, the
+conversation so far, and the dashboard's current view to the claude CLI, which
+runs with no tools, and shows the answer. It can explain what the page shows;
+it cannot change anything.
+
+## dashboard
+
+`schmeide dashboard`: a local web page for one steward that shows their live
+runners, unfinished jobs, jobs finished in the last 24 hours, and the activity
+log, refreshed from the control node's status query, with the ask panel. It
+reads what `schmeide status` reads and changes nothing.
+
 ## factory merge
 
 The `automate.merge = "on"` setting in `.schmeide/config.toml`. After review passes,

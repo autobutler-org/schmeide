@@ -1,10 +1,12 @@
 // Command fakeagent stands in for an agent CLI such as claude or grok so
-// tests can drive the real harness process code. It ignores its arguments
-// and stdin and performs the script in the FAKEAGENT_SCRIPT environment
-// variable, one step per line:
+// tests can drive the real harness process code. It performs the script in
+// the FAKEAGENT_SCRIPT environment variable, one step per line:
 //
 //	edit <path> <text>  write text to path, relative to the working directory
+//	stdout <text>       print text to stdout
 //	stderr <text>       print text to stderr
+//	args <path>         write the arguments to path, one per line
+//	stdin <path>        copy stdin to path
 //	exit <n>            exit with code n
 //	sleep <seconds>     sleep
 //	hang                sleep until killed
@@ -26,7 +28,7 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Getenv("FAKEAGENT_SCRIPT"), os.Stderr))
+	os.Exit(run(os.Getenv("FAKEAGENT_SCRIPT"), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // expand replaces $NAME with the environment variable and $$ with the PID.
@@ -40,7 +42,7 @@ func expand(s string) string {
 }
 
 // run performs script and returns the exit code.
-func run(script string, stderr io.Writer) int {
+func run(script string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for line := range strings.Lines(script) {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -60,8 +62,28 @@ func run(script string, stderr io.Writer) int {
 			if err := os.WriteFile(path, []byte(expand(text)+"\n"), 0o644); err != nil {
 				return bad(err)
 			}
+		case "stdout":
+			fmt.Fprintln(stdout, expand(rest))
 		case "stderr":
 			fmt.Fprintln(stderr, expand(rest))
+		case "args":
+			if rest == "" {
+				return bad(errors.New("want args <path>"))
+			}
+			if err := os.WriteFile(rest, []byte(strings.Join(args, "\n")+"\n"), 0o644); err != nil {
+				return bad(err)
+			}
+		case "stdin":
+			if rest == "" {
+				return bad(errors.New("want stdin <path>"))
+			}
+			data, err := io.ReadAll(stdin)
+			if err == nil {
+				err = os.WriteFile(rest, data, 0o644)
+			}
+			if err != nil {
+				return bad(err)
+			}
 		case "exit":
 			n, err := strconv.Atoi(rest)
 			if err != nil {
@@ -77,7 +99,7 @@ func run(script string, stderr io.Writer) int {
 		case "hang":
 			time.Sleep(math.MaxInt64) // select {} would die as a deadlock
 		default:
-			return bad(fmt.Errorf("unknown step %q; want edit, stderr, exit, sleep, or hang", step))
+			return bad(fmt.Errorf("unknown step %q; want edit, stdout, stderr, args, stdin, exit, sleep, or hang", step))
 		}
 	}
 	return 0

@@ -36,7 +36,7 @@ flowchart LR
 | Store | Owner (writes) | Readers | Lifetime |
 | --- | --- | --- | --- |
 | `SCHMEIDE_JOBS` stream | `control.Queue.Publish` | runner consumers, `tokenFor`, `seedIssues` | Until 100,000 later jobs push it out (`MaxMsgs`, discard oldest). Acked jobs are not removed: the stream has the default limits retention. |
-| `SCHMEIDE_STATUS` stream | runners (registration, status); `Queue.Publish` (`pending` status for a new job) | `control.Tracker` (which answers `schmeide status` queries), runners (attempt count, by direct get on their own and pool job subjects) | The latest message per subject (`MaxMsgsPerSubject` 1, discard oldest): one registration per steward and host, one status per job subject. A newer message on a subject removes the older one, so a runner's first report replaces the job's `pending` status. It grows with the number of jobs and of steward and host pairs. A stream an older control node created without limits is updated by `Queue.Track` on the next start. |
+| `SCHMEIDE_STATUS` stream | runners (registration, status); `Queue.Publish` (`pending` status for a new job) | `control.Tracker` (which answers `schmeide status` and `schmeide dashboard` queries), runners (attempt count, by direct get on their own and pool job subjects) | The latest message per subject (`MaxMsgsPerSubject` 1, discard oldest): one registration per steward and host, one status per job subject. A newer message on a subject removes the older one, so a runner's first report replaces the job's `pending` status. It grows with the number of jobs and of steward and host pairs. A stream an older control node created without limits is updated by `Queue.Track` on the next start. |
 | `SCHMEIDE_ISSUES` KV | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` | Forever, one key per issue ever made a job. Overwritten when a failed job's issue gets a new job. |
 | `SCHMEIDE_STAGES` KV | runners (`Runner.mark`) | runners (`Runner.recordedStage`) | From `worktree_ready` until the job's final outcome, when the runner deletes it. One revision per key (`History: 1`); a value over 4 KiB (`maxStageValueBytes`) is refused. |
 | Job consumers `runner-<steward>`, `runner-_pool` | the first runner to start (`Runner.sharedConsumer`, `CreateConsumer`); later runners use it unchanged | JetStream | Durable, in `--data-dir`, until deleted by hand. Its `AckWait` is the creating runner's `--ack-wait`. |
@@ -47,6 +47,7 @@ flowchart LR
 | Control `--config` file | operator (`schmeide init` writes a template) | `control.parseControl` | Operator-managed. Read once at startup. |
 | `.schmeide/config.toml` | repository maintainers | `repoconfig.Load` in the runner, on the base branch | Versioned with the repository. |
 | `.schmeide/pr.md`, `.schmeide/review.md` | harness sessions | runner (`prText`, `readVerdict`) | One session. Deleted before the next commit. |
+| Dashboard activity log | `schmeide dashboard` (`board.record`) | the dashboard page and its ask panel | In memory, the newest 200 events, until the dashboard stops. Nothing is written to disk. |
 | Logs | control node and runner, `log/slog` text to stderr | operator | Whatever the process supervisor keeps. |
 
 ## What survives a control node restart
@@ -116,7 +117,13 @@ host), and the stream keeps the latest message per subject. A runner publishes i
 stored it. An older registration is dropped from pool routing, pool token minting, and `schmeide status`.
 
 `Status` on `schmeide.status.<steward or _pool>.<repo_id>.<issue>`: `state`, `detail` (PR URL or the reason),
-`attempts` (failed work outcomes so far, omitted when zero).
+`attempts` (failed work outcomes so far, omitted when zero), `repo` and `title` (the job's `owner/name` and issue
+title, omitted when empty). The control node's `pending` status and every status from a runner of #264 or later
+carry `repo` and `title`. When a status names neither, the tracker keeps the ones the job's previous status named.
+
+`StatusQuery` is the body of a request on `schmeide.status-query.<steward>`: `{"finished": true}` asks for the
+reply's `finished` list (jobs whose final state was stored in the last 24 hours) as well. `schmeide status` sends
+an empty body. Nothing stores it.
 
 ### Job stage record
 

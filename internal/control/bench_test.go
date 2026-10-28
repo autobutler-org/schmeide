@@ -78,7 +78,7 @@ func BenchmarkStatusStore(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		snap := tracker.Snapshot("octocat")
+		snap := tracker.Snapshot("octocat", StatusQuery{})
 		if len(snap.Jobs) != jobCount {
 			b.Fatalf("listed %d jobs, want %d", len(snap.Jobs), jobCount)
 		}

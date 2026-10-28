@@ -481,7 +481,7 @@ func (r *Runner) report(job control.Job, state State, detail string) {
 		r.mark(job, s)
 	}
 	r.log.Info("job state", "repo", job.Repo, "issue", job.Issue, "state", string(state), "detail", detail)
-	r.publish(statusSubject(job), Status{State: state, Detail: detail, Attempts: r.attempts})
+	r.publish(statusSubject(job), Status{State: state, Detail: detail, Attempts: r.attempts, Repo: job.Repo, Title: job.Title})
 	if r.progress != nil {
 		select {
 		case r.progress <- struct{}{}:

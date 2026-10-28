@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/autobutler-org/schmeide/internal/control"
+	"github.com/autobutler-org/schmeide/internal/dashboard"
 	"github.com/autobutler-org/schmeide/internal/doctor"
 	"github.com/autobutler-org/schmeide/internal/runner"
 )
@@ -22,6 +23,7 @@ Commands:
   runner      Run a runner: take your jobs from the control node and open a PR for each.
   doctor      Check that this machine is ready to run a runner.
   status      Show registered runners and queued or running jobs.
+  dashboard   Serve a web page of your runners and jobs, with an ask panel.
   init        Write a repo config and a control node config in this directory.
   completion  Print a shell completion script for bash, zsh, or fish.
   version     Print the version stamped into this binary.
@@ -44,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return doctor.Main(args[1:], stdout, stderr)
 	case "status":
 		return control.StatusMain(args[1:], stdout, stderr)
+	case "dashboard":
+		return dashboard.Main(args[1:], stdout, stderr)
 	case "init":
 		return initMain(args[1:], stdout, stderr)
 	case "completion":
