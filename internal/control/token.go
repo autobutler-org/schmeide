@@ -80,11 +80,13 @@ func (m TokenMinter) appJWT(now time.Time) (string, error) {
 }
 
 // Mint returns an installation token for the job, limited to the job's
-// repository and to what a runner needs: push a branch, open and merge a PR,
-// comment, list check runs, read branch protection before a factory merge
-// (administration: read), and read an Actions job log for a CI fix round
-// (actions: read). GitHub expires installation tokens after one hour; the
-// runner asks for a new one before then, and each request mints a new token.
+// repository and to what a runner needs: push a branch, including workflow
+// files (workflows: write), open and merge a PR, add it to a merge queue
+// (merge_queues: write), comment, list check runs, read branch protection
+// before a factory merge (administration: read), and read an Actions job log
+// for a CI fix round (actions: read). GitHub expires installation tokens
+// after one hour; the runner asks for a new one before then, and each
+// request mints a new token.
 func (m TokenMinter) Mint(ctx context.Context, job Job) (Token, error) {
 	jwt, err := m.appJWT(time.Now())
 	if err != nil {
@@ -99,6 +101,8 @@ func (m TokenMinter) Mint(ctx context.Context, job Job) (Token, error) {
 			"checks":         "read",
 			"administration": "read",
 			"actions":        "read",
+			"workflows":      "write",
+			"merge_queues":   "write",
 		},
 	})
 	if err != nil {

@@ -23,7 +23,8 @@ TLS-terminating proxy.
 3. Set **Webhook secret** to a long random string and keep a copy.
 4. Under **Repository permissions**, set Contents: read and write, Pull
    requests: read and write, Issues: read and write, Checks: read-only,
-   Administration: read-only, Actions: read-only.
+   Administration: read-only, Actions: read-only, Workflows: read and write,
+   Merge queues: read and write.
 5. Under **Subscribe to events**, check **Issues**.
 6. Create the App and note its **App ID**.
 7. Generate a private key and save the `.pem` file.
@@ -38,14 +39,18 @@ TLS-terminating proxy.
 
 - schmeide does not create the App. This journey is manual.
 - The control node mints each job's token with contents: write,
-  pull_requests: write, issues: write, checks: read, administration: read, and
-  actions: read, limited to the job's repository (`internal/control/token.go`).
-  Administration: read lets the runner read branch protection before a
-  factory merge (JN-MERGE-010). Actions: read lets it read a failed check's
-  log for a CI fix round (JN-MERGE-006).
+  pull_requests: write, issues: write, checks: read, administration: read,
+  actions: read, workflows: write, and merge_queues: write, limited to the
+  job's repository (`internal/control/token.go`). Administration: read lets
+  the runner read branch protection before a factory merge (JN-MERGE-010).
+  Actions: read lets it read a failed check's log for a CI fix round
+  (JN-MERGE-006). Workflows: write lets a push create or update a file under
+  `.github/workflows`. Merge queues: write lets the runner call
+  `enqueuePullRequest` when the base branch has a merge queue (JN-MERGE-003).
 - GitHub refuses a token that asks for a permission the App does not have, so
-  an App missing any of the six gets no job tokens (JN-FAIL-015). An existing
-  App that gains a permission needs the installation's owner to accept it.
+  an App missing any of the eight gets no job tokens (JN-FAIL-015). An
+  existing App that gains a permission needs the installation's owner to
+  accept it.
 - The token request is pinned by `TestTokenPerJob`.
 - A key that group or other can read stops the control node (JN-SETUP-008).
 - No automated test. Related: [../permissions.md](../permissions.md),

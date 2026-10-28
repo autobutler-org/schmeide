@@ -357,7 +357,7 @@ delay. A job pushed out of `SCHMEIDE_JOBS` by `MaxMsgs` while still unclaimed wo
 5. Calls `TokenMinter.Mint`, which signs an RS256 JWT (`iss` = App ID, `iat` one minute back, `exp` nine minutes
    ahead) and posts to `/app/installations/<installation_id>/access_tokens` with `repository_ids: [repo_id]` and
    permissions `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `administration: read`,
-   `actions: read`.
+   `actions: read`, `workflows: write`, `merge_queues: write`.
 
 The reply is a `TokenReply`, with `error` set instead of a token on any refusal. See
 [Credentials](credentials.md) for scope and lifetime.
