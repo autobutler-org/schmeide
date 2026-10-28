@@ -147,7 +147,7 @@ sequenceDiagram
     end
     loop poll check runs on head, backoff 1s to 30s, until check_wait
         R->>F: CheckRuns(sha)
-        alt all completed and success
+        alt all completed with success or skipped
             R->>F: QueuedPull(number) via GraphQL
             alt base branch has a merge queue
                 R->>F: EnqueuePull(node id) via GraphQL

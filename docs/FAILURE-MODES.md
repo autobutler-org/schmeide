@@ -377,7 +377,8 @@ After review passes:
 - With `automate.merge = "on"`, the runner waits for the head commit's check runs
   to succeed, then merges with a merge commit. The wait is `check_wait` from the
   repo config, default two minutes, read with backoff from one second up to
-  30 seconds. No check runs is not green. A stacked pull request first waits
+  30 seconds. A completed check whose conclusion is `skipped` counts as success.
+  A conclusion of `failure`, `cancelled`, `timed_out`, or empty does not. No check runs is not green. A stacked pull request first waits
   for the one below it to merge, rebasing onto that branch as it moves, then
   is retargeted to the default branch and rebased onto it; a bottom that does
   not merge in time, closes unmerged, or a rebase that conflicts leaves it open
