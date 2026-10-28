@@ -246,7 +246,8 @@ or `session_timeout = "-5m"`.
 
 - After the review passes, the runner waits up to 10 minutes for every check
   run on the pull request head to succeed before giving up (JN-MERGE-002,
-  JN-MERGE-004).
+  JN-MERGE-004). A completed check whose conclusion is `skipped` counts as
+  success (JN-MERGE-019).
 
 **Notes:**
 

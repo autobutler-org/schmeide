@@ -325,7 +325,10 @@ Only when `automate.merge = "on"` and review passed. `mergeWhenGreen` (`merge.go
 2. Reads branch protection on the base (`Forge.Protection`). Required approving reviews fail the job before the
    wait. A 404 or 403 reads as no protection.
 3. Polls check runs on the head with backoff from 1s doubling to 30s, the last poll landing on the end of
-   `check_wait` (default 2m). No check runs is pending, not green.
+   `check_wait` (default 2m). `judgeChecks` (`merge.go`) treats a completed run whose conclusion is `success`
+   or `skipped` as green. GitHub reports a path-filtered job, and a matrix job that did not run, as completed
+   with conclusion `skipped`. A completed conclusion of `failure`, `cancelled`, `timed_out`, or empty is red.
+   A run that has not completed stays pending. No check runs is pending, not green.
 4. The first red check, when a review round remains, runs `fixCheck`: one writer session with `ciFixBrief` and
    the last 4000 bytes of that check's Actions job log, the gate, and a push. The commit uses the review fix
    subject, so it counts as a round. Polling continues on the new head inside the same wait. A second red check

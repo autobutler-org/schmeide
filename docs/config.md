@@ -122,7 +122,10 @@ green.
 
 - `"off"` leaves the pull request for a person.
 - `"on"` has the runner merge it once every check run on the head commit
-  has succeeded (see `check_wait`). Before the wait, the job fails if the
+  has succeeded (see `check_wait`). A completed check whose conclusion is
+  `skipped` counts as success. A conclusion of `failure`, `cancelled`,
+  `timed_out`, or empty does not, and a run that has not completed stays
+  pending. Before the wait, the job fails if the
   base branch's protection, when the runner can read it, requires one or more
   approving reviews: the runner cannot supply that review, the pull request
   stays open, and nothing is merged or enqueued. A 404 or a 403 on the read

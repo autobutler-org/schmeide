@@ -1503,30 +1503,110 @@ func TestMissingConfigIsFinal(t *testing.T) {
 }
 
 func TestJudgeChecks(t *testing.T) {
-	if verdict, _ := judgeChecks([]ciwatch.Run{{Name: "test", Status: "completed", Conclusion: "success"}}); verdict != checksGreen {
-		t.Fatalf("one success = %v, want green", verdict)
+	tests := []struct {
+		name    string
+		runs    []ciwatch.Run
+		verdict checkVerdict
+		why     string
+	}{
+		{
+			name:    "one success",
+			runs:    []ciwatch.Run{{Name: "test", Status: "completed", Conclusion: "success"}},
+			verdict: checksGreen,
+		},
+		{
+			name:    "no runs",
+			verdict: checksPending,
+			why:     "no check runs",
+		},
+		{
+			name: "success and failure",
+			runs: []ciwatch.Run{
+				{Name: "test", Status: "completed", Conclusion: "success"},
+				{Name: "lint", Status: "completed", Conclusion: "failure"},
+			},
+			verdict: checksRed,
+			why:     "check run lint finished with failure",
+		},
+		{
+			name: "failure and a run still in progress",
+			runs: []ciwatch.Run{
+				{Name: "test", Status: "completed", Conclusion: "failure"},
+				{Name: "lint", Status: "in_progress"},
+			},
+			verdict: checksRed,
+			why:     "check run test finished with failure",
+		},
+		{
+			name:    "in progress",
+			runs:    []ciwatch.Run{{Name: "test", Status: "in_progress"}},
+			verdict: checksPending,
+			why:     "check run test is still in_progress",
+		},
+		{
+			name: "skipped counts as success",
+			runs: []ciwatch.Run{
+				{Name: "test-frontend", Status: "completed", Conclusion: "success"},
+				{Name: "build-android", Status: "completed", Conclusion: "skipped"},
+				{Name: "test-frontend (${{ matrix.name }})", Status: "completed", Conclusion: "skipped"},
+			},
+			verdict: checksGreen,
+		},
+		{
+			name:    "only skipped",
+			runs:    []ciwatch.Run{{Name: "build-linux", Status: "completed", Conclusion: "skipped"}},
+			verdict: checksGreen,
+		},
+		{
+			name: "skipped and a run still in progress",
+			runs: []ciwatch.Run{
+				{Name: "build-android", Status: "completed", Conclusion: "skipped"},
+				{Name: "lint", Status: "queued"},
+			},
+			verdict: checksPending,
+			why:     "check run lint is still queued",
+		},
+		{
+			name: "skipped and a failure",
+			runs: []ciwatch.Run{
+				{Name: "build-backend", Status: "completed", Conclusion: "skipped"},
+				{Name: "lint", Status: "completed", Conclusion: "failure"},
+			},
+			verdict: checksRed,
+			why:     "check run lint finished with failure",
+		},
+		{
+			name:    "cancelled",
+			runs:    []ciwatch.Run{{Name: "test", Status: "completed", Conclusion: "cancelled"}},
+			verdict: checksRed,
+			why:     "finished with cancelled",
+		},
+		{
+			name:    "timed out",
+			runs:    []ciwatch.Run{{Name: "test", Status: "completed", Conclusion: "timed_out"}},
+			verdict: checksRed,
+			why:     "finished with timed_out",
+		},
+		{
+			name:    "empty conclusion",
+			runs:    []ciwatch.Run{{Name: "test", Status: "completed"}},
+			verdict: checksRed,
+			why:     "finished with no conclusion",
+		},
 	}
-	verdict, why := judgeChecks(nil)
-	if verdict != checksPending || !strings.Contains(why, "no check runs") {
-		t.Fatalf("no runs = %v %q, want pending", verdict, why)
-	}
-	verdict, why = judgeChecks([]ciwatch.Run{
-		{Name: "test", Status: "completed", Conclusion: "success"},
-		{Name: "lint", Status: "completed", Conclusion: "failure"},
-	})
-	if verdict != checksRed || !strings.Contains(why, "failure") || !strings.Contains(why, "lint") {
-		t.Fatalf("mixed = %v %q, want the failure", verdict, why)
-	}
-	verdict, why = judgeChecks([]ciwatch.Run{
-		{Name: "test", Status: "completed", Conclusion: "failure"},
-		{Name: "lint", Status: "in_progress"},
-	})
-	if verdict != checksRed || !strings.Contains(why, "failure") {
-		t.Fatalf("failed plus pending = %v %q, want red without waiting", verdict, why)
-	}
-	verdict, _ = judgeChecks([]ciwatch.Run{{Name: "test", Status: "in_progress"}})
-	if verdict != checksPending {
-		t.Fatalf("in progress = %v, want pending", verdict)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			verdict, why := judgeChecks(tt.runs)
+			if verdict != tt.verdict {
+				t.Fatalf("judgeChecks() = %v %q, want %v", verdict, why, tt.verdict)
+			}
+			if tt.why != "" && !strings.Contains(why, tt.why) {
+				t.Fatalf("why = %q, want it to contain %q", why, tt.why)
+			}
+			if tt.verdict == checksGreen && why != "" {
+				t.Fatalf("green why = %q, want empty", why)
+			}
+		})
 	}
 }
 

@@ -25,7 +25,8 @@ as it was and fails the job, asking a person to rebase.
 ## check_wait
 
 An optional key in `.schmeide/config.toml` that sets how long a factory merge
-waits for every check run on the pull request head to succeed. It is a Go
+waits for every check run on the pull request head to succeed. A completed
+check whose conclusion is `skipped` counts as success. It is a Go
 duration and defaults to two minutes. The wait covers the fix round's new head.
 An unparseable or non-positive value is a config error. It only matters when
 `automate.merge = "on"`.
@@ -39,8 +40,11 @@ installation token for each job a runner asks for.
 ## factory merge
 
 The `automate.merge = "on"` setting in `.schmeide/config.toml`. After review passes,
-the runner waits `check_wait` for every check run on the head to succeed. The
-first red check runs one fix round when a review round remains, then polling
+the runner waits `check_wait` for every check run on the head to succeed. A
+completed check whose conclusion is `skipped` counts as success. A conclusion
+of `failure`, `cancelled`, `timed_out`, or empty does not, and a run that has
+not completed stays pending. The first red check runs one fix round when a
+review round remains, then polling
 continues on the new head inside the same wait. There is no second fix round.
 A check that is still red, or a wait that ends without success, leaves the pull
 request open. Green checks merge the pull request with a merge commit, or, when

@@ -51,8 +51,10 @@ branch has no merge queue and does not require approving reviews.
 - The runner reads check runs on the head commit after 1 second, then backs
   off, doubling the pause up to 30 seconds, with a last read at the end of
   the wait.
-- Once every check run has completed with `success`, the pull request is
-  merged with a merge commit (not squash, not rebase).
+- Once every check run has completed with `success`, or with `skipped`, the
+  pull request is merged with a merge commit (not squash, not rebase). A
+  `skipped` conclusion is a path-filtered job, or a matrix job that did not
+  run (JN-MERGE-019).
 - The issue gets: "schmeide merged the pull request after the review passed
   and CI succeeded: <url>". The job ends `merged`.
 
@@ -443,3 +445,36 @@ base conflicts.
 
 - A secret found after the rebase refuses the push the same way as JN-FAIL-007.
 - Covered by `TestMergeWhenGreenSaysWhenARestackConflicts`.
+
+---
+
+### JN-MERGE-019: A skipped check does not block the merge
+
+**Preconditions:** `merge = "on"`. The head commit's check runs include at
+least one that completed with conclusion `skipped`, and every run that is
+not `skipped` completed with `success`. GitHub reports a path-filtered job,
+and a matrix placeholder that did not run, that way. The name of a skipped
+run can be `build-android`, `build-backend`, `build-linux`, or
+`test-frontend (${{ matrix.name }})`.
+
+**Steps:**
+
+1. Assign and label an issue. The review passes.
+
+**Expected result:**
+
+- `judgeChecks` in `internal/runner/merge.go` treats `skipped` as green. The
+  pull request merges as in JN-MERGE-002, or is added to the merge queue as
+  in JN-MERGE-003.
+- The issue comment does not say "finished with skipped, so CI is not green".
+
+**Notes:**
+
+- A run that is still queued or in progress stays pending, even when another
+  run is `skipped`.
+- A completed conclusion of `failure`, `cancelled`, `timed_out`, or empty is
+  still red, and that run is the one named, even when an earlier run was
+  `skipped`.
+- A list of only `skipped` runs is green. An empty list is still not green
+  (JN-MERGE-004).
+- Covered by `TestJudgeChecks`.

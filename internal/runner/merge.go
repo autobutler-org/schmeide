@@ -92,8 +92,11 @@ const (
 
 // judgeChecks reports whether the head commit's check runs are green. No
 // check runs is not green: that stays pending until the wait ends. A
-// completed run whose conclusion is not success is red. A run that has not
-// completed stays pending so a later poll can see it finish.
+// completed run whose conclusion is success or skipped counts as green.
+// GitHub reports a path-filtered job, and a matrix job that did not run, as
+// completed with conclusion skipped. Any other completed conclusion is red,
+// including failure, cancelled, timed_out, and an empty conclusion. A run
+// that has not completed stays pending so a later poll can see it finish.
 func judgeChecks(runs []ciwatch.Run) (checkVerdict, string) {
 	if len(runs) == 0 {
 		return checksPending, "the head commit has no check runs, so CI is not green"
@@ -110,7 +113,7 @@ func judgeChecks(runs []ciwatch.Run) (checkVerdict, string) {
 			}
 			continue
 		}
-		if run.Conclusion != "success" {
+		if run.Conclusion != "success" && run.Conclusion != "skipped" {
 			conclusion := run.Conclusion
 			if conclusion == "" {
 				conclusion = "no conclusion"
