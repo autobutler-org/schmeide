@@ -244,17 +244,16 @@ or `session_timeout = "-5m"`.
 
 **Expected result:**
 
-- After the review passes, the runner waits up to 10 minutes for every check
-  run on the pull request head to succeed before giving up (JN-MERGE-002,
+- `check_wait` is how long a stacked pull request waits for the one below it
+  (JN-MERGE-016). It does not end the wait for this pull request's own check
+  runs. That wait runs until the pull request has merged (JN-MERGE-002,
   JN-MERGE-004). A completed check whose conclusion is `skipped` counts as
   success (JN-MERGE-019).
 
 **Notes:**
 
 - Absent or empty means `2m`. The key has no effect with merge off.
-- A stacked pull request also uses it as the wait for the pull request below
-  to merge (JN-MERGE-016).
-- Covered by `TestCheckWait` and `TestMergeWhenGreenSaysHowLongItWaited`.
+- Covered by `TestCheckWait` and `TestMergeWhenGreenStaysWhileChecksArePending`.
 
 ---
 

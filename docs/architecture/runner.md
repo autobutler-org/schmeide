@@ -84,8 +84,8 @@ stateDiagram-v2
     Fix --> GateFailed: fix gate fails
     Review --> Done: pass, merge off
     Review --> Merge: pass, merge on
-    Merge --> Done: merged or queued
-    Merge --> MergeFailed: protection, red checks, wait ran out, stack
+    Merge --> Done: pull request merged
+    Merge --> MergeFailed: protection, stack, fix round failed, queue read or enqueue failed
     Failed --> HandBack: attempts below --max-attempts
     HandBack --> [*]
     Failed --> [*]: comment, report, ack
@@ -154,8 +154,10 @@ is the latest on the subject and carries no `attempts`. A
 `map[string]int` in the process is the fallback when the status stream cannot be read.
 
 Hand-backs that do not count: a failed token request, a shutdown (the parent context is canceled, so the job is
-`Nak`ed at once), and the stuck watchdog. `gate_failed`, `review_failed`, `merge_failed`, `pr_opened`, `merged`,
-and `queued` are never retried.
+`Nak`ed at once), and the stuck watchdog. `gate_failed`, `review_failed`, `merge_failed`, `pr_opened`, and
+`merged` are never retried. The runner does not report `queued`. An older status with that state is still
+final. A merge wait that runs longer than `--stuck-after` with no `report` is handed back, and the next
+delivery resumes the open pull request and waits again.
 
 ### Heartbeat and the stuck watchdog
 
@@ -324,20 +326,28 @@ Only when `automate.merge = "on"` and review passed. `mergeWhenGreen` (`merge.go
    the default branch.
 2. Reads branch protection on the base (`Forge.Protection`). Required approving reviews fail the job before the
    wait. A 404 or 403 reads as no protection.
-3. Polls check runs on the head with backoff from 1s doubling to 30s, the last poll landing on the end of
-   `check_wait` (default 2m). `judgeChecks` (`merge.go`) treats a completed run whose conclusion is `success`
-   or `skipped` as green. GitHub reports a path-filtered job, and a matrix job that did not run, as completed
-   with conclusion `skipped`. A completed conclusion of `failure`, `cancelled`, `timed_out`, or empty is red.
-   A run that has not completed stays pending. No check runs is pending, not green.
+3. Polls check runs on the head with backoff from 1s doubling to 30s until the pull request has merged.
+   `check_wait` does not end this poll. Each pass calls `IssuePull(issue, "all")`. A `merged_at` finishes the
+   job. A pull request that has closed with no `merged_at` is `merge_failed` with "the pull request closed
+   without merging, so schmeide stopped waiting". `judgeChecks` (`merge.go`) treats a completed run whose
+   conclusion is `success` or `skipped` as green. GitHub reports a path-filtered job, and a matrix job that did
+   not run, as completed with conclusion `skipped`. A completed conclusion of `failure`, `cancelled`,
+   `timed_out`, or empty is red. A run that has not completed stays pending. No check runs is pending, not
+   green. Neither a pending list nor a red list finishes the job.
 4. The first red check, when a review round remains, runs `fixCheck`: one writer session with `ciFixBrief` and
    the last 4000 bytes of that check's Actions job log, the gate, and a push. The commit uses the review fix
-   subject, so it counts as a round. Polling continues on the new head inside the same wait. A second red check
-   fails the job.
-5. Green: `QueuedPull` asks GraphQL whether the base branch has a merge queue. If so `EnqueuePull` and the job
-   ends `queued`. Otherwise `MergePull` with `merge_method: merge` and the job ends `merged`.
+   subject, so it counts as a round. `ciwatch.NeedsTail` does not pick a `skipped` run. Polling continues on
+   the new head. There is no second fix round. A fix round that itself fails is `merge_failed`. A check that
+   is still red is not: the next poll tries again.
+5. Green: `QueuedPull` asks GraphQL whether the base branch has a merge queue. If so `EnqueuePull` once, and
+   the job stays in this loop until `merged_at` is set. The comment then says the merge queue merged it, and
+   the state is `merged`. The runner does not report `queued`. Otherwise `MergePull` with `merge_method: merge`.
+   A refusal from GitHub does not finish the job; the next poll tries the merge again. Success ends `merged`.
 
-Every failure is `merge_failed`, final, and leaves the PR open. Failures after green checks start with "CI is
-green, but".
+A returned failure is `merge_failed`, final, and leaves the PR open: required approving reviews, a stack that
+cannot move, a fix round that fails, a check-run read that fails, or a merge queue that cannot be read or
+written. Failures after green checks start with "CI is green, but". A red check, an empty check list, and a
+merge GitHub refuses are not in that list.
 
 ## What gets commented on the issue
 
@@ -351,8 +361,8 @@ green, but".
 | Review passed | "schmeide opened a pull request for this issue:" plus the URL and "The review passed." | `pr_opened` |
 | Review requested changes, `review_fix` off | "left the pull request open for a person because ..." | `review_failed` |
 | Rounds exhausted, or a post-PR error | "schmeide failed this job ... and left the pull request open" | `review_failed` |
-| Merged | "schmeide merged the pull request after the review passed and CI succeeded" | `merged` |
-| Enqueued | "schmeide added the pull request to the merge queue ..." | `queued` |
+| Merged by `MergePull` | "schmeide merged the pull request after the review passed and CI succeeded" | `merged` |
+| Merged by the queue | "the merge queue merged the pull request after the review passed and CI succeeded" | `merged` |
 | Merge did not land | "schmeide failed this job and left the pull request open:" plus the reason | `merge_failed` |
 
 Every outcome comment ends with `<!-- schmeide:outcome <state> -->`. No comment is posted for a hand-back, a

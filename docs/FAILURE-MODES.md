@@ -374,15 +374,18 @@ After review passes:
 
 - With `automate.merge` absent, empty, or `"off"`, the runner leaves the pull request
   open. A person merges it.
-- With `automate.merge = "on"`, the runner waits for the head commit's check runs
-  to succeed, then merges with a merge commit. The wait is `check_wait` from the
-  repo config, default two minutes, read with backoff from one second up to
-  30 seconds. A completed check whose conclusion is `skipped` counts as success.
-  A conclusion of `failure`, `cancelled`, `timed_out`, or empty does not. No check runs is not green. A stacked pull request first waits
-  for the one below it to merge, rebasing onto that branch as it moves, then
-  is retargeted to the default branch and rebased onto it; a bottom that does
-  not merge in time, closes unmerged, or a rebase that conflicts leaves it open
-  with a comment saying which.
+- With `automate.merge = "on"`, the runner keeps reading the head commit's
+  check runs, with backoff from one second up to 30 seconds, until the pull
+  request has merged. `check_wait` does not end that wait. A completed check
+  whose conclusion is `skipped` counts as success. A conclusion of `failure`,
+  `cancelled`, `timed_out`, or empty does not. No check runs is not green.
+  A red check, an empty list, and a merge GitHub refuses leave the job in
+  progress and the pull request open. A stacked pull request first waits
+  for the one below it to merge, for up to `check_wait`, rebasing onto that
+  branch as it moves, then is retargeted to the default branch and rebased
+  onto it; a bottom that does not merge in time, closes unmerged, or a rebase
+  that conflicts leaves it open with a comment saying which. The job then
+  waits for this pull request to merge the same way.
 - Before the wait, the runner reads branch protection on the base branch. If
   it can read it and the branch requires one or more approving reviews, the
   job fails, the comment names that requirement, the pull request stays open,
@@ -392,12 +395,13 @@ After review passes:
   A canceled wait is not that case. Required status checks are not this
   failure. Human merge skips the check.
 - When the base branch has a merge queue, green checks add the pull request to
-  the queue instead of merging it. The job is reported queued.
-- The first red check during the wait runs one writer fix round, when a review
-  round remains. The round counts against `--max-review-rounds`. Polling then
-  continues on the new head inside the same wait. There is no second fix round.
-- A check that is still red, or a wait that ends without success, comments on
-  the issue and leaves the pull request open. That failure is final.
+  the queue instead of merging it. The job stays in progress until the queue
+  merges it, then reports `merged`. It is not reported `queued`.
+- The first red check runs one writer fix round, when a review round remains.
+  The round counts against `--max-review-rounds`. Polling then continues on
+  the new head. There is no second fix round. A fix round that itself fails
+  comments on the issue and leaves the pull request open. That failure is
+  final. A check that is still red does not.
 
 ## Not built
 

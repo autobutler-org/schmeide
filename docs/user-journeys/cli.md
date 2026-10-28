@@ -222,7 +222,10 @@ progress.
 **Notes:**
 
 - Jobs whose latest state is final (`pr_opened`, `gate_failed`, `failed`,
-  `review_failed`, `merged`, `queued`, `merge_failed`) are not listed.
+  `review_failed`, `merged`, `queued`, `merge_failed`) are not listed. The
+  runner does not report `queued`; a factory merge stays `reviewing` until
+  the pull request has merged (JN-MERGE-003). A recorded `queued` state, from
+  an older runner, is still hidden.
 - A job no runner has claimed yet is listed as `pending` (JN-CLI-016).
 - A steward sees only their own runners and their own jobs. A steward with a
   live `--pool` runner also sees pool jobs. Other stewards' runners, hosts,

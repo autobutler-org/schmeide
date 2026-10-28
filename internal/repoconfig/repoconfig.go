@@ -72,8 +72,10 @@ type Config struct {
 	Gate string `toml:"gate"`
 	// Automate is the [automate] table. Every switch defaults to off.
 	Automate Automate `toml:"-"`
-	// CheckWait is how long factory merge waits for the head commit's check
-	// runs. Parse sets it to [DefaultCheckWait] when the key is absent.
+	// CheckWait is how long a stacked pull request waits for the one below it
+	// to merge. It does not end the wait for this pull request's own checks:
+	// that wait runs until the pull request merges. Parse sets it to
+	// [DefaultCheckWait] when the key is absent.
 	CheckWait time.Duration `toml:"-"`
 	// GateTimeout is how long one gate command may run. Parse sets it to
 	// [DefaultGateTimeout] when gate_timeout is absent or empty. A runner
@@ -91,10 +93,13 @@ type Config struct {
 
 // Automate holds the [automate] switches. A true field is "on".
 type Automate struct {
-	// Merge has the runner merge a pull request once review has passed and
-	// every check run on the head commit has succeeded. It covers the one
-	// writer fix round for a red check and restacking stacked pull requests.
-	// Off leaves the pull request for a person.
+	// Merge has the runner merge a pull request once review has passed, and
+	// keep that job in progress until the pull request has merged. A
+	// completed check whose conclusion is skipped counts as success. A red
+	// check, an empty check list, and a merge GitHub refuses do not finish
+	// the job. It covers the one writer fix round for a red check and
+	// restacking stacked pull requests. Off leaves the pull request for a
+	// person.
 	Merge bool
 	// ReviewFix gives the writer fix rounds for review findings. Off still
 	// runs the reviewer, and a review that does not pass leaves the pull

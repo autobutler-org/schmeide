@@ -107,7 +107,7 @@ flowchart LR
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
 | 8 | An AI reviewer checks the PR. With `automate.review_fix = "on"`, the worker fixes what the reviewer finds until the review passes or the round limit is reached. Off, a request for changes leaves the PR open for a person. | Done |
-| 9 | After review passes, `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` merges with a merge commit only when every check run on the head has succeeded within `check_wait` (default two minutes). A completed check whose conclusion is `skipped` counts as success. When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. | Done |
+| 9 | After review passes, `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` keeps the job in progress until the pull request has merged. It merges with a merge commit once every check run on the head has completed with `success` or `skipped`. `check_wait` (default two minutes) bounds only the wait for the pull request below a stack. When the base branch has a merge queue, green checks add the pull request to the queue, and the job stays in progress until the queue merges it, then reports `merged`. It is not reported `queued`. No check runs is not green, and the job keeps polling. The first failed check runs one writer fix round, when a review round remains, and polling goes on at the new head. A check that is still red, an empty list, and a merge GitHub refuses do not finish the job. A fix round that itself fails comments on the issue, leaves the pull request open, and is not retried. | Done |
 
 Steps 1 to 3 and 5 to 7 shipped in the first slice (#3, #6, and the follow-ups
 under [First slice](#first-slice)). Step 8, the AI review stage, has shipped.
@@ -184,15 +184,19 @@ open.
 
 Each repo chooses in `.schmeide/config.toml` who merges a pull request after
 review has passed. The `automate.merge` switch is optional. Absent, empty, and
-`"off"` leave the pull request for a person. `"on"` merges with a merge commit
-after review only when every check run on the head has succeeded within
+`"off"` leave the pull request for a person. `"on"` keeps the job in progress
+until the pull request has merged. It merges with a merge commit after review
+once every check run on the head has completed with `success` or `skipped`.
 `check_wait`, an optional Go duration in the same config file (default two
-minutes). A completed check whose conclusion is `skipped` counts as success.
-A conclusion of `failure`, `cancelled`, `timed_out`, or empty does not, and a
-run that has not completed stays pending. No check runs is not green. When the base branch has a merge queue,
-green checks add the pull request to the queue instead of merging it, and the
-job is reported queued. Check runs are read with backoff, from one second
-doubling to 30 seconds, and once more at the end of the wait.
+minutes), bounds only the wait for the pull request below a stack. It does
+not end this pull request's own wait. A conclusion of `failure`, `cancelled`,
+`timed_out`, or empty does not count as success, and a run that has not
+completed stays pending. No check runs is not green. None of those finish the
+job. When the base branch has a merge queue, green checks add the pull
+request to the queue instead of merging it. The job stays in progress until
+the queue merges it, then reports `merged`. It is not reported `queued`.
+Check runs are read with backoff, from one second doubling to 30 seconds,
+and the runner keeps reading.
 
 A factory merge of a stacked pull request, one whose base is another schmeide
 pull request's branch, goes bottom first. Before the check wait, the runner
@@ -204,7 +208,8 @@ below has merged, which the runner tells by the base it last built on, or the
 latest head of the pull request below (`refs/pull/<n>/head`, else its branch),
 being in the default branch, it retargets the pull request to the default branch, unless
 GitHub already did on deleting the merged branch, and rebases it onto the
-default branch. The check wait then runs on the rebased head. A bottom that
+default branch. The check wait then runs on the rebased head until this pull
+request has merged. A bottom that
 does not merge in time, one that closes without merging, or a rebase that
 conflicts fails the job, and the comment says which; a person can retarget or
 rebase the pull request. Retargeting uses the pulls API's base update from the
@@ -217,10 +222,11 @@ Before a factory merge, and before the wait, the runner reads branch protection 
 The first failed check during the wait runs one writer fix round, when a
 review round remains. The round counts against `--max-review-rounds`. The
 runner gives the session the end of that check's log, runs the gate, pushes the
-same branch, and keeps polling on the new head inside the same wait. There is
-no second fix round. If the check is still red, or the wait ends without
-success, the runner comments on the issue and leaves the pull request open.
-That failure is final and is not retried. The runner reads `[automate]` with the gate, before the harness
+same branch, and keeps polling on the new head. There is
+no second fix round. A check that is still red, and a merge GitHub refuses,
+do not finish the job. The runner keeps polling until the pull request has
+merged. A fix round that itself fails comments on the issue and leaves the
+pull request open. That failure is final and is not retried. The runner reads `[automate]` with the gate, before the harness
 session, so the session cannot turn factory merge on for itself
 (`internal/repoconfig`, `internal/runner/merge.go`).
 
@@ -448,7 +454,7 @@ Not in the first slice, and not shipped:
 | What a harness session may see | The base list in `internal/runner/env.go`, plus `ANTHROPIC_*`, `CLAUDE_*`, and `XAI_*` kept from the runner's own environment so an existing login still works, plus `--pass-env`. schmeide does not mint or store agent keys. Not the runner's `SCHMEIDE_*` settings. | `internal/runner/env.go`, `internal/runner/runner.go` |
 | What the gate may see (#111) | The base list plus `--gate-pass-env`, never a `SCHMEIDE_*` name, with `HOME` and `TMPDIR` at a per-job scratch directory that closing the worktree removes. It no longer inherits the runner process environment. | `internal/runner/env.go`, `internal/runner/workspace.go` |
 | Pool opt-in (#31) | `--pool` defaults off. A runner that sets it registers as a pool runner. When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | `internal/runner/cli.go`, `internal/control/queue.go`, `internal/runner/runner.go` |
-| Merge default (#32, #197) | `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` merges with a merge commit after review only when every check run on the head has succeeded within `check_wait` (default two minutes). A completed check whose conclusion is `skipped` counts as success; `failure`, `cancelled`, `timed_out`, an empty conclusion, and a run that has not completed do not. When the base branch has a merge queue, green checks add the pull request to the queue instead, and the job is reported queued. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green. The first failed check in that wait runs one writer fix round, when a review round remains, and polling goes on at the new head inside the same wait. Still red, or a wait that ends without success, comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff. A stacked pull request merges bottom first: it waits for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
+| Merge default (#32, #197, #259) | `automate.merge` absent, empty, or `"off"` leaves the pull request for a person. `"on"` keeps the job in progress until the pull request has merged. It merges with a merge commit after review once every check run on the head has completed with `success` or `skipped`. `failure`, `cancelled`, `timed_out`, an empty conclusion, and a run that has not completed do not count as success. `check_wait` (default two minutes) bounds only the wait for the pull request below a stack. When the base branch has a merge queue, green checks add the pull request to the queue, and the job stays in progress until the queue merges it, then reports `merged`. It is not reported `queued`. If branch protection on the base branch is readable and requires one or more approving reviews, the job fails before the wait, the pull request stays open, and nothing is merged or enqueued; a 404 or 403 on the read does not fail it, and any other read failure fails the job and leaves the pull request open. No check runs is not green, and the job keeps polling. The first failed check runs one writer fix round, when a review round remains, and polling goes on at the new head. A check that is still red, an empty list, and a merge GitHub refuses do not finish the job. A fix round that itself fails comments on the issue, leaves the pull request open, and is not retried. Checks are read with backoff from one second up to 30 seconds. A stacked pull request merges bottom first: it waits up to `check_wait` for the one below to merge, rebasing onto that branch as it moves, then is retargeted to the default branch and rebased onto it, and a failure after green checks says why it did not merge. | `internal/repoconfig`, `internal/runner/merge.go` |
 | Dependency declaration (#34) | Shipped (#58). The dependency is GitHub's issue-dependencies blocked-by list, not a key in `.schmeide/config.toml`. The worktree is created from the base branch, and the pull request opens against that same branch. No open blocker with an open pull request whose head branch starts with `<issue number>_` means the base is the repository default branch. The prefix is that blocker's issue number. A blocker that is not open, and an open blocker with no such pull request, do not count. Exactly one such open blocker selects that pull request's head branch as the base. Two or more such open blockers have to be one linear stack, and the top of it is the base (#94); blockers that are not one chain fail the job, and the runner comments that they are not one linear stack and does not open a pull request. | `internal/runner/github.go`, `internal/runner/runner.go` |
 | Second harness (#33) | Shell out to the Grok CLI, the same shape as the Claude Code adapter, with no new module dependency. `All()` offers Claude Code first and the Grok CLI second. The runner uses the first harness whose `Check` passes, so a working Claude Code is still selected. A missing or logged-out harness is skipped when another one is ready. Doctor fails the harness check only when every harness fails. `--claude-args` applies only to Claude Code. | `internal/harness`, `internal/doctor`, `internal/runner/cli.go`, `internal/runner/runner.go` |
 | Concurrent jobs (#44) | A runner stays on one job. Accepted as no change. Already how the code works. | The code is not updated in this change. Already how the runner works. |

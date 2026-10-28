@@ -145,29 +145,39 @@ sequenceDiagram
     alt required approving reviews above 0
         R-->>R: merge_failed, no wait
     end
-    loop poll check runs on head, backoff 1s to 30s, until check_wait
-        R->>F: CheckRuns(sha)
-        alt all completed with success or skipped
-            R->>F: QueuedPull(number) via GraphQL
-            alt base branch has a merge queue
-                R->>F: EnqueuePull(node id) via GraphQL
-                R-->>R: queued
-            else no merge queue
-                R->>F: MergePull(number), merge_method merge
-                R-->>R: merged
-            end
-        else first red check, a review round left
-            R->>F: JobLog(check run id), ciwatch.Tail
-            R->>X: Run(ciFixBrief with log tail)
-            R->>W: Commit "Apply review feedback for N", gate, Push
-            Note over R: poll again on the new head, same deadline
-        else red again, or no round left
+    loop until the pull request has merged, backoff 1s to 30s
+        R->>F: IssuePull(issue, all)
+        alt merged_at is set
+            R-->>R: merged
+        else closed with no merged_at
             R-->>R: merge_failed
-        else pending or no check runs
+        else still open, already enqueued
             Note over R: sleep, then poll again
+        else still open
+            R->>F: CheckRuns(sha)
+            alt all completed with success or skipped
+                R->>F: QueuedPull(number) via GraphQL
+                alt base branch has a merge queue
+                    R->>F: EnqueuePull(node id) via GraphQL
+                    Note over R: keep polling until merged_at is set
+                else no merge queue
+                    R->>F: MergePull(number), merge_method merge
+                    alt GitHub accepts
+                        R-->>R: merged
+                    else GitHub refuses
+                        Note over R: sleep, then try again
+                    end
+                end
+            else first red check, a review round left, no fix yet
+                R->>F: JobLog(check run id), ciwatch.Tail
+                R->>X: Run(ciFixBrief with log tail)
+                R->>W: Commit "Apply review feedback for N", gate, Push
+                Note over R: poll again on the new head
+            else red again, or no round left, or pending, or no check runs
+                Note over R: sleep, then poll again
+            end
         end
     end
-    Note over R: deadline reached without green: merge_failed
 ```
 
 ## d. A runner killed mid-job

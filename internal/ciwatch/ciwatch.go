@@ -16,15 +16,16 @@ type Run struct {
 	Conclusion string `json:"conclusion"`
 }
 
-// NeedsTail returns the first completed run that did not succeed, when no
-// fix round has run yet. A pull request gets one fix round, so after it
+// NeedsTail returns the first completed run that failed, when no fix round
+// has run yet. A conclusion of skipped is not a failure: GitHub reports a
+// path-filtered job that way. A pull request gets one fix round, so after it
 // (fixed) a failure needs no log.
 func NeedsTail(runs []Run, fixed bool) (Run, bool) {
 	if fixed {
 		return Run{}, false
 	}
 	for _, run := range runs {
-		if run.Status == "completed" && run.Conclusion != "success" {
+		if run.Status == "completed" && run.Conclusion != "success" && run.Conclusion != "skipped" {
 			return run, true
 		}
 	}

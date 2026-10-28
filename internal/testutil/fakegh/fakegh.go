@@ -382,6 +382,13 @@ func (s *Server) FailMerge(status int) {
 	s.mergeStatus = status
 }
 
+// AllowMerge lets a later merge call land after FailMerge.
+func (s *Server) AllowMerge() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mergeStatus = 0
+}
+
 // FailRevoke makes every DELETE /installation/token call return status, and
 // leaves the token usable.
 func (s *Server) FailRevoke(status int) {

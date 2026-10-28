@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/autobutler-org/schmeide/internal/ciwatch"
 	"github.com/autobutler-org/schmeide/internal/harness"
@@ -92,20 +93,36 @@ func TestCIFixRoundRunsOnce(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	if got, want := fmt.Sprint(w.await(t, "alice", 7)), "[claimed working reviewing merge_failed]"; got != want {
-		t.Errorf("states = %s, want %s", got, want)
+	deadline := time.Now().Add(5 * time.Second)
+	for fixes.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the CI fix round did not run")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if merges, _ := w.gh.Merges(); merges != 0 {
+		t.Fatalf("merges = %d, want none while the check stays red", merges)
+	}
+	if fixes.Load() != 1 {
+		t.Fatalf("CI fix sessions = %d, want exactly 1 before the check goes green", fixes.Load())
+	}
+	w.gh.SetChecks([]fakegh.CheckRun{{Name: "lint", Status: "completed", Conclusion: "success"}})
+
+	states := w.await(t, "alice", 7)
+	if got := states[len(states)-1]; got != StateMerged {
+		t.Errorf("states = %v, want merged last", states)
 	}
 	assertSettled(t, w)
 	if fixes.Load() != 1 {
 		t.Errorf("CI fix sessions = %d, want exactly 1", fixes.Load())
 	}
-	assertNoMerge(t, w)
-	pulls, comments := w.gh.Snapshot()
-	if len(pulls) != 1 || pulls[0].State != "open" {
-		t.Fatalf("pull requests = %+v, want the one pull request left open", pulls)
+	if merges, _ := w.gh.Merges(); merges != 1 {
+		t.Errorf("merges = %d, want 1", merges)
 	}
-	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "left the pull request open") || !strings.Contains(comments["7"][0], "failure") {
-		t.Errorf("issue comments = %q, want the failed check and the open pull request", comments["7"])
+	_, comments := w.gh.Snapshot()
+	if len(comments["7"]) != 1 || !strings.Contains(comments["7"][0], "schmeide merged the pull request") || strings.Contains(comments["7"][0], "left the pull request open") {
+		t.Errorf("issue comments = %q, want the merged pull request and no give-up", comments["7"])
 	}
 }
 
@@ -120,11 +137,23 @@ func TestCIFixSkippedWhenRoundsSpent(t *testing.T) {
 	w.start(t, "alice", h)
 	w.publish(t, "alice", 7)
 
-	states := w.await(t, "alice", 7)
-	if got := states[len(states)-1]; got != StateMergeFailed {
-		t.Errorf("states = %v, want merge_failed last", states)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("check runs were not read; calls %v", w.gh.Calls())
+		}
+		saw := false
+		for _, call := range w.gh.Calls() {
+			if strings.Contains(call, "check-runs") {
+				saw = true
+			}
+		}
+		if saw {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	assertSettled(t, w)
+	time.Sleep(20 * time.Millisecond)
 	if fixes.Load() != 0 {
 		t.Errorf("CI fix sessions = %d, want none once the rounds are spent", fixes.Load())
 	}
@@ -133,7 +162,17 @@ func TestCIFixSkippedWhenRoundsSpent(t *testing.T) {
 			t.Errorf("log read with no round left: %s", call)
 		}
 	}
-	if pulls, _ := w.gh.Snapshot(); len(pulls) != 1 || pulls[0].State != "open" {
-		t.Errorf("pull requests = %+v, want the one pull request left open", pulls)
+	if merges, _ := w.gh.Merges(); merges != 0 {
+		t.Fatalf("merges = %d, want none while the check stays red", merges)
+	}
+	w.gh.SetChecks([]fakegh.CheckRun{{Name: "lint", Status: "completed", Conclusion: "success"}})
+
+	states := w.await(t, "alice", 7)
+	if got := states[len(states)-1]; got != StateMerged {
+		t.Errorf("states = %v, want merged last", states)
+	}
+	assertSettled(t, w)
+	if fixes.Load() != 0 {
+		t.Errorf("CI fix sessions = %d, want none once the rounds are spent", fixes.Load())
 	}
 }
