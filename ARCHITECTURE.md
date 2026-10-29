@@ -74,6 +74,7 @@ flowchart LR
 | [Control node](docs/architecture/control-node.md)           | webhook intake, embedded NATS, streams, subjects, consumers, token minting |
 | [Runner](docs/architecture/runner.md)                       | job pipeline, worktrees, harness sessions, gate, review, merge           |
 | [Job flows](docs/architecture/job-flows.md)                 | sequence diagrams: issue to PR, review, merge, redelivery, pool, retries |
+| [Dashboard](docs/architecture/dashboard.md)                 | `schmeide dashboard`: a steward's live page and its read-only ask panel  |
 | [Data](docs/architecture/data.md)                           | every persistent store, its owner, and its lifetime                      |
 | [Credentials](docs/architecture/credentials.md)             | tokens, secrets, session environment, trust boundaries                   |
 | [Build and tooling](docs/architecture/tooling.md)           | commands, Makefile, lint, CI, release, e2e journeys                      |

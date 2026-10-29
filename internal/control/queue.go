@@ -400,7 +400,7 @@ func (q *Queue) publishPending(ctx context.Context, job Job) uint64 {
 	if q.tracker == nil {
 		return 0
 	}
-	data, _ := json.Marshal(Status{State: StatePending})
+	data, _ := json.Marshal(Status{State: StatePending, Repo: job.Repo, Title: job.Title})
 	ack, err := q.js.Publish(ctx, StatusSubjectPrefix+strings.TrimPrefix(job.Subject(), jobSubjectPrefix), data)
 	if err != nil {
 		q.tracker.log.Warn("could not record the job as pending; schmeide status will not list it until a runner claims it",

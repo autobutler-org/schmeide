@@ -47,7 +47,7 @@ journey's number is not reused.
 | [merge.md](merge.md) (`JN-MERGE`) | Factory merge: the job waits until the pull request is merged, a skipped check counts as success, merge queue, CI fix round, branch protection, stacks |
 | [failures.md](failures.md) (`JN-FAIL`) | Retries, timeouts, silent sessions, secret scan, token revocation, heartbeats, redelivery, stuck jobs, branch guards, a runner in a terminal, token refresh, gate environment failures, the permission floor blocking commands |
 | [pool.md](pool.md) (`JN-POOL`) | Pool runners and jobs whose steward has no registered runner |
-| [cli.md](cli.md) (`JN-CLI`) | `schmeide` commands, help, environment variables, `status`, `version`, `init`, `completion` |
+| [cli.md](cli.md) (`JN-CLI`) | `schmeide` commands, help, environment variables, `status`, `dashboard` and its ask panel, `version`, `init`, `completion` |
 | [operations.md](operations.md) (`JN-OPS`) | Running the control node container, NATS TLS, restarts, version skew, logs |
 
 ## Conventions

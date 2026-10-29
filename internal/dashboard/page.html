@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>schmeide dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ground: #121317; --bar: #17181D; --panel: #1A1B21; --well: #15161B; --chip: #1F2027;
+  --line: #2A2C33; --line-soft: #23252C; --edge: #343741;
+  --text: #ECEAE4; --strong: #F4F2EC; --body: #D6D4CE; --soft: #C9C8C2; --muted: #9C9C97;
+  --accent: #F08A3C; --accent-ink: #1A1206;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); color: var(--text); font: 14px/1.45 'IBM Plex Sans', system-ui, sans-serif; }
+a { color: #F2A262; } a:hover { color: #FFC48F; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px 28px; border-bottom: 1px solid var(--line); background: var(--bar); }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand b { font-family: var(--mono); font-weight: 600; font-size: 16px; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; font-family: var(--mono); font-size: 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: #22242B; color: #B9B8B2; }
+.pill.ok { background: #1B2A20; color: #8FD39C; }
+.pill.bad { background: #3D1F1E; color: #F5948A; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.grow { flex: 1 1 0; }
+
+.wrap { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
+main { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.panel h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+.kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.kpi .value { font-family: var(--mono); font-size: 30px; font-weight: 500; color: var(--strong); }
+.kpi .sub { color: var(--muted); font-size: 12px; }
+
+.scroll { overflow-x: auto; }
+.lanes { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 8px; min-width: 820px; }
+.lane { background: var(--well); border: 1px solid #262830; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 132px; }
+.lane-head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--soft); }
+.bar { height: 3px; border-radius: 2px; }
+.chipjob { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 44px; text-align: left; padding: 8px; border-radius: 6px; background: var(--chip); border: 1px solid #2E3038; color: inherit; }
+.chipjob[aria-pressed="true"] { border-color: var(--accent); }
+.chipjob .t { font-size: 12px; color: #B9B8B2; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.empty { color: var(--muted); font-size: 12px; }
+
+.filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.filters button { min-height: 32px; padding: 0 12px; border-radius: 6px; font-size: 12px; border: 1px solid var(--edge); background: transparent; color: #B9B8B2; }
+.filters button[aria-pressed="true"] { border-color: var(--accent); background: #2A1F16; color: var(--strong); }
+table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+td { padding: 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #1E1F26; }
+tbody tr[aria-selected="true"] { background: #22232B; box-shadow: inset 3px 0 0 var(--accent); }
+td .repo { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+td.small { font-family: var(--mono); font-size: 12px; color: var(--soft); white-space: nowrap; }
+td.detail { font-size: 12px; color: #B9B8B2; overflow-wrap: anywhere; }
+.state { display: inline-block; font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
+.selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; background: #20212A; border: 1px solid var(--edge); border-radius: 8px; font-size: 12px; color: var(--soft); }
+.btn-outline { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--accent); background: transparent; color: var(--strong); font-size: 13px; }
+
+.row2 { display: flex; flex-wrap: wrap; gap: 24px; }
+.row2 > .panel { flex: 1 1 320px; }
+.runner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 12px; background: var(--well); border: 1px solid #262830; border-radius: 8px; }
+.runner .host { font-family: var(--mono); font-size: 13px; color: var(--strong); }
+.runner .meta { font-family: var(--mono); font-size: 12px; color: var(--soft); }
+.runner .skew { color: #F2C46A; }
+.event { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); font-size: 13px; color: var(--body); }
+.event time { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.activity { max-height: 420px; overflow-y: auto; }
+.note { margin: 0; font-size: 12px; color: var(--muted); }
+
+aside { flex: 1 1 380px; max-width: 100%; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-height: 640px; }
+.ask-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.ask-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.messages { flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px; padding: 16px; overflow-y: auto; max-height: 70vh; }
+.msg { display: flex; flex-direction: column; gap: 6px; }
+.msg.user { align-items: flex-end; }
+.msg.user .bubble { max-width: 85%; padding: 9px 12px; border-radius: 10px 10px 2px 10px; background: #2A2C35; color: var(--strong); font-size: 13px; white-space: pre-wrap; }
+.msg.assistant .bubble { max-width: 95%; color: #E2E0DA; font-size: 13px; white-space: pre-wrap; }
+.msg.pending .bubble { color: var(--muted); font-style: italic; }
+.msg.error .bubble { color: #F5948A; }
+.suggest { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+.suggest button { min-height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--edge); background: #20212A; color: var(--body); font-size: 12px; }
+form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+form input { flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--edge); background: var(--ground); color: var(--strong); font-size: 14px; }
+form input::placeholder { color: #8C8C88; }
+form button { min-width: 44px; min-height: 44px; border-radius: 8px; border: none; background: var(--accent); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; }
+form button:disabled { opacity: .5; cursor: progress; }
+.ask-foot { margin: 0; padding: 0 16px 14px; font-size: 12px; color: var(--muted); }
+@media (max-width: 640px) { header, .wrap { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F08A3C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h12l-2 4H6z"/><path d="M16 9h3a1 1 0 0 1 0 2h-4"/><path d="M9 13v4"/><path d="M6 20h9"/><path d="M12 3v3"/><path d="M8 4l1 2"/><path d="M16 4l-1 2"/></svg>
+    <b>schmeide</b><span class="muted">dashboard</span>
+  </div>
+  <div class="pills">
+    <span id="conn" class="pill"><span class="dot"></span><span>connecting</span></span>
+    <span id="steward" class="pill"></span>
+    <span id="version" class="pill"></span>
+  </div>
+  <div class="grow"></div>
+  <span id="updated" class="muted" style="font-size:12px"></span>
+</header>
+
+<div class="wrap">
+  <main>
+    <section class="kpis" aria-label="Totals" id="kpis"></section>
+
+    <section class="panel" aria-labelledby="line-h">
+      <div class="head">
+        <h2 id="line-h">Line</h2>
+        <span class="muted" style="font-size:12px">jobs by state, finished ones from the last 24 hours</span>
+      </div>
+      <div class="scroll"><div class="lanes" id="lanes"></div></div>
+    </section>
+
+    <section class="panel" aria-labelledby="jobs-h">
+      <div class="head">
+        <h2 id="jobs-h">Jobs</h2>
+        <div class="filters" role="group" aria-label="Filter jobs" id="filters"></div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Issue</th><th>State</th><th>For</th><th>Detail</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="rows-empty" hidden>No jobs here.</p>
+      <div class="selbar" id="selbar" hidden></div>
+    </section>
+
+    <div class="row2">
+      <section class="panel" aria-labelledby="run-h">
+        <h2 id="run-h">Runners</h2>
+        <div id="runners" style="display:flex;flex-direction:column;gap:10px"></div>
+        <p class="note">A runner drops off this list three minutes after its last registration.</p>
+      </section>
+      <section class="panel" aria-labelledby="act-h" style="gap:4px">
+        <h2 id="act-h" style="margin-bottom:6px">Activity</h2>
+        <div class="activity" id="activity"></div>
+        <p class="note">States this page has seen since it started, at the time the control node stored them.</p>
+      </section>
+    </div>
+  </main>
+
+  <aside aria-labelledby="ask-h">
+    <div class="ask-head">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F08A3C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+      <h2 id="ask-h">Ask the factory</h2>
+      <div class="grow"></div>
+      <span id="model" class="pill mono"></span>
+    </div>
+    <div class="messages" id="messages" aria-live="polite"></div>
+    <div class="suggest" id="suggest"></div>
+    <form id="ask-form">
+      <label for="ask" class="sr">Ask a question about the factory</label>
+      <input id="ask" type="text" autocomplete="off" maxlength="2000" placeholder="Is anything stuck?">
+      <button type="submit" id="send" aria-label="Send">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+      </button>
+    </form>
+    <p class="ask-foot">Read-only. It sees what this page shows. It cannot run commands, requeue, close, or merge.</p>
+  </aside>
+</div>
+
+<script>
+'use strict';
+const STATE_COLORS = {
+  pending: ['#2A2B31', '#C9C8C2'], claimed: ['#1D2A3D', '#8DBBF4'], working: ['#1D2A3D', '#8DBBF4'],
+  retrying: ['#3A2617', '#F2A262'], reviewing: ['#3A2E17', '#F2C46A'],
+  pr_opened: ['#16302F', '#7FD4D4'], merged: ['#1B2A20', '#8FD39C'], queued: ['#16302F', '#7FD4D4'],
+  gate_failed: ['#3D1F1E', '#F5948A'], failed: ['#3D1F1E', '#F5948A'], review_failed: ['#3D1F1E', '#F5948A'], merge_failed: ['#3D1F1E', '#F5948A'],
+};
+const LANES = [
+  { name: 'pending', color: '#6E6E6A', states: ['pending'] },
+  { name: 'working', color: '#6CA8F0', states: ['claimed', 'working'] },
+  { name: 'retrying', color: '#F08A3C', states: ['retrying'] },
+  { name: 'reviewing', color: '#E8B04A', states: ['reviewing'] },
+  { name: 'opened · merged', color: '#8FD39C', states: ['pr_opened', 'merged', 'queued'] },
+  { name: 'failed', color: '#E8746A', states: ['gate_failed', 'failed', 'review_failed', 'merge_failed'] },
+];
+const FAILED = new Set(LANES[5].states);
+const FILTERS = [['active', 'Active'], ['problems', 'Needs a look'], ['finished', 'Finished'], ['all', 'All']];
+
+let view = null;
+let selected = null;
+let filter = 'active';
+const history = [];
+let asking = false;
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'style') el.style.cssText = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+function ago(iso) {
+  if (!iso) return '';
+  let s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return s + 's';
+  let m = Math.floor(s / 60); s %= 60;
+  if (m < 60) return m + 'm' + String(s).padStart(2, '0') + 's';
+  const hr = Math.floor(m / 60); m %= 60;
+  return hr + 'h' + String(m).padStart(2, '0') + 'm';
+}
+function clock(iso) { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); }
+function ref(j) { return '#' + j.issue; }
+function repoOf(j) { return j.repo || ('repo ' + j.repo_id); }
+function issueURL(j) { return j.repo ? 'https://github.com/' + j.repo + '/issues/' + j.issue : null; }
+function safeURL(s) { return /^https:\/\/github\.com\//.test(s || '') ? s : null; }
+function statePill(state) {
+  const [bg, fg] = STATE_COLORS[state] || ['#2A2B31', '#C9C8C2'];
+  return h('span', { class: 'state', style: `background:${bg};color:${fg}` }, state);
+}
+function allJobs() { return view ? view.jobs.concat(view.finished) : []; }
+function setText(id, text) { document.getElementById(id).textContent = text; }
+
+function renderHeader() {
+  const conn = document.getElementById('conn');
+  conn.className = 'pill ' + (view.connected ? 'ok' : 'bad');
+  conn.title = view.error || '';
+  conn.lastChild.textContent = view.connected ? 'control node connected' : 'control node unreachable';
+  setText('steward', view.steward);
+  setText('version', view.version);
+  setText('model', view.model);
+  setText('updated', view.updated && !view.updated.startsWith('0001') ? 'updated ' + ago(view.updated) + ' ago' : 'no status yet');
+}
+
+function renderKPIs() {
+  const by = s => view.jobs.filter(j => s.includes(j.state));
+  const pending = by(['pending']);
+  const oldest = pending.reduce((a, j) => (!a || j.since < a ? j.since : a), null);
+  const merged = view.finished.filter(j => j.state === 'merged' || j.state === 'pr_opened' || j.state === 'queued').length;
+  const failed = view.finished.filter(j => FAILED.has(j.state)).length;
+  const pool = view.runners.filter(r => r.pool).length;
+  const kpis = [
+    ['Active jobs', view.jobs.length - pending.length, `${by(['claimed', 'working']).length} working · ${by(['reviewing']).length} reviewing · ${by(['retrying']).length} retrying`],
+    ['Pending', pending.length, oldest ? 'oldest ' + ago(oldest) : 'none waiting'],
+    ['Runners live', view.runners.length, pool ? `${pool} with --pool` : 'no pool runner'],
+    ['Finished, 24h', view.finished.length, `${merged} opened or merged · ${failed} failed`],
+  ];
+  document.getElementById('kpis').replaceChildren(...kpis.map(([label, value, sub]) =>
+    h('div', { class: 'kpi' }, h('span', { class: 'label' }, label), h('span', { class: 'value' }, value), h('span', { class: 'sub' }, sub))));
+}
+
+function renderLanes() {
+  const jobs = allJobs();
+  document.getElementById('lanes').replaceChildren(...LANES.map(lane => {
+    const mine = jobs.filter(j => lane.states.includes(j.state));
+    return h('div', { class: 'lane' },
+      h('div', { class: 'lane-head' }, h('span', {}, lane.name), h('span', { class: 'muted' }, mine.length)),
+      h('div', { class: 'bar', style: 'background:' + lane.color }),
+      mine.length ? mine.map(j => h('button', { type: 'button', class: 'chipjob', 'aria-pressed': String(j.subject === selected), onclick: () => select(j.subject) },
+        h('span', { class: 'mono', style: 'font-size:12px;color:#F4F2EC' }, ref(j) + ' ', h('span', { class: 'muted' }, j.repo ? j.repo.split('/')[1] : '')),
+        h('span', { class: 't' }, j.title || j.subject))) : h('span', { class: 'empty' }, 'none'));
+  }));
+}
+
+function filtered() {
+  switch (filter) {
+    case 'active': return view.jobs;
+    case 'problems': return allJobs().filter(j => j.state === 'retrying' || FAILED.has(j.state));
+    case 'finished': return view.finished;
+    default: return allJobs();
+  }
+}
+
+function renderFilters() {
+  document.getElementById('filters').replaceChildren(...FILTERS.map(([key, label]) =>
+    h('button', { type: 'button', 'aria-pressed': String(filter === key), onclick: () => { filter = key; render(); } }, label)));
+}
+
+function detailCell(j) {
+  const url = safeURL(j.detail);
+  return url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, url.replace('https://github.com/', '')) : (j.detail || '');
+}
+
+function renderRows() {
+  const rows = filtered().slice().sort((a, b) => b.since.localeCompare(a.since));
+  document.getElementById('rows').replaceChildren(...rows.map(j =>
+    h('tr', { 'aria-selected': String(j.subject === selected), onclick: () => select(j.subject) },
+      h('td', {}, h('span', { class: 'repo' }, repoOf(j) + (j.pool ? ' · pool' : '')),
+        h('span', { class: 'mono', style: 'color:#F4F2EC' }, ref(j)), ' ', h('span', { style: 'color:#D6D4CE' }, j.title || '')),
+      h('td', {}, statePill(j.state)),
+      h('td', { class: 'small' }, ago(j.since)),
+      h('td', { class: 'detail' }, detailCell(j)))));
+  document.getElementById('rows-empty').hidden = rows.length > 0;
+
+  const bar = document.getElementById('selbar');
+  const j = allJobs().find(x => x.subject === selected);
+  bar.hidden = !j;
+  if (!j) return;
+  const link = issueURL(j);
+  bar.replaceChildren(
+    h('span', { class: 'mono muted' }, j.subject),
+    h('span', {}, 'in ', statePill(j.state), ' for ', ago(j.since)),
+    h('div', { class: 'grow' }),
+    h('button', { type: 'button', class: 'btn-outline', onclick: () => ask(`What is happening with ${repoOf(j)} ${ref(j)}?`) }, 'Ask about this job'),
+    link ? h('a', { href: link, target: '_blank', rel: 'noopener', style: 'font-size:13px' }, 'Open issue') : null);
+}
+
+function renderRunners() {
+  const el = document.getElementById('runners');
+  if (!view.runners.length) { el.replaceChildren(h('p', { class: 'empty' }, 'No registered runners. Start one with schmeide runner.')); return; }
+  el.replaceChildren(...view.runners.map(r => h('div', { class: 'runner' },
+    h('span', { class: 'dot', style: 'color:#8FD39C' }),
+    h('span', { class: 'host' }, r.host),
+    h('span', { class: 'muted', style: 'font-size:12px' }, r.pool ? 'pool' : r.steward),
+    h('div', { class: 'grow' }),
+    h('span', { class: 'meta' }, (r.harnesses || []).join(', ')),
+    h('span', { class: 'meta' + (r.skewed ? ' skew' : ''), title: r.skewed ? 'differs from this dashboard (' + view.version + ')' : '' }, r.version || 'no version'))));
+}
+
+function renderActivity() {
+  const el = document.getElementById('activity');
+  if (!view.activity.length) { el.replaceChildren(h('p', { class: 'empty' }, 'Nothing yet.')); return; }
+  el.replaceChildren(...view.activity.map(e => {
+    const [, fg] = STATE_COLORS[e.state] || ['', '#C9C8C2'];
+    return h('div', { class: 'event' }, h('time', { datetime: e.at }, clock(e.at)),
+      h('span', {}, h('span', { class: 'mono', style: 'color:' + fg }, '#' + e.issue), ' ', e.state.replaceAll('_', ' '),
+        e.title ? h('span', { class: 'muted' }, ' · ' + e.title) : null));
+  }));
+}
+
+function render() {
+  if (!view) return;
+  renderHeader(); renderKPIs(); renderLanes(); renderFilters(); renderRows(); renderRunners(); renderActivity();
+}
+
+function select(subject) { selected = selected === subject ? null : subject; render(); }
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (!res.ok) throw new Error('the dashboard answered ' + res.status);
+    view = await res.json();
+  } catch (err) {
+    if (view) { view.connected = false; view.error = 'the dashboard process is not answering: ' + err.message; }
+  }
+  render();
+}
+
+// Ask panel.
+function renderMessages() {
+  const el = document.getElementById('messages');
+  if (!history.length) {
+    el.replaceChildren(h('div', { class: 'msg assistant' }, h('div', { class: 'bubble muted' },
+      'Ask about your jobs and runners: why something failed, what is slow, what changed. Answers come from what this page shows.')));
+    return;
+  }
+  el.replaceChildren(...history.map(m => h('div', { class: 'msg ' + m.role + (m.kind ? ' ' + m.kind : '') }, h('div', { class: 'bubble' }, m.text))));
+  el.scrollTop = el.scrollHeight;
+}
+
+async function ask(question) {
+  question = (question || '').trim();
+  if (!question || asking) return;
+  asking = true;
+  document.getElementById('send').disabled = true;
+  const prior = history.filter(m => !m.kind).map(({ role, text }) => ({ role, text }));
+  history.push({ role: 'user', text: question });
+  const pending = { role: 'assistant', kind: 'pending', text: 'Reading the factory state…' };
+  history.push(pending);
+  renderMessages();
+  try {
+    const res = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, history: prior }) });
+    const body = await res.json().catch(() => ({ error: 'the dashboard answered ' + res.status }));
+    if (body.answer) { pending.kind = ''; pending.text = body.answer; } else { pending.kind = 'error'; pending.text = body.error || 'no answer'; }
+  } catch (err) {
+    pending.kind = 'error'; pending.text = 'The dashboard is not answering: ' + err.message;
+  }
+  asking = false;
+  document.getElementById('send').disabled = false;
+  renderMessages();
+}
+
+document.getElementById('ask-form').addEventListener('submit', ev => {
+  ev.preventDefault();
+  const input = document.getElementById('ask');
+  const q = input.value;
+  input.value = '';
+  ask(q);
+});
+document.getElementById('suggest').replaceChildren(...['Is anything stuck?', 'What failed today, and why?', 'Which runner is doing what?'].map(q =>
+  h('button', { type: 'button', onclick: () => ask(q) }, q)));
+
+renderMessages();
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

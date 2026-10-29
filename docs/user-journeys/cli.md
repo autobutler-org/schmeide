@@ -21,7 +21,7 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 **Expected result:**
 
 - Exit code 0. Stdout lists the commands `control`, `runner`, `doctor`,
-  `status`, `init`, `completion`, and `version`, each with one line, then
+  `status`, `dashboard`, `init`, `completion`, and `version`, each with one line, then
   "Run 'schmeide <command> --help' for a command's flags." and "See
   docs/GLOSSARY.md for what the terms mean.".
 
@@ -61,7 +61,8 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 **Steps:**
 
 1. Run `schmeide control --help`, `schmeide runner --help`,
-   `schmeide doctor --help`, `schmeide status --help`, `schmeide init --help`,
+   `schmeide doctor --help`, `schmeide status --help`,
+   `schmeide dashboard --help`, `schmeide init --help`,
    `schmeide completion --help`, and `schmeide version --help`.
 
 **Expected result:**
@@ -106,8 +107,8 @@ missing required flag, bad setting), and 1 when the command ran and failed.
 **Notes:**
 
 - The rule holds for every flag of `control`, `runner`, and `doctor`,
-  including booleans (`SCHMEIDE_POOL=true`). `status` reads only
-  `SCHMEIDE_STEWARD`, `SCHMEIDE_NATS_URL`, and `SCHMEIDE_NATS_TOKEN`.
+  including booleans (`SCHMEIDE_POOL=true`). `status` and `dashboard` read
+  only `SCHMEIDE_STEWARD`, `SCHMEIDE_NATS_URL`, and `SCHMEIDE_NATS_TOKEN`.
 - `SCHMEIDE_TRUST` is not a flag. It is read by the runner directly
   (JN-SETUP-023).
 - An empty variable counts as unset.
@@ -274,14 +275,22 @@ progress.
 
 - One JSON object with `runners` (each with `steward`, `harnesses`, `host`,
   and `pool` and `version` when set) and `jobs` (each with `subject`,
-  `state`, `detail` when set, and `since`, the RFC 3339 time the job entered
-  its state). Empty lists are `[]`. A pending job is in `jobs` like any other
+  `state`, `detail` when set, `repo` and `title` when a status named them,
+  and `since`, the RFC 3339 time the job entered its state). There is no
+  `finished` key; only a query that asks for finished jobs, as the dashboard
+  does, gets one (JN-CLI-017). Empty lists are `[]`. A pending job is in `jobs` like any other
   (JN-CLI-016).
 
 **Notes:**
 
-- The JSON shape is stable.
-- Covered by `TestStatusListsRegisteredRunnerAndQueuedJob`,
+- The JSON shape is stable. `repo` and `title` were added for #264: the
+  control node's `pending` status and every status from a runner of #264 or
+  later carry them, and a status that names neither keeps the ones before it.
+  A job reported only by an older runner, after a control node restart, has
+  neither.
+- Covered by `TestStatusCarriesRepoAndTitle`,
+  `TestStatusQueryListsFinishedJobsOnRequest`,
+  `TestStatusListsRegisteredRunnerAndQueuedJob`,
   `TestStatusWithAnEmptyStreamSaysThereAreNoJobs`, and
   `TestStatusListsAJobNoRunnerHasClaimed` (`internal/control`).
 
@@ -358,8 +367,8 @@ progress.
 **Notes:**
 
 - All three scripts list every command `run` in `cmd/schmeide/main.go`
-  dispatches: `control`, `runner`, `doctor`, `status`, `init`, `completion`,
-  and `version`. `TestCompletionListsEveryCommand` reads the commands from
+  dispatches: `control`, `runner`, `doctor`, `status`, `dashboard`, `init`,
+  `completion`, and `version`. `TestCompletionListsEveryCommand` reads the commands from
   that switch, so a command added to the dispatcher and not to every script
   fails it.
 - Covered by `TestCompletion`, `TestCompletionListsEveryCommand`, and
@@ -488,3 +497,174 @@ octocat and labeled `schmeide:ready`.
 - Covered by `TestStatusListsAJobNoRunnerHasClaimed`,
   `TestPendingJobSurvivesARestart`, `TestPendingStatusFailureKeepsTheJob`, and
   `TestFailedPublishLeavesNoPendingJob` (`internal/control`).
+
+---
+
+### JN-CLI-017: Watch the factory on the dashboard
+
+**Preconditions:** A control node. octocat has a runner registered and a NATS
+token. Issues assigned to octocat have been labeled `schmeide:ready`, and some
+of their jobs have finished in the last day.
+
+**Steps:**
+
+1. Run `schmeide dashboard --steward octocat --nats-token <token>`.
+2. Open `http://127.0.0.1:7878`.
+3. Label another issue, and watch the page while the runner works it.
+4. Click a job in the line or the jobs table.
+
+**Expected result:**
+
+- Step 1: stderr logs `msg="dashboard serving" url=http://127.0.0.1:7878
+  steward=octocat model=sonnet`, and the command keeps running until Ctrl-C.
+- Step 2: the header shows `control node connected`, the steward, this
+  binary's version, and how long ago the page last refreshed. Below it:
+  - totals: active jobs (with how many are working, reviewing, and retrying),
+    pending jobs and the oldest wait, live runners and how many run with
+    `--pool`, and jobs finished in the last 24 hours (opened or merged, and
+    failed);
+  - the line: one column each for `pending`, `working` (`claimed` and
+    `working`), `retrying`, `reviewing`, `opened · merged` (`pr_opened`,
+    `merged`, `queued`), and `failed` (`gate_failed`, `failed`,
+    `review_failed`, `merge_failed`), each job as a chip with its issue number,
+    repository name, and issue title;
+  - the jobs table, newest state first, with the repository, issue number,
+    title, state, how long the job has been in that state, and the detail. A
+    pull request URL in the detail is a link. The filters are `Active`
+    (unfinished jobs, the default), `Needs a look` (`retrying` and the failed
+    states), `Finished` (the last 24 hours), and `All`;
+  - runners: host, steward (or `pool`), harnesses, and version. A version that
+    differs from this binary's is highlighted;
+  - the activity log: each state the dashboard has seen, newest first, at the
+    time the control node stored it.
+- Step 3: within `--interval` (5s) plus the page's 3-second refresh, the new
+  job appears as `pending`, then moves through the line as its state changes,
+  and each state it was seen in is added to the activity log.
+- Step 4: the job is highlighted, and a bar under the table shows its subject,
+  state, and age, an "Ask about this job" button, and an "Open issue" link to
+  `https://github.com/<repo>/issues/<issue>`.
+
+**Notes:**
+
+- The dashboard sends `{"finished": true}` on
+  `schmeide.status-query.<steward>`, so it sees exactly what `schmeide status`
+  sees (JN-CLI-007: the steward's own runners and jobs, plus pool jobs with a
+  live `--pool` runner) and the same jobs that finished within 24 hours.
+- The activity log is in memory. A restarted dashboard starts with one event
+  per unfinished and recently finished job. A state that came and went
+  between two polls has no event.
+- A job with no repo or title (an older runner, after a control node restart)
+  shows `repo <repo id>` and no title, and has no issue link.
+- The page is served only to `localhost` and loopback addresses unless
+  `--addr` is not loopback; see JN-CLI-019.
+- Covered by `TestJourneyDashboardShowsTheStewardsJobsAndAnswers`
+  (`internal/e2e`), `TestRunServesTheStewardsJobsAndAnswers`,
+  `TestBoardUpdateParsesJobsAndRunners`, `TestBoardActivity`,
+  `TestBoardActivityKeepsTheNewest` (`internal/dashboard`), and
+  `TestStatusQueryListsFinishedJobsOnRequest` (`internal/control`). The page's
+  JavaScript has no automated test.
+
+---
+
+### JN-CLI-018: Ask the factory a question
+
+**Preconditions:** JN-CLI-017. Claude Code is installed and logged in on the
+machine running the dashboard.
+
+**Steps:**
+
+1. In "Ask the factory", type `Why did #12 fail?` and send it, or click one of
+   the suggested questions.
+2. Ask a follow-up, such as `What should I do about it?`.
+3. Ask it to requeue the job.
+4. Select a job and click "Ask about this job".
+
+**Expected result:**
+
+- Step 1: the question appears, then `Reading the factory state…`, then the
+  answer, which names jobs by repository and issue number and uses what the
+  page shows: the state, its detail, and how long it has been in it.
+- Step 2: the answer takes the earlier turns into account.
+- Step 3: the answer says it cannot change anything and says what the steward
+  could do instead, such as re-adding the ready label.
+- Step 4: it asks `What is happening with <repo> #<issue>?`.
+- The header of the panel shows the model, `sonnet` by default (`--model`).
+
+**Notes:**
+
+- Each question runs `claude --print --model <model> --tools ""
+  --strict-mcp-config --disable-slash-commands --no-session-persistence` with
+  a fixed system prompt, in an empty temporary directory, with the prompt on
+  stdin. The session has no tools and no MCP servers, so it cannot run
+  commands or read files; the factory state reaches it as JSON in the prompt,
+  marked as data.
+- The prompt holds the dashboard's current view, the last 10 turns of the
+  conversation, and the question. The page keeps the conversation; reloading
+  it starts a new one.
+- Covered by `TestJourneyDashboardShowsTheStewardsJobsAndAnswers`
+  (`internal/e2e`), `TestPrompt`, `TestClaudeArgsGiveTheSessionNoTools`, and
+  `TestClaudeAsk` (`internal/dashboard`). Whether the real model answers well
+  is not tested.
+
+---
+
+### JN-CLI-019: The dashboard or its ask panel fails
+
+**Preconditions:** None.
+
+**Steps:**
+
+1. Run `schmeide dashboard` with no steward, then with `--interval 0s`.
+2. Run it with `--nats-url` pointing at nothing.
+3. Run a second dashboard on the same `--addr`.
+4. Stop the control node while the dashboard runs, then start it again.
+5. Ask a question with Claude Code logged out, or with `--claude` naming a
+   missing file.
+6. Send a second question before the first is answered, from another tab.
+7. Open the page as `http://my-host.example:7878` through a name that points
+   at 127.0.0.1.
+8. Run it with `--addr 0.0.0.0:7878`.
+
+**Expected result:**
+
+- Step 1: exit code 2, "schmeide dashboard: missing --steward: pass your
+  GitHub login with --steward or set SCHMEIDE_STEWARD", or "schmeide
+  dashboard: --interval 0s is not positive; pass a duration such as 5s", then
+  "Run 'schmeide dashboard --help' for usage.".
+- Step 2: exit code 1, "schmeide dashboard: cannot reach the control node's
+  NATS at <url> as <steward>: ..." and "Check that `schmeide control` is
+  running, that --nats-url points at its --nats-addr, and that --nats-token is
+  the token its --runner-tokens lists for <steward>".
+- Step 3: exit code 1, "schmeide dashboard: listen on <addr>: ...; pass a
+  free address with --addr".
+- Step 4: the dashboard logs `status query failed; the page shows the last good
+  state` at each poll, and the page shows `control node unreachable`, with the
+  error as its tooltip, over the last state it had. Once the control node is
+  back, the next poll shows `control node connected` again.
+- Step 5: the panel shows the error in place of an answer, for example
+  ``claude failed (exit status 1): <its output>; run `<path> auth status` to
+  check it is logged in`` or ``"claude" was not found; install Claude Code
+  (https://claude.com/claude-code) and log in, or pass --claude with its
+  path``. The rest of the page keeps working. A claude that takes longer than
+  2 minutes is killed with "claude did not answer within 2m0s; ask a narrower
+  question".
+- Step 6: the second question gets "another question is still being
+  answered; wait for it and ask again".
+- Step 7: 403, "the dashboard only answers on localhost; open it as
+  http://localhost or http://127.0.0.1".
+- Step 8: the dashboard starts and logs a warning, "the dashboard is reachable
+  beyond this machine and has no login; anyone who can reach it sees your jobs
+  and can ask questions on your claude account", and serves any host name.
+
+**Notes:**
+
+- An empty question gets 400 "the question is empty; type a question and send
+  it again", and one over 2,000 bytes gets 400 "the question is longer than
+  2000 bytes; shorten it and send it again".
+- `POST /api/ask` takes only `application/json` (415 otherwise), so a page on
+  another site cannot post a question without a CORS preflight.
+- Covered by `TestRun` (`cmd/schmeide`), `TestRunFailsWithoutAControlNode`,
+  `TestRunFailsWhenTheAddressIsTaken`,
+  `TestBoardFailedQueryKeepsTheLastGoodState`, `TestClaudeAsk`,
+  `TestAskerAnswersOneQuestionAtATime`, and `TestHandler`
+  (`internal/dashboard`). Steps 4 and 8 have no automated test.

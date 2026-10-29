@@ -69,6 +69,9 @@ Every connection below is opened by the left-hand side. Nothing connects in to a
 | Runner | GitHub REST and GraphQL (`--github-api-url`) | HTTPS | pulls, comments, blocked-by, check runs, job logs, branch protection, merge, merge queue | installation token as `Bearer` |
 | Harness | its model provider | HTTPS | the session | the harness's own login (`ANTHROPIC_*`, `CLAUDE_*`, `XAI_*`, or its config under `HOME`) |
 | `schmeide status`, `schmeide doctor` | control node NATS | NATS | a status query on `schmeide.status-query.<steward>`, a token-subject ping | a steward's NATS token |
+| `schmeide dashboard` | control node NATS | NATS | a status query with `{"finished": true}` every `--interval` | a steward's NATS token |
+| A browser | `schmeide dashboard` on `--addr` (default `127.0.0.1:7878`) | plain HTTP | the page, `GET /api/state`, `POST /api/ask` | none; loopback only by default, and a non-loopback `Host` is refused |
+| `schmeide dashboard` | the claude CLI, then Anthropic | a subprocess, then HTTPS | one question with the factory state, no tools | the claude login on that machine |
 
 The webhook listener is plain HTTP and the startup log says it must sit behind a TLS-terminating proxy. NATS
 serves TLS itself, because a NATS client starts in plain text and upgrades after the server greeting, so a TLS

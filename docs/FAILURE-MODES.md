@@ -403,6 +403,35 @@ After review passes:
   comments on the issue and leaves the pull request open. That failure is
   final. A check that is still red does not.
 
+## Dashboard
+
+`schmeide dashboard` only reads, so none of its failures touches a job, an
+issue, or a pull request (JN-CLI-019).
+
+- No control node at startup: it exits 1 with `cannot reach the control node's
+  NATS at <url> as <steward>`, followed by what to check.
+- A taken `--addr`: it exits 1 with `listen on <addr>: ...; pass a free address
+  with --addr`.
+- The control node stops answering later: the dashboard logs `status query
+  failed; the page shows the last good state`, keeps reconnecting, and the
+  page shows `control node unreachable` with the last runners, jobs, and
+  activity it had. The next good poll clears it.
+- The dashboard process stops: the open page keeps its last view and shows
+  `the dashboard process is not answering`. The activity log is lost; a new
+  dashboard starts from the unfinished jobs and the jobs finished in the last
+  24 hours.
+- An older control node ignores the request for finished jobs, so the
+  dashboard shows none. A job reported by a runner from before #264 keeps the
+  repo and title from the control node's `pending` status until the control
+  node restarts. After a restart only the runner's status is replayed, and the
+  page shows `repo <repo id>`, no title, and no issue link.
+- The ask panel fails without affecting the rest of the page: claude not
+  installed, not logged in, an empty answer, or no answer within 2 minutes
+  each show their error in place of the answer (see
+  [architecture/dashboard.md](architecture/dashboard.md#the-ask-panel)). A
+  second question while one is being answered is refused with `another
+  question is still being answered; wait for it and ask again`.
+
 ## Not built
 
 Container isolation is not built. A job runs in a git worktree on the runner's

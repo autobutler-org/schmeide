@@ -159,6 +159,7 @@ flowchart LR
     tok["schmeide.token.{steward}<br/>request/reply, core NATS"]
     sq["schmeide.status-query.{steward}<br/>request/reply, core NATS"]
     cli["schmeide status"]
+    dash["schmeide dashboard"]
 
     intake --> issues
     intake --> js1
@@ -173,7 +174,8 @@ flowchart LR
     tracker -- "final state" --> issues
     rpub -.->|request job subject| tok
     cli -.->|empty request| sq
-    sq -.->|"Tracker.Snapshot(steward)"| tracker
+    dash -.->|"finished: true, every --interval"| sq
+    sq -.->|"Tracker.Snapshot(steward, query)"| tracker
 ```
 
 ### Streams, buckets, and subjects
@@ -185,7 +187,7 @@ flowchart LR
 | `SCHMEIDE_ISSUES` (`issueBucket`) | KV, default config | `<repo_id>.<issue>` → `issueRecord{subject, state, after}` | `Queue.Publish`, `Tracker.finish`, `seedIssues` | `Queue.Publish` dedupe |
 | `SCHMEIDE_STAGES` (`StageBucket`) | KV, `History: 1`, `MaxValueSize` 4 KiB | `<steward or _pool>.<repo_id>.<issue>` → runner `stage` record | runners (`Runner.mark`, deleted at a final state) | runners (`Runner.recordedStage`) |
 | `schmeide.token.<steward>` (`TokenSubjectPrefix`) | core NATS request/reply | request body is a job subject, reply is `TokenReply` | runners, `schmeide doctor` (empty body as a liveness ping) | `Queue.ServeTokens` |
-| `schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`) | core NATS request/reply | empty request, reply is `StatusReply` (a `Snapshot` scoped to the steward) | `schmeide status` | `Queue.ServeStatus` |
+| `schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`) | core NATS request/reply | request is empty or a `StatusQuery`, reply is `StatusReply` (a `Snapshot` scoped to the steward) | `schmeide status`, `schmeide dashboard` | `Queue.ServeStatus` |
 
 The status stream captures the subjects runners publish on, so publishers do not need JetStream acks for
 statuses. It keeps one message per subject: each registration subject names one steward and one host, and each
@@ -253,7 +255,7 @@ It may subscribe only below `_INBOX_<steward>.>` (`InboxPrefix`). Runners and `s
    subject from closing the new one.
 4. The record is written with `Create` (no record) or `Update` at the read revision. Of two concurrent deliveries
    for one issue, one wins and the other reports duplicate.
-5. `publishPending` stores `Status{state: "pending"}` on the job's status subject
+5. `publishPending` stores `Status{state: "pending", repo, title}` on the job's status subject
    (`schmeide.status.<steward or _pool>.<repo_id>.<issue>`), so `schmeide status` lists the job before a runner
    claims it. It runs only once the tracker is running (the stream exists then), and only on this new-job path, so
    a duplicate delivery stores no second `pending` and does not reset the wait. It runs before the job is
@@ -272,8 +274,9 @@ the only dedupe record, from losing dedupe when the stream starts discarding.
 A runner publishes a `Registration{steward, harnesses, host, pool, version}` on
 `schmeide.runners.<steward>.<host>` (`RegisterSubject`) at startup and flushes, and publishes it again every
 `RegistrationInterval` (1 minute) while it runs (`Runner.keepRegistered`). In the host token, `.`, `*`, `>`, and white space
-become `_`, and an empty host is `_`. It then publishes a `Status{state, detail, attempts}` on its job's status
-subject at every state change. The control node publishes one `pending` status on that subject when it creates
+become `_`, and an empty host is `_`. It then publishes a `Status{state, detail, attempts, repo, title}` on its job's status
+subject at every state change. `repo` and `title` are the job's repository and issue title; a runner from before
+#264 leaves them out. The control node publishes one `pending` status on that subject when it creates
 the job (see Publishing a job above); every runner state supersedes it, and the stream's one-message-per-subject
 limit removes it. When the job's publish fails after the `pending` status was stored, `Queue.Publish` deletes
 that message and `Tracker.forget` drops it, whether or not the tracker has seen it yet.
@@ -291,7 +294,9 @@ logged when a registration expires.
   subject is pinned by NATS permissions. It keeps one entry per (steward, host), the latest, with the time it was
   stored. Every registration, a refresh included, logs `msg="runner registered"`, and a warning when
   `release.Skewed(runner version, control version)`; the runner is still accepted.
-- `observeStatus` stores the status and the time the message was stored on the stream (`since`), and, for a
+- `observeStatus` stores the status and the time the message was stored on the stream (`since`). A status that
+  names neither `repo` nor `title`, from an older runner, keeps the ones the job's earlier status named, so the
+  control node's `pending` status names the job until the runner's own statuses do. For a
   final state (`State.final`: `pr_opened`, `review_failed`,
   `merged`, `queued`, `merge_failed`, `gate_failed`, `failed`), calls `Tracker.finish`, which writes the state
   into the issue record when the record still names that subject, is not already finished, and the status
@@ -315,13 +320,21 @@ steward's token can publish there.
 permissions can limit it to the steward's own and pool job statuses.
 
 `schmeide status` (`StatusMain`) connects as a steward and sends an empty request on
-`schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`). `Queue.ServeStatus`, started by `Run` right after
-`Track`, answers with a `StatusReply`: `Tracker.Snapshot(steward)`, which holds the steward's live registrations and
+`schmeide.status-query.<steward>` (`StatusQuerySubjectPrefix`) through `control.QueryStatus`. `Queue.ServeStatus`,
+started by `Run` right after `Track`, answers with a `StatusReply`: `Tracker.Snapshot(steward, query)`, which holds the steward's live registrations and
 every job on `schmeide.jobs.<steward>.` whose latest state is not final, plus jobs on `schmeide.jobs._pool.` when
 the steward has a live pool registration (`poolRunner`). Each job's `JobState.Since` is the stored time of its
 latest status; the text output prints the time since then in the FOR column, which for a `pending` job is how
 long it has waited. The subject's steward token is pinned by NATS permissions,
-so a steward can only ask about itself. `--json` prints the `Snapshot` struct, whose JSON form is stable (`since` was added for #238). When no
+so a steward can only ask about itself. `--json` prints the `Snapshot` struct, whose JSON form is stable (`since` was added for #238, and each job's `repo` and `title` for #264).
+
+A request body that decodes as `StatusQuery{"finished": true}`, which `schmeide dashboard` sends, also fills
+`Snapshot.Finished`: the same steward's (and, for a pool steward, pool) jobs whose final state was stored within
+`FinishedWindow` (24 hours, measured on the tracker's clock), sorted by subject, `[]` when there are none. An empty
+body, or one that does not decode, is the zero `StatusQuery`, and the reply has no `finished` key, so `schmeide
+status` output is unchanged. A control node from before #264 ignores the body, and the dashboard then shows no
+finished jobs. The tracker keeps a finished job's latest status in memory for as long as the control node runs,
+and a restart replays it from `SCHMEIDE_STATUS`, so the 24-hour list survives a restart. When no
 control node answers (`nats.ErrNoResponders`, an older control node), `schmeide status` exits 1 with "the control
 node does not answer status queries; upgrade `schmeide control` to this version".
 

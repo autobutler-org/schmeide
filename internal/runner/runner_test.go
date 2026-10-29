@@ -700,6 +700,35 @@ func TestGateFailureOpensNoPR(t *testing.T) {
 	}
 }
 
+// TestStatusNamesTheJobsRepoAndTitle checks that every state a runner
+// reports carries the job's repo and issue title, so `schmeide status` and the
+// dashboard can name the job.
+func TestStatusNamesTheJobsRepoAndTitle(t *testing.T) {
+	w := newWorld(t)
+	h, _ := writes(map[string]string{"broken": "x"})
+	w.start(t, "alice", h)
+	w.publish(t, "alice", 7)
+
+	subject := fmt.Sprintf("%salice.%d.7", StatusSubjectPrefix, testRepoID)
+	timeout := time.After(30 * time.Second)
+	for {
+		select {
+		case s := <-w.statuses:
+			if s.subject != subject {
+				continue
+			}
+			if s.Repo != testRepo || s.Title != "Fix the Thing!" {
+				t.Errorf("%s status = %+v, want repo %q and title %q", s.State, s.Status, testRepo, "Fix the Thing!")
+			}
+			if s.State == StateGateFailed {
+				return
+			}
+		case <-timeout:
+			t.Fatal("job reached no final state")
+		}
+	}
+}
+
 // TestGateTimeoutFailsTheJob uses a short flag so the test does not sleep
 // for the 30 minute default. The gate prints a marker and then sleeps; the
 // issue comment must say the gate timed out and must not echo that marker.

@@ -15,10 +15,12 @@ AI review rounds, and merges only when the repo config sets `automate.merge = "o
 ### Repo map
 
 ```text
-cmd/schmeide/             entrypoint: dispatches control, runner, doctor, status, init, completion, version
+cmd/schmeide/             entrypoint: dispatches control, runner, doctor, status, dashboard, init, completion,
+                          version
 cmd/fakeagent/            test stand-in for the claude and grok CLIs, scripted by FAKEAGENT_SCRIPT
 internal/control/         control node: webhook intake, embedded NATS JetStream queue, per-job tokens, status
 internal/runner/          runner: takes jobs; worktree, harness session, gate, PR, review, fix rounds, merge, stacks
+internal/dashboard/       `schmeide dashboard`: a steward's local status page and its read-only ask panel
 internal/harness/         the Harness contract and its Claude Code, Grok CLI, and Fake implementations
 internal/forge/           the code host a job talks to (PRs, comments, checks, merge, merge queue, branch
                           protection); GitHub over HTTP, Fake in memory

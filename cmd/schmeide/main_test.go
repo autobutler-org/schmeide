@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/autobutler-org/schmeide/internal/control"
+	"github.com/autobutler-org/schmeide/internal/dashboard"
 	"github.com/autobutler-org/schmeide/internal/doctor"
 	"github.com/autobutler-org/schmeide/internal/runner"
 )
@@ -55,6 +56,9 @@ func TestRun(t *testing.T) {
 		},
 		{name: "doctor help", args: []string{"doctor", "--help"}, wantStdout: doctor.Usage()},
 		{name: "status help", args: []string{"status", "--help"}, wantStdout: control.StatusUsage()},
+		{name: "dashboard help", args: []string{"dashboard", "--help"}, wantStdout: dashboard.Usage()},
+		{name: "dashboard missing steward", args: []string{"dashboard"}, wantCode: 2, wantStderr: "pass your GitHub login with --steward"},
+		{name: "dashboard bad interval", args: []string{"dashboard", "--steward", "alice", "--interval", "0s"}, wantCode: 2, wantStderr: "--interval 0s is not positive"},
 		{name: "status unknown flag", args: []string{"status", "--nope"}, wantCode: 2, wantStderr: "schmeide status --help"},
 		{name: "status missing steward", args: []string{"status"}, wantCode: 2, wantStderr: "pass your GitHub login with --steward"},
 		{

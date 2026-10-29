@@ -126,6 +126,8 @@ type world struct {
 	httpAddr string
 	control  *proc
 	runners  []*proc
+	// others are the remaining subprocesses, such as a dashboard.
+	others []*proc
 }
 
 func freeAddr(t *testing.T) string {
@@ -273,7 +275,7 @@ func (w *world) startRunner(writer, reviewer string) *proc {
 
 // stop ends every subprocess and prints their logs when the journey failed.
 func (w *world) stop() {
-	for _, p := range append(slices.Clone(w.runners), w.control) {
+	for _, p := range append(append(slices.Clone(w.others), w.runners...), w.control) {
 		if p == nil {
 			continue
 		}
@@ -479,5 +481,74 @@ func TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest(t *testing.T) {
 	defer mints.Unlock()
 	if minted < 2 {
 		t.Errorf("tokens minted = %d, want a second one after the first expired", minted)
+	}
+}
+
+// TestJourneyDashboardShowsTheStewardsJobsAndAnswers covers JN-CLI-017 and
+// JN-CLI-018.
+func TestJourneyDashboardShowsTheStewardsJobsAndAnswers(t *testing.T) {
+	w := newWorld(t, "false")
+	w.startRunner(writer, passReview)
+	dashAddr := freeAddr(t)
+	dash := w.start("dashboard", []string{"CLAUDE_E2E_SCRIPT=stdout #3 failed at the gate."}, "dashboard",
+		"--steward", steward,
+		"--nats-url", "nats://"+w.natsAddr,
+		"--nats-token", runnerToken,
+		"--addr", dashAddr,
+		"--interval", "100ms")
+	w.others = append(w.others, dash)
+	w.waitLog(dash, "dashboard serving", 1)
+	w.label(3, "Add a greeting")
+	w.waitComment(3, "the gate command `false` failed", time.Minute)
+
+	type job struct {
+		Repo  string `json:"repo"`
+		Title string `json:"title"`
+		Issue int    `json:"issue"`
+		State string `json:"state"`
+	}
+	var state struct {
+		Connected bool `json:"connected"`
+		Runners   []struct {
+			Host string `json:"host"`
+		} `json:"runners"`
+		Finished []job `json:"finished"`
+		Activity []job `json:"activity"`
+	}
+	w.waitFor("the dashboard to list the finished job", 10*time.Second, func() bool {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+dashAddr+"/api/state", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return json.NewDecoder(resp.Body).Decode(&state) == nil && len(state.Finished) == 1
+	})
+	if !state.Connected || len(state.Runners) != 1 {
+		t.Errorf("state: connected %v, runners %+v; want connected with the steward's runner", state.Connected, state.Runners)
+	}
+	if got, want := state.Finished[0], (job{Repo: repo, Title: "Add a greeting", Issue: 3, State: "gate_failed"}); got != want {
+		t.Errorf("finished job = %+v, want %+v", got, want)
+	}
+	if len(state.Activity) == 0 || state.Activity[0] != state.Finished[0] {
+		t.Errorf("activity = %+v, want the gate failure first", state.Activity)
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+dashAddr+"/api/ask", strings.NewReader(`{"question":"Why did #3 fail?"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var answer map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil || resp.StatusCode != http.StatusOK || answer["answer"] != "#3 failed at the gate." {
+		t.Errorf("ask = %s %v %v, want the claude answer", resp.Status, answer, err)
 	}
 }
