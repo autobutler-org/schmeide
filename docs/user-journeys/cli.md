@@ -527,7 +527,9 @@ of their jobs have finished in the last day.
     `working`), `retrying`, `reviewing`, `opened · merged` (`pr_opened`,
     `merged`, `queued`), and `failed` (`gate_failed`, `failed`,
     `review_failed`, `merge_failed`), each job as a chip with its issue number,
-    repository name, and issue title;
+    repository name, and issue title; the issue number links to
+    `https://github.com/<repo>/issues/<issue>` in a new tab, and clicking the
+    title selects the job;
   - the jobs table, newest state first, with the repository, issue number,
     title, state, how long the job has been in that state, and the detail. A
     pull request URL in the detail is a link. The filters are `Active`
