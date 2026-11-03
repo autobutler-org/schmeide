@@ -4,6 +4,8 @@ import "context"
 
 // Fake is a [Harness] for tests. It starts no process.
 type Fake struct {
+	// HarnessName is returned from Name. Empty means "fake".
+	HarnessName string
 	// CheckErr is returned from Check.
 	CheckErr error
 	// RunFunc is called by Run. Nil makes Run succeed, or fail with the
@@ -15,7 +17,12 @@ type Fake struct {
 }
 
 // Name implements [Harness].
-func (*Fake) Name() string { return "fake" }
+func (f *Fake) Name() string {
+	if f.HarnessName == "" {
+		return "fake"
+	}
+	return f.HarnessName
+}
 
 // Check implements [Harness].
 func (f *Fake) Check(context.Context) error { return f.CheckErr }

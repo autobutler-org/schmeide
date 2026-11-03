@@ -216,6 +216,24 @@ JN-PR-021. To reuse a toolchain cache across jobs, set its variable in the
 runner's environment and list it, for example `--gate-pass-env PUB_CACHE`.
 Listing `HOME`, `TMPDIR`, or an `XDG_*_HOME` name has no effect.
 
+`--harnesses` (`SCHMEIDE_HARNESSES`) is a comma-separated list of harness
+names, `claude-code` and `grok`, in the order the runner tries them. It
+defaults to `claude-code,grok`. A listed harness whose check fails at startup
+is skipped; when none passes, the runner refuses to start with "no usable
+harness on this machine". The first one that passes writes, and the reviewer is
+the first other ready one in the same order. When a session hits its
+harness's usage limit, the session continues on the next listed harness that
+is ready, and the harness at its limit is not used again until the runner
+restarts. When every ready harness is at its limit, the job fails without a
+retry, and so does every later job until a restart. See
+[FAILURE-MODES.md](FAILURE-MODES.md#a-harness-runs-out-of-usage), JN-SETUP-018,
+and JN-FAIL-026. Refused at startup, exit 2:
+
+- an unknown name: `--harnesses lists "codex"; the known harnesses are
+  claude-code, grok`
+- a repeated name: `--harnesses lists "grok" twice`
+- an empty list: `--harnesses is empty; list one or more of claude-code, grok`
+
 `ack-wait` is the JetStream lease for a claimed job. A runner must stay
 connected and send `InProgress` heartbeats during long work. `stuck-after` is
 the longer no-progress budget: when it expires the runner cancels the work and

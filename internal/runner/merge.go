@@ -45,7 +45,7 @@ func (r *Runner) fixCheck(ctx context.Context, ws Workspace, job control.Job, ga
 	fail := func(err error) (outcome, bool) {
 		return mergeFailed(prURL, fmt.Errorf("check run %s finished with %s, and the fix round failed: %w", checkName(run), run.Conclusion, err)), true
 	}
-	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), ciFixBrief(job, gate, run, tail)))); err != nil {
+	if err := r.runSession(ctx, limits.session, r.session(ws.Dir(), ciFixBrief(job, gate, run, tail))); err != nil {
 		return fail(err)
 	}
 	dropSessionNotes(ws.Dir())

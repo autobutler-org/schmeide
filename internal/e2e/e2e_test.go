@@ -484,6 +484,29 @@ func TestJourneyJobOutlivingItsTokenStillOpensItsPullRequest(t *testing.T) {
 	}
 }
 
+// TestJourneyUsageLimitContinuesOnTheNextHarness is JN-FAIL-026. The claude
+// session leaves partial work and stops at a usage limit, and grok continues
+// it in the same worktree. grok also reviews, because claude is out of usage
+// from then on, so its one script writes the change, the pull
+// request text, and a passing verdict.
+func TestJourneyUsageLimitContinuesOnTheNextHarness(t *testing.T) {
+	w := newWorld(t, "true")
+	r := w.startRunner("edit partial.txt half\nstdout You've hit your weekly limit\nexit 1", writer+"\n"+passReview)
+	w.label(6, "Add a greeting")
+
+	w.waitComment(6, "The review passed.", time.Minute)
+	if log := r.log.String(); !strings.Contains(log, "harness ran out of usage; continuing the session on the next harness") || !strings.Contains(log, "next=grok") {
+		t.Errorf("the runner did not log the move from claude-code to grok")
+	}
+	if pulls := w.pulls(); len(pulls) != 1 {
+		t.Fatalf("pull requests = %+v, want one", pulls)
+	}
+	files := git(t, w.dir, "--git-dir", filepath.Join(w.dir, "origin", repo+".git"), "ls-tree", "-r", "--name-only", "6_add-a-greeting")
+	if !strings.Contains(files, "partial.txt") || !strings.Contains(files, "greeting.txt") {
+		t.Errorf("pushed files = %s, want claude's partial work and grok's change", files)
+	}
+}
+
 // TestJourneyDashboardShowsTheStewardsJobsAndAnswers covers JN-CLI-017 and
 // JN-CLI-018.
 func TestJourneyDashboardShowsTheStewardsJobsAndAnswers(t *testing.T) {

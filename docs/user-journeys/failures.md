@@ -47,7 +47,8 @@ fails once (for example an API outage), then works.
   (JN-FAIL-007); a git or GitHub error before the pull request is open.
 - Not retried, final at once: a missing or invalid repo config (JN-CFG-002),
   open blockers side by side (JN-PR-019), a gate failure or gate timeout, any
-  review failure, any factory merge failure.
+  review failure, any factory merge failure, every ready harness at its usage
+  limit (JN-FAIL-026).
 - Not counted at all: a token hand-back (JN-FAIL-015), a shutdown hand-back
   (JN-FAIL-016), a stuck-job hand-back (JN-FAIL-014).
 - The 30-second wait has no flag.
@@ -725,3 +726,65 @@ linter, or tests.
 - Covered by `TestClaudeRun` and `TestWideningArg` in `internal/harness`, and
   `TestHarnessArgsPermissionFloor` and `TestMainRefusesWideningHarnessArgs` in
   `internal/runner`. No test runs the real claude CLI.
+
+---
+
+### JN-FAIL-026: A harness that runs out of usage hands its session to the next harness
+
+**Preconditions:** A runner started with the default `--harnesses
+claude-code,grok` on a machine where Claude Code and Grok are both installed
+and logged in, so Claude Code writes. Claude Code's account is at its usage
+limit, or reaches it during the session.
+
+**Steps:**
+
+1. Assign and label an issue.
+2. Watch the runner's log.
+3. Label a second issue.
+4. Repeat with Grok's account at its limit too.
+5. Label a third issue.
+6. Restart the runner.
+
+**Expected result:**
+
+- Step 2: the claude session exits non-zero with a usage-limit message such as
+  "You've hit your weekly limit", "Claude AI usage limit reached|<epoch>", or
+  "You've hit your limit". The runner logs "harness ran out of usage;
+  continuing the session on the next harness" with `harness=claude-code
+  next=grok`, and does not fail the attempt. A grok session runs in the same
+  worktree with Claude Code's partial work still in it, uncommitted. Its
+  prompt starts "You are continuing a session that ran out of usage.", names
+  the claude-code harness, and carries `git status --short`, `git diff
+  --stat`, and the end of claude's output, then the original brief. The job
+  does not end with "the claude-code session did not finish".
+- Grok writes from then on. Claude Code is skipped, so the reviewer is Grok
+  too (the writer is the fallback reviewer). The pull request opens and is
+  reviewed as usual, with both harnesses' changes in it.
+- Step 3: the second job runs on Grok from the start. Claude Code is not
+  tried again.
+- Step 4: the runner logs "every ready harness is at its usage limit; the job
+  fails until the runner restarts". The job fails with no retry, and the issue
+  gets "schmeide could not finish this job and did not open a pull request:"
+  followed by "every ready harness is at its usage limit: claude-code, grok;
+  this runner refuses them until it restarts".
+- Step 5: the third job fails at once with the same comment, and no session
+  runs.
+- Step 6: the restarted runner tries Claude Code first again.
+- A reviewer session that runs out moves to the next ready harness other than
+  the writer, or to the writer, and the writer does not change. Once the pull
+  request is open, running out on every harness is final and leaves the pull
+  request open.
+
+**Notes:**
+
+- The match is on each CLI's wording (`usageLimitMarkers` in
+  `internal/harness/usage.go`), checked only when the CLI exits non-zero. See
+  [../FAILURE-MODES.md](../FAILURE-MODES.md#a-harness-runs-out-of-usage).
+- Covered by `TestUsageLimited`, `TestFakeagentUsageLimitIsErrUsageLimit`, and
+  `TestFakeagentLimitTextOnSuccessIsNotAUsageLimit` in `internal/harness`;
+  `TestUsageLimitContinuesTheJobOnTheNextHarness`,
+  `TestEveryHarnessOutOfUsageFailsTheJobAndLaterJobs`,
+  `TestExhaustedHarnessStaysRefusedForLaterJobs`, and
+  `TestReviewSessionContinuesOnTheNextHarness` in `internal/runner`; and
+  `TestJourneyUsageLimitContinuesOnTheNextHarness` in `internal/e2e`. No test
+  runs the real claude or grok CLI.

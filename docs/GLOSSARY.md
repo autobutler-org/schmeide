@@ -173,6 +173,18 @@ The person who owns a job. For a job that comes from a GitHub issue, the steward
 is the issue assignee, and the runner that works the job is one of that
 person's.
 
+## usage limit
+
+The point where a harness's account may not run more sessions for now: a
+usage, rate, spend, or credit limit, such as Claude Code's "Claude AI usage
+limit reached" or Grok's "You've hit the rate limit for your plan." A session
+that ends at one continues on the next ready harness in `--harnesses` order in
+the same worktree, and that harness writes from then on. A harness at its
+limit is not used again until the runner restarts. When every ready harness
+is at its limit, the job fails finally with "every ready harness is at its
+usage limit: <names>; this runner refuses them until it restarts", and so does
+every later job until a restart.
+
 ## worktree
 
 The git worktree a runner creates for each job, on its own branch, using the

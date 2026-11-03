@@ -87,6 +87,7 @@ func FlagUsage(fs *flag.FlagSet) string {
 
 // harnessFlags are the runner flags that shape each harness session.
 type harnessFlags struct {
+	order                string
 	claudeArgs, grokArgs string
 	allowDangerous       bool
 }
@@ -127,6 +128,7 @@ func runnerFlags() (fs *flag.FlagSet, o *Options, env *envFlags, h *harnessFlags
 	fs.StringVar(&env.pass, "pass-env", "", "Comma-separated names to add for the harness session only, on top of the base list and ANTHROPIC_, CLAUDE_, and XAI_. The gate does not use this list. Never list a secret.")
 	fs.StringVar(&env.gatePass, "gate-pass-env", "", "Comma-separated names to add for the gate only, on top of the base list. A SCHMEIDE_ name is refused. Never list a secret.")
 	h = &harnessFlags{}
+	fs.StringVar(&h.order, "harnesses", "claude-code,grok", "Comma-separated harnesses in the order the runner tries them: claude-code, grok, or both. A harness whose check fails at startup is skipped. A session that hits its harness's usage limit continues on the next one, and a harness at its limit is not used again until the runner restarts.")
 	fs.StringVar(&h.claudeArgs, "claude-args", "--permission-mode acceptEdits", "Flags for each Claude Code session. The default only lets a session edit files in its worktree. Add to it to let sessions run commands such as the repo's tests. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
 	fs.StringVar(&h.grokArgs, "grok-args", "--permission-mode acceptEdits", "Flags for each Grok session. The default only lets a session edit files in its worktree. Flags that skip permission checks are refused without --allow-dangerous-harness-args.")
 	fs.BoolVar(&h.allowDangerous, "allow-dangerous-harness-args", false, "Accept --claude-args and --grok-args that skip permission checks: --dangerously-skip-permissions, or a --permission-mode other than acceptEdits. The default is off.")
@@ -168,6 +170,32 @@ func harnesses(claudeArgs, grokArgs string) []harness.Harness {
 		}
 	}
 	return list
+}
+
+// orderHarnesses returns the harnesses from list named in order, a
+// comma-separated --harnesses value, in that order.
+func orderHarnesses(list []harness.Harness, order string) ([]harness.Harness, error) {
+	byName := map[string]harness.Harness{}
+	var known []string
+	for _, h := range list {
+		byName[h.Name()] = h
+		known = append(known, h.Name())
+	}
+	var ordered []harness.Harness
+	for _, name := range splitList(strings.ReplaceAll(order, " ", "")) {
+		h, ok := byName[name]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("--harnesses lists %q; the known harnesses are %s", name, strings.Join(known, ", "))
+		case slices.Contains(ordered, h):
+			return nil, fmt.Errorf("--harnesses lists %q twice", name)
+		}
+		ordered = append(ordered, h)
+	}
+	if len(ordered) == 0 {
+		return nil, fmt.Errorf("--harnesses is empty; list one or more of %s", strings.Join(known, ", "))
+	}
+	return ordered, nil
 }
 
 // Usage is the help text of `schmeide runner`.
@@ -228,6 +256,15 @@ request is open counts toward --max-attempts.
 A harness session whose output has been silent for 15m is also canceled,
 and the issue comment says the session "produced no output for 15m0s". It
 is retried like a session timeout. The limit has no flag or config key.
+
+--harnesses (default claude-code,grok) is the order the runner tries its
+harnesses. The first one that is installed and logged in writes. A harness
+session that ends at its account's usage limit continues in the same
+worktree on the next listed harness that is ready and not at its limit,
+with a note on how far the last one got, and a harness at its limit is not
+used again until the runner restarts. When every ready harness is at its
+limit, the job fails without a retry, and so does every later job until it
+restarts.
 
 The permission floor is the same for Claude Code and Grok: a session may edit
 files in its worktree, and it is not handed flags that skip permission
@@ -297,11 +334,13 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		o.PassEnv = splitList(strings.ReplaceAll(env.pass, " ", ""))
 		o.GatePassEnv, err = gatePassEnv(env.gatePass)
 	}
+	if err == nil {
+		o.Harnesses, err = orderHarnesses(harnesses(h.claudeArgs, h.grokArgs), h.order)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "schmeide runner: %v\nRun 'schmeide runner --help' for usage.\n", err)
 		return 2
 	}
-	o.Harnesses = harnesses(h.claudeArgs, h.grokArgs)
 	o.Output = stderr
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		o.Confirm = confirm(bufio.NewReader(os.Stdin), stderr)

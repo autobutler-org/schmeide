@@ -7,7 +7,7 @@ the repository root, and everything here expands on it. Diagrams are Mermaid, so
 | ------------------------------------- | --------------------------------------------------------------------------------------- |
 | [System context](system-context.md)   | GitHub, the control node, runners, harnesses, NATS over TLS, what runs where            |
 | [Control node](control-node.md)       | webhook listener, embedded NATS, streams, subjects, consumers, KV, registration, tokens |
-| [Runner](runner.md)                   | job pipeline, trust, worktrees, brief, harness choice, gate, push, review, merge       |
+| [Runner](runner.md)                   | job pipeline, trust, worktrees, brief, harness choice, usage-limit fallback, gate, push, review, merge |
 | [Job flows](job-flows.md)             | sequence diagrams for the main paths and the failure paths                             |
 | [Dashboard](dashboard.md)             | `schmeide dashboard`: the status poll, the activity log, the ask panel and its claude session |
 | [Data](data.md)                       | JetStream streams and buckets, the work directory, trust files, config files, logs     |

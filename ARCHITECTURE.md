@@ -62,7 +62,9 @@ flowchart LR
   loaded from the base branch before the harness runs, so a session cannot weaken its own gate or turn on
   factory merge.
 - **Files are the session protocol.** A writer session leaves `.schmeide/pr.md`. A reviewer leaves
-  `.schmeide/review.md`. The runner reads and deletes them and never parses harness output.
+  `.schmeide/review.md`. The runner reads and deletes them and never parses harness output. The one exception
+  is in `internal/harness`: a session that exits with an error has the tail of its output checked for a usage
+  limit, so the runner can continue it on the next harness.
 - **Everything that can wait for a person does.** Review fix rounds and factory merge are off unless the repo
   turns them on in `[automate]`.
 

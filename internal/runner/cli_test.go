@@ -291,3 +291,57 @@ func TestParseFlagsFlagWinsOverUnparsableEnv(t *testing.T) {
 		t.Errorf("ack wait = %v, want 1m", o.AckWait)
 	}
 }
+
+func TestOrderHarnesses(t *testing.T) {
+	tests := []struct {
+		order   string
+		want    []string
+		wantErr string
+	}{
+		{order: "claude-code,grok", want: []string{"claude-code", "grok"}},
+		{order: "grok,claude-code", want: []string{"grok", "claude-code"}},
+		{order: " grok ", want: []string{"grok"}},
+		{order: "grok,codex", wantErr: `--harnesses lists "codex"; the known harnesses are claude-code, grok`},
+		{order: "grok,grok", wantErr: `--harnesses lists "grok" twice`},
+		{order: ",", wantErr: "--harnesses is empty; list one or more of claude-code, grok"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.order, func(t *testing.T) {
+			got, err := orderHarnesses(harnesses("", ""), tt.order)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("orderHarnesses = %v, want error %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, h := range got {
+				names = append(names, h.Name())
+			}
+			if !slices.Equal(names, tt.want) {
+				t.Errorf("order = %v, want %v", names, tt.want)
+			}
+		})
+	}
+}
+
+func TestMainRefusesAnUnknownHarness(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"--steward", "me", "--harnesses", "grok,codex"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("exit code %d, want 2; stderr: %s", code, stderr.String())
+	}
+	if want := `--harnesses lists "codex"; the known harnesses are claude-code, grok`; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestUsageDocumentsHarnessOrder(t *testing.T) {
+	for _, want := range []string{"--harnesses", "claude-code,grok", "usage limit", "restarts"} {
+		if !strings.Contains(Usage(), want) {
+			t.Errorf("Usage() does not contain %q", want)
+		}
+	}
+}

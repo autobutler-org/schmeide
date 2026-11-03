@@ -137,3 +137,32 @@ func TestFakeagentRunsInItsOwnSession(t *testing.T) {
 		})
 	}
 }
+
+func TestFakeagentUsageLimitIsErrUsageLimit(t *testing.T) {
+	for _, h := range fakeagentHarnesses() {
+		t.Run(h.Name(), func(t *testing.T) {
+			var out bytes.Buffer
+			err := h.Run(t.Context(), Request{Dir: t.TempDir(), Env: scriptEnv("stdout working\nstdout Claude AI usage limit reached|1700000000\nexit 1"), Output: &out})
+			var limited *UsageLimitError
+			if !errors.As(err, &limited) || !errors.Is(err, ErrUsageLimit) {
+				t.Fatalf("Run = %v, want a UsageLimitError", err)
+			}
+			if limited.Harness != h.Name() || !strings.Contains(limited.Tail, "working") {
+				t.Errorf("UsageLimitError = %+v, want harness %s and the output tail", limited, h.Name())
+			}
+			if !strings.Contains(out.String(), "usage limit reached") {
+				t.Errorf("Output = %q, want the session output passed through", out.String())
+			}
+		})
+	}
+}
+
+func TestFakeagentLimitTextOnSuccessIsNotAUsageLimit(t *testing.T) {
+	for _, h := range fakeagentHarnesses() {
+		t.Run(h.Name(), func(t *testing.T) {
+			if err := h.Run(t.Context(), Request{Dir: t.TempDir(), Env: scriptEnv("stdout added a rate limit to the client\nexit 0")}); err != nil {
+				t.Errorf("Run = %v, want nil: only a failed session is checked", err)
+			}
+		})
+	}
+}
