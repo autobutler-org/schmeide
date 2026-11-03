@@ -17,6 +17,12 @@
 //     files outside that directory.
 //   - Return nil from Run only when the session finished successfully, and a
 //     non-nil error for every other outcome.
+//   - Return an error wrapping [ErrUsageLimit], a [UsageLimitError] where the
+//     output is at hand, when the session failed because the account hit a
+//     usage, rate, spend, or credit limit, so the runner can continue the
+//     work on another harness. ClaudeCode and Grok tell this from the tail
+//     of the output of a session that exited with an error; it is the only
+//     output they read.
 //   - Stop when the context given to Run is canceled, and return an error
 //     that wraps the context's error.
 //   - Leave no process behind. When Run returns, for any reason, every

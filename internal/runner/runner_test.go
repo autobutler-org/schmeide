@@ -75,6 +75,8 @@ type world struct {
 	ackWait, stuckAfter time.Duration
 	// logs, when set, receives the runner's log. Nil discards it.
 	logs io.Writer
+	// more are harnesses offered after the one a test starts the runner with.
+	more []harness.Harness
 }
 
 func newWorld(t *testing.T) *world {
@@ -207,7 +209,7 @@ func (w *world) runnerWith(t *testing.T, steward string, h harness.Harness, pool
 		GitHubURL:    w.gitRoot,
 		GitName:      "schmeide[bot]",
 		GitEmail:     "schmeide[bot]@example.test",
-		Harnesses:    []harness.Harness{h},
+		Harnesses:    append([]harness.Harness{h}, w.more...),
 		AckWait:      ackWait,
 		StuckAfter:   w.stuckAfter,
 		RetryDelay:   10 * time.Millisecond,

@@ -134,6 +134,53 @@ A gate that fails without timing out also keeps its output out of the issue
 comment. The comment names the command and the failure, and the output tail is
 in the runner's log.
 
+### A harness runs out of usage
+
+A session can end because the harness's account hit a usage, rate, spend, or
+credit limit. `ClaudeCode.Run` and `Grok.Run` (`internal/harness`) keep the
+last 4000 bytes of the session output and, when the CLI exits non-zero, look
+for the limit's wording in it (`usageLimitMarkers` in
+`internal/harness/usage.go`), for example "Claude AI usage limit
+reached|<epoch>", "You've hit your limit", `"error":"rate_limit"`, "You've hit
+the rate limit for your plan.", "out of credits", or "Too Many Requests". A
+match returns `harness.ErrUsageLimit`. A CLI that exits 0, or whose message
+uses other words, is not a usage limit: the second is an ordinary session
+failure.
+
+The runner does not fail the attempt. `Runner.continueOnLimit` logs "harness
+ran out of usage; continuing the session on the next harness" with the
+`harness` and `next` names, and runs the same session again on the next
+harness in `--harnesses` order (default `claude-code,grok`) that passes
+`Check` and has not hit its limit:
+
+- It runs in the same worktree, with the partial work left uncommitted, and
+  gets a fresh session timeout and idle limit.
+- Its prompt starts with "You are continuing a session that ran out of
+  usage.", names the harness that stopped, and carries `git status --short`,
+  `git diff --stat`, and the end of the stopped session's output, then the
+  original prompt.
+- A worker session's new harness writes from then on, so the reviewer is
+  picked to differ from it. A reviewer session's new harness reviews only
+  that round; the writer stays the same.
+- The harness at its limit is refused for the rest of this job and every
+  later job until the runner restarts. The runner does not notice a limit
+  that resets; restart it to try the configured order from the beginning.
+
+When every ready harness is at its limit, the runner logs "every ready harness
+is at its usage limit; the job fails until the runner restarts" and the
+session fails with "every ready harness is at its usage limit: claude-code,
+grok; this runner refuses them until it restarts":
+
+- The failure is final: no retry and no attempt counted against
+  `--max-attempts`. The issue gets "schmeide could not finish this job and did
+  not open a pull request:" followed by that text.
+- Every later job this runner takes fails the same way at its first session,
+  without starting one, until the runner restarts.
+- In a reviewer or fix session after the pull request is open it is final
+  like any other session failure there, and the pull request stays open.
+- Any other session failure stays on the harness that failed and follows the
+  attempt rules above.
+
 ### A runner started in a terminal
 
 A runner run from an interactive terminal passes its stderr, that terminal, to

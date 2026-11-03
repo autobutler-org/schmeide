@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -103,8 +104,14 @@ func (g *Grok) Run(ctx context.Context, req Request) error {
 	cmd.Dir = req.Dir
 	cmd.Env = req.Env
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Stdout = req.Output
-	cmd.Stderr = req.Output
+	// The tail is kept to tell a usage limit from any other failure.
+	tail := &tailWriter{}
+	output := io.Writer(tail)
+	if req.Output != nil {
+		output = io.MultiWriter(req.Output, tail)
+	}
+	cmd.Stdout = output
+	cmd.Stderr = output
 	// The session leads its own process session, detached from the runner's
 	// terminal, so SIGTTOU and SIGTTIN cannot stop it when the runner runs in
 	// a terminal. As session leader it also leads its own process group, so
@@ -126,7 +133,7 @@ func (g *Grok) Run(ctx context.Context, req Request) error {
 	case errors.Is(err, exec.ErrWaitDelay):
 		return nil // grok itself exited 0; only a leftover child lingered
 	case err != nil:
-		return fmt.Errorf("grok session failed: %w", err)
+		return failure(g.Name(), "grok", err, tail)
 	}
 	return nil
 }

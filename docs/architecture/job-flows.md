@@ -44,6 +44,11 @@ sequenceDiagram
     R->>Q: status working
     R->>X: Run(brief + repomap), session env, session_timeout, 15m idle limit
     X->>W: edits files, writes .schmeide/pr.md
+    opt X ends at a usage limit (harness.ErrUsageLimit)
+        R->>R: continueOnLimit: mark X exhausted, nextWriter
+        R->>X: next harness: Run(continuation note + same prompt), fresh timeouts, same worktree
+        Note over R: no harness left: final failed "every ready harness is at its usage limit: ..."
+    end
     R->>Q: stage session_finished
     R->>W: prText, Commit
     R->>W: Run(gate), gate_timeout
@@ -312,3 +317,8 @@ process group as on a timeout. The error is a `timeoutError` with `idle` set, wh
 session produced no output for 15m0s", so it is retried, kept unwrapped by `finishSessionErr`, and commented
 exactly like a session timeout. The idle limit lives in the runner rather than in each harness so Claude Code
 and Grok, writer and reviewer, all get it from one place.
+
+`runHarness` sits inside `continueOnLimit`, so a session that ends at a usage limit (`harness.ErrUsageLimit`)
+runs again on the next harness with fresh deadlines, in the same worktree, with a continuation note in front of
+its prompt. The exhausted harness stays refused until the runner restarts. This holds for every session: writer, review fix, CI fix, and reviewer. See
+[Runner: usage-limit fallback](runner.md#usage-limit-fallback).

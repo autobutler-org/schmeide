@@ -20,6 +20,14 @@
 // token comes from the control node and is replaced with a new one when it
 // is within five minutes of expiry, so a job may run longer than one token
 // lives. The runner holds no other GitHub credential.
+// Options.Harnesses (--harnesses) is the order harnesses are tried in. A
+// session, worker or reviewer, that ends at a usage limit
+// (harness.ErrUsageLimit) runs again in the same worktree on the next ready
+// harness that has not hit its limit, with a note on the partial work in
+// front of its prompt. A harness at its limit is not used again until the
+// process restarts, and a worker session's new harness writes from then on.
+// When every ready harness is at its limit, the job fails finally, and so
+// does every later job until a restart.
 // Before every push it scans the lines the branch adds for credentials,
 // including the job's own installation token and the runner's NATS token, and
 // it revokes the delivery's current installation token when the delivery ends.
@@ -135,8 +143,9 @@ type Options struct {
 	// not. The gate's HOME and TMPDIR are a per-job scratch directory that
 	// is removed with the worktree. Never list a secret.
 	GatePassEnv []string
-	// Harnesses are the harnesses to offer. The first one that passes its
-	// check runs the jobs.
+	// Harnesses are the harnesses to offer, in the order they are tried
+	// (--harnesses). The first one that passes its check writes the jobs
+	// until it hits its usage limit; the next ready one then takes over.
 	Harnesses []harness.Harness
 	// Output receives harness session output. Nil discards it.
 	Output io.Writer
@@ -185,7 +194,13 @@ type Runner struct {
 	// Options.AckWait when another runner created a consumer first.
 	ackWait  time.Duration
 	statuses jetstream.Stream
-	harness  harness.Harness
+	// harness writes the jobs. It starts as the first ready harness in
+	// Options.Harnesses and moves on when a usage limit exhausts it.
+	harness harness.Harness
+	// exhausted holds the harnesses that hit their usage limit. They are
+	// not used again until the process restarts. Only the job's goroutine
+	// uses it, and Run works one job at a time.
+	exhausted map[harness.Harness]bool
 	// attempts is restored from the status stream for the current job. Only
 	// handle writes it, and Run works one job at a time.
 	attempts int
@@ -752,9 +767,107 @@ func (i idleWriter) Write(p []byte) (int, error) {
 	return i.w.Write(p)
 }
 
-// runSession runs one worker session with the runner's own harness.
+// runSession runs one worker session with the writer and returns its error
+// as finishSessionErr words it. When the writer hits its usage limit, the
+// session continues on the next ready harness, which writes from then on.
 func (r *Runner) runSession(ctx context.Context, limit time.Duration, req harness.Request) error {
-	return r.runHarness(ctx, r.harness, r.harness.Name(), limit, req)
+	h, err := r.continueOnLimit(ctx, r.harness, "", limit, req, r.nextWriter)
+	r.harness = h
+	return finishSessionErr(h.Name(), err)
+}
+
+// nextWriter is the first ready harness that has not hit its usage limit in
+// this process, or nil when there is none.
+func (r *Runner) nextWriter(ctx context.Context) harness.Harness {
+	for _, h := range r.opts.Harnesses {
+		if !r.exhausted[h] && h.Check(ctx) == nil {
+			return h
+		}
+	}
+	return nil
+}
+
+// errOutOfUsage is a session that no ready harness is left for: every one
+// hit its usage limit in this process. It is final, because this runner
+// refuses those harnesses until it restarts.
+var errOutOfUsage = errors.New("every ready harness is at its usage limit")
+
+// continueOnLimit runs one session on h, or on next's harness when h already
+// hit its usage limit. While the session ends at a usage limit, that harness
+// is marked exhausted and the same request runs again, in the same worktree
+// with a fresh timeout, on next's harness, with a note on how far the last
+// one got. It returns the harness that ran last, or h when none ran. suffix
+// follows the harness name in a timeout error, for example " reviewer".
+func (r *Runner) continueOnLimit(ctx context.Context, h harness.Harness, suffix string, limit time.Duration, req harness.Request, next func(context.Context) harness.Harness) (harness.Harness, error) {
+	prompt := req.Prompt
+	last := h
+	if r.exhausted[h] {
+		h = next(ctx)
+	}
+	for h != nil {
+		last = h
+		err := r.runHarness(ctx, h, h.Name()+suffix, limit, req)
+		if !errors.Is(err, harness.ErrUsageLimit) {
+			return h, err
+		}
+		if r.exhausted == nil {
+			r.exhausted = map[harness.Harness]bool{}
+		}
+		r.exhausted[h] = true
+		var tail string
+		if limited := (*harness.UsageLimitError)(nil); errors.As(err, &limited) {
+			tail = limited.Tail
+		}
+		if h = next(ctx); h != nil {
+			r.log.Warn("harness ran out of usage; continuing the session on the next harness",
+				"harness", last.Name(), "next", h.Name(), "session", strings.TrimSpace(last.Name()+suffix), "dir", req.Dir)
+			req.Prompt = continuation(ctx, last.Name(), req.Dir, tail) + prompt
+		}
+	}
+	var names []string
+	for _, o := range r.opts.Harnesses {
+		if r.exhausted[o] {
+			names = append(names, o.Name())
+		}
+	}
+	r.log.Warn("every ready harness is at its usage limit; the job fails until the runner restarts", "harnesses", strings.Join(names, ","), "dir", req.Dir)
+	return last, fmt.Errorf("%w: %s; this runner refuses them until it restarts", errOutOfUsage, strings.Join(names, ", "))
+}
+
+// continueLead starts the note a continued session's prompt begins with.
+const continueLead = "You are continuing a session that ran out of usage."
+
+// continuation is the note for the harness that takes over from name: what
+// is already in dir, and the end of name's output.
+func continuation(ctx context.Context, name, dir, tail string) string {
+	return fmt.Sprintf(`%s The %s harness started the task below and stopped partway through when its account hit a usage limit. Its partial work is already in this directory, uncommitted. Continue the task from where it stopped. Do not start over, and keep its work unless it is wrong.
+
+git status --short:
+%s
+
+git diff --stat:
+%s
+
+The end of the %[2]s session's output:
+%[5]s
+
+The task:
+
+`, continueLead, name, gitText(ctx, dir, "status", "--short"), gitText(ctx, dir, "diff", "--stat"), tail)
+}
+
+// gitText is the output of git args in dir, or a line that says why there is
+// none.
+func gitText(ctx context.Context, dir string, args ...string) string {
+	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	switch {
+	case err != nil:
+		return fmt.Sprintf("(git %s failed: %v)", strings.Join(args, " "), err)
+	case text == "":
+		return "(nothing)"
+	}
+	return text
 }
 
 // runHarness runs one session of h, worker or reviewer. Both deadlines are
@@ -810,7 +923,7 @@ func finishSessionErr(kind string, err error) error {
 		return nil
 	}
 	var timedOut timeoutError
-	if errors.As(err, &timedOut) {
+	if errors.As(err, &timedOut) || errors.Is(err, errOutOfUsage) {
 		return err
 	}
 	return fmt.Errorf("the %s session did not finish: %w", kind, err)
@@ -826,11 +939,14 @@ type outcome struct {
 	final bool
 }
 
+// failed is a failure a retry may change. Every harness at its usage limit
+// is final, because this runner refuses them until it restarts.
 func failed(err error) outcome {
 	return outcome{
 		state:   StateFailed,
 		detail:  err.Error(),
 		comment: "schmeide could not finish this job and did not open a pull request:\n\n" + err.Error(),
+		final:   errors.Is(err, errOutOfUsage),
 	}
 }
 
@@ -1003,7 +1119,7 @@ func (r *Runner) warnLintGate(ctx context.Context, gh forge.Forge, job control.J
 // ok is true when out.detail is the new pull request's URL.
 func (r *Runner) open(ctx context.Context, ws Workspace, gh forge.Forge, job control.Job, gate, branch, base string, limits deadlines) (out outcome, ok bool) {
 	r.report(job, StateWorking, r.harness.Name())
-	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), brief(job, gate)))); err != nil {
+	if err := r.runSession(ctx, limits.session, r.session(ws.Dir(), brief(job, gate))); err != nil {
 		return failed(err), false
 	}
 	r.mark(job, stage{Stage: stageSessionFinished, Branch: branch, Base: base})

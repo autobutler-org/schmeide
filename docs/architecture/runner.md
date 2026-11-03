@@ -7,14 +7,14 @@ request, then reviews it and, when the repo asks, merges it. It works one job at
 | Package or file | Owns |
 | --- | --- |
 | `internal/runner/cli.go` | `Main`, `runnerFlags`, `ParseFlags` (flag, then `SCHMEIDE_<NAME>`; a variable that does not parse for its flag is a usage error), `harnessFlags.check` (permission floor), `harnesses` (applies `--claude-args` and `--grok-args`), the terminal `confirm` prompt |
-| `internal/runner/runner.go` | `Options`, `Connect`, `New`, `register`, `Run`, `next`, `handle` (delivery, heartbeat, retries, ack), `work`, `execute`, `open`, `brief`, `prText`, `BranchName`, `gateOutcome`, the stage record (`mark`, `recordedStage`) |
+| `internal/runner/runner.go` | `Options`, `Connect`, `New`, `register`, `Run`, `next`, `handle` (delivery, heartbeat, retries, ack), `work`, `execute`, `open`, `brief`, `prText`, `BranchName`, `gateOutcome`, the stage record (`mark`, `recordedStage`), `runSession`, `runHarness`, `continueOnLimit`, `nextWriter`, `continuation` (usage-limit fallback) |
 | `internal/runner/workspace.go` | `Workspace` interface and the git `worktree` implementation: `newWorktree`, `Commit`, `Run` (the gate), `Push`, `Resume`, `Count`, `Restack`, `BaseMerged`, `Close` |
-| `internal/runner/review.go` | `review`, `reviewOnce`, `reviewer` (harness choice for review), `applyFindings`, `readVerdict`, `session` (every harness `Request`), `promptWithMap` |
+| `internal/runner/review.go` | `review`, `reviewOnce`, `reviewer` (harness choice for review), `nextReviewer`, `applyFindings`, `readVerdict`, `session` (every harness `Request`), `promptWithMap` |
 | `internal/runner/merge.go` | `mergeWhenGreen`, `judgeChecks`, `fixCheck`, `waitForStack`, `restack`, `retarget`, `stackedOn` |
 | `internal/runner/github.go` | `baseBranch` and `stackBelow` (stacked PR base), the `github` wrapper with `RetargetPull`, the outcome marker (`markOutcome`, `postedOutcome`), `pullNumber` |
 | `internal/runner/env.go` | `baseEnv`, `harnessPrefixes`, `harnessEnv`: the session environment allow-list |
 | `internal/runner/cache.go` | `goCacheEnv`: shared `GOCACHE`, `GOMODCACHE`, `GOFLAGS=-modcacherw` |
-| `internal/harness` | `Harness` interface (`Name`, `Check`, `Run`), `All()` (Claude Code first, then Grok), `ClaudeCode`, `Grok`, `WideningArg`, `Fake` for tests |
+| `internal/harness` | `Harness` interface (`Name`, `Check`, `Run`), `All()` (Claude Code first, then Grok), `ClaudeCode`, `Grok`, `WideningArg`, `ErrUsageLimit` and `UsageLimitError` with `usageLimited` (`usage.go`), `Fake` for tests |
 | `internal/forge` | `Forge` interface, `GitHub` (REST plus GraphQL for the merge queue), `Fake` |
 | `internal/repoconfig` | `Load` and `Parse` of `.schmeide/config.toml`: gate, `check_wait`, `gate_timeout`, `session_timeout`, `[automate]` |
 | `internal/trust` | `Check`: the per (work directory, origin) trust prompt and its record |
@@ -36,11 +36,11 @@ terminal. `New` then:
 2. `Connect`: dials `--nats-url` as user `<steward>` with `--nats-token`, inbox prefix `_INBOX_<steward>`,
    unlimited reconnects, then sends an empty request on `schmeide.token.<steward>`. Only a control node answers
    it, so a wrong URL fails here with a message saying what to check.
-3. `register`: requires `git` on `PATH`, runs `Check` on every harness and picks the first that passes as the
-   writer, opens the steward consumer and, with `--pool`, the pool consumer (`sharedConsumer`: created with
+3. `register`: requires `git` on `PATH`, runs `Check` on every harness in `--harnesses` order and picks the first
+   that passes as the writer, opens the steward consumer and, with `--pool`, the pool consumer (`sharedConsumer`: created with
    this runner's `--ack-wait` when missing, used unchanged when another runner created it), opens the
    `SCHMEIDE_STATUS` stream and `SCHMEIDE_STAGES` bucket (each optional, for older control nodes), and publishes
-   the `Registration` with the names of every harness that passed.
+   the `Registration` with the names of every harness that passed, in that order.
 
 `Run` loops on `next`, which fetches from the steward consumer with a one-second wait and, only when that times
 out and `--pool` is set, from the pool consumer. So a runner always takes its own steward's job first. It returns
@@ -245,7 +245,10 @@ The prompt goes in on stdin: `claude --print --output-format stream-json --verbo
 <args>`, where `<args>` defaults to `--permission-mode acceptEdits`. With `stream-json`, Claude Code writes each
 event (system init, assistant message, tool use, tool result, final result) to `Output` as one JSON line as it
 happens, so the runner's stderr shows where a session stopped. Nothing in the runner parses this output: the
-writer's results are the worktree and `.schmeide/pr.md`, and the reviewer's verdict is `.schmeide/review.md`. Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
+writer's results are the worktree and `.schmeide/pr.md`, and the reviewer's verdict is `.schmeide/review.md`.
+The one reader is the harness itself: each `Run` keeps the last 4000 bytes of the output (`tailWriter` in
+`internal/harness/usage.go`) and, only when the CLI exits with an error, checks that tail for a usage limit (see
+[Usage-limit fallback](#usage-limit-fallback)). Each session starts in its own process session (`syscall.SysProcAttr{Setsid:
 true}` in `internal/harness/claude.go` and `internal/harness/grok.go`), so it has no controlling terminal. A runner
 started in an interactive terminal passes that terminal to the session as `Output`; were the session only a
 background process group on it, the CLI's first terminal ioctl would get `SIGTTOU` and stop the session until
@@ -254,11 +257,52 @@ the session deadline killed it. The session leader also leads its own process gr
 
 ### Harness selection
 
-- **Writer.** The first harness in `harness.All()` (Claude Code, then Grok) whose `Check` passed at startup.
+- **Writer.** The first harness in `Options.Harnesses` whose `Check` passed at startup. `--harnesses` (default
+  `claude-code,grok`) sets that order; `orderHarnesses` in `internal/runner/cli.go` builds it from
+  `harnesses()`, and an unknown or repeated name is a usage error (exit 2). The registration lists the harnesses
+  that passed, in that order. A usage limit moves the writer to the next harness; see
+  [Usage-limit fallback](#usage-limit-fallback).
   `ClaudeCode.Check` reads `claude auth status --json`. `Grok.Check` reads the first line of `grok models`.
 - **Reviewer.** `Runner.reviewer` picks, at each round, the first harness other than the writer whose `Check`
-  passes now, and falls back to the writer. On a machine with both CLIs logged in, Grok reviews Claude Code's
-  change.
+  passes now, in `Options.Harnesses` order, and falls back to the writer. On a machine with both CLIs logged in
+  and the default order, Grok reviews Claude Code's change. A harness at its usage limit is skipped.
+
+### Usage-limit fallback
+
+A session that ends at a usage limit continues on the next harness. The pieces:
+
+- **Detection** (`internal/harness/usage.go`). `ClaudeCode.Run` and `Grok.Run` copy the session output into a
+  `tailWriter`. When the CLI exits non-zero (not on a cancel, and not on exit 0), `failure` calls
+  `usageLimited(tail)`, a case-insensitive match against `usageLimitMarkers`: `usage limit reached`,
+  `you've hit your`, `out of usage credits`, `usage credit limit reached`, `spend limit reached`,
+  `"error":"rate_limit"`, `rate_limit_error` (Claude Code), `rate limited`, `you hit your`, `out of credits`,
+  `spending limit`, `usage balance exhausted` (Grok), and `too many requests` (an HTTP 429 from either). A match
+  returns `*harness.UsageLimitError`, which wraps `harness.ErrUsageLimit`, carries the tail, and whose text is
+  "claude-code session ran out of usage" with no output in it. Anything else stays "claude session failed: ...".
+  The markers come from the wording of claude 2.1 and grok 1.0.70; a reworded message is an ordinary failure.
+- **Continuation** (`Runner.continueOnLimit` in `internal/runner/runner.go`). Every session goes through it:
+  `runSession` (writer, review fix, and CI fix sessions) and `reviewOnce`. On `errors.Is(err,
+  harness.ErrUsageLimit)` it marks the harness in `Runner.exhausted`, logs "harness ran out of usage; continuing
+  the session on the next harness" (keys `harness`, `next`, `session`, `dir`), and runs the same request again in
+  the same worktree, with a fresh `session_timeout` and idle limit, on the next harness. The prompt is the
+  original one with `continuation` in front: it starts "You are continuing a session that ran out of usage.",
+  names the harness that stopped, says its partial work is in the directory uncommitted and the task is to be
+  continued rather than started over, and carries `git status --short`, `git diff --stat`, and the
+  `UsageLimitError` tail.
+- **Which harness next.** For a worker session, `nextWriter`: the first harness in `Options.Harnesses` not
+  exhausted whose `Check` passes now. That harness becomes `Runner.harness`, the writer, from then on, so the
+  reviewer stays distinct from it. For a review session, `nextReviewer`: `reviewer` again, which skips exhausted
+  harnesses and falls back to the writer; the writer does not change.
+- **Process lifetime.** `Runner.exhausted` is never cleared. A harness that hit its limit is not run again by
+  this runner process, for this job or any later one; `continueOnLimit` goes straight to `next` when it is handed
+  an exhausted harness. A restart starts again from the first ready harness in `--harnesses` order.
+- **Every harness exhausted.** When no harness is left, the runner logs "every ready harness is at its usage
+  limit; the job fails until the runner restarts" and the session returns `errOutOfUsage`, whose text is
+  "every ready harness is at its usage limit: claude-code, grok; this runner refuses them until it restarts"
+  (the exhausted harnesses, in `Options.Harnesses` order). `finishSessionErr` keeps it unwrapped and `failed`
+  marks it final, so the job is not retried. Every later job in this process fails the same way at its first
+  session, without running one. After the pull request is open it is the review or merge failure that session
+  would have caused, which is final too.
 
 ## The gate
 

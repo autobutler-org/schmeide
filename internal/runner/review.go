@@ -178,23 +178,32 @@ func (r *Runner) review(ctx context.Context, ws Workspace, job control.Job, gate
 	return roundsExhausted(rounds, prURL)
 }
 
-// reviewer is the harness for a review session: the first ready harness other
-// than the one that wrote the change, or the writer when no other is ready.
-// opts.Harnesses is harness.All() with the runner's harness args applied.
+// reviewer is the harness for a review session: the first ready harness, in
+// opts.Harnesses (--harnesses) order, other than the writer and not at its
+// usage limit, or the writer when no other is.
 func (r *Runner) reviewer(ctx context.Context) harness.Harness {
 	for _, h := range r.opts.Harnesses {
-		if h != r.harness && h.Check(ctx) == nil {
+		if h != r.harness && !r.exhausted[h] && h.Check(ctx) == nil {
 			return h
 		}
 	}
 	return r.harness
 }
 
+// nextReviewer is the harness that continues a review session that ran out
+// of usage, or nil when the writer ran out too.
+func (r *Runner) nextReviewer(ctx context.Context) harness.Harness {
+	if h := r.reviewer(ctx); !r.exhausted[h] {
+		return h
+	}
+	return nil
+}
+
 // reviewOnce runs one fresh reviewer session and reads its verdict. The
-// deadlines match runSession's.
+// deadlines match runSession's, and so does the move to the next harness at a
+// usage limit, but the writer stays the same.
 func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job, sessionLimit time.Duration) (reviewVerdict, string, error) {
-	h := r.reviewer(ctx)
-	err := r.runHarness(ctx, h, h.Name()+" reviewer", sessionLimit, r.session(ws.Dir(), reviewBrief(job)))
+	h, err := r.continueOnLimit(ctx, r.reviewer(ctx), " reviewer", sessionLimit, r.session(ws.Dir(), reviewBrief(job)), r.nextReviewer)
 	if err := finishSessionErr(h.Name()+" reviewer", err); err != nil {
 		return 0, "", err
 	}
@@ -206,7 +215,7 @@ func (r *Runner) reviewOnce(ctx context.Context, ws Workspace, job control.Job, 
 // another review round should run.
 func (r *Runner) applyFindings(ctx context.Context, ws Workspace, job control.Job, gate, prURL, findings string, limits deadlines) (outcome, bool) {
 	r.report(job, StateWorking, r.harness.Name())
-	if err := finishSessionErr(r.harness.Name(), r.runSession(ctx, limits.session, r.session(ws.Dir(), fixBrief(job, gate, findings)))); err != nil {
+	if err := r.runSession(ctx, limits.session, r.session(ws.Dir(), fixBrief(job, gate, findings))); err != nil {
 		return reviewFailed(prURL, err), true
 	}
 	dropSessionNotes(ws.Dir())

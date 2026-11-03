@@ -547,19 +547,36 @@ in.
 
 1. Start a runner (JN-SETUP-019).
 2. Run `schmeide status --steward <login> --nats-token <token>`.
+3. Restart the runner with `--harnesses grok,claude-code` (or
+   `SCHMEIDE_HARNESSES=grok,claude-code`).
+4. Start it with `--harnesses grok,codex`.
 
 **Expected result:**
 
-- The runner's row lists `claude-code,grok` under HARNESSES.
-- Claude Code writes the change. The Grok CLI reviews it (JN-REV-001).
+- Step 2: the runner's row lists `claude-code,grok` under HARNESSES. Claude
+  Code writes the change. The Grok CLI reviews it (JN-REV-001).
+- Step 3: the runner logs `harnesses=grok,claude-code`. Grok writes and
+  Claude Code reviews.
+- Step 4: the runner exits with code 2 and prints `schmeide runner:
+  --harnesses lists "codex"; the known harnesses are claude-code, grok`. A name
+  listed twice prints `--harnesses lists "grok" twice`, and an empty list
+  prints `--harnesses is empty; list one or more of claude-code, grok`.
+- A listed harness whose check fails is skipped. When none passes, the runner
+  refuses to start with "no usable harness on this machine".
+- When the writer hits its usage limit, the job continues on the next listed
+  harness (JN-FAIL-026).
 
 **Notes:**
 
-- The writer is the first ready harness in the order Claude Code, then Grok.
-  Grok writes only when Claude Code is not usable.
+- The writer is the first ready harness in `--harnesses` order, default
+  `claude-code,grok`. The reviewer is the first other ready harness in the same
+  order, or the writer when no other is ready.
 - Covered by `TestAllOrdersClaudeCodeBeforeGrok`,
   `TestGrokSelectedOnlyWhenClaudeCodeIsNotUsable`,
-  `TestReviewRunsOnTheOtherReadyHarness`.
+  `TestReviewRunsOnTheOtherReadyHarness` in `internal/harness` and
+  `internal/runner`, and `TestOrderHarnesses`,
+  `TestMainRefusesAnUnknownHarness`, and `TestUsageDocumentsHarnessOrder` in
+  `internal/runner`.
 
 ---
 
