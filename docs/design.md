@@ -103,7 +103,7 @@ flowchart LR
 | 2 | GitHub delivers the webhook. The control node creates one job, with the assignee as steward, and stores the issue title and body from that delivery. | Done |
 | 3 | A runner belonging to the steward pulls the job. | Done |
 | 4 | When the assignee has a registered runner, the job stays on that steward's subject. When the assignee has no registered runner, the job is published on a pool subject. `--pool` defaults off. A runner that sets it registers as a pool runner. Pool runners share one consumer, work one job at a time, and take their own job first. The token, gate, review, and merge path are the same. | Done |
-| 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job. | Done |
+| 5 | The runner creates a git worktree on a new branch and starts a fresh harness session with a brief built from the title and body stored on the job, plus the issue's comments from people with write access, read when the runner takes the job. | Done |
 | 6 | The runner runs the repo's gate command. A gate failure is commented on the issue, without the command output, and no PR is opened. | Done |
 | 7 | The runner pushes the branch and opens a PR as the schmeide GitHub App. | Done |
 | 8 | An AI reviewer checks the PR. With `automate.review_fix = "on"`, the worker fixes what the reviewer finds until the review passes or the round limit is reached. Off, a request for changes leaves the PR open for a person. | Done |

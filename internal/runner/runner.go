@@ -966,6 +966,11 @@ func (r *Runner) work(ctx context.Context, gh forge.Forge, job control.Job, toke
 	if err := trust.Check(r.opts.WorkDir, origin, r.opts.Confirm); err != nil {
 		return failed(err)
 	}
+	body, err := withComments(ctx, gh, job.Issue, job.Body)
+	if err != nil {
+		return failed(err)
+	}
+	job.Body = body
 	branch := BranchName(job.Issue, job.Title)
 	// A redelivered job whose first runner died after opening the PR must not
 	// open a second one. The guard goes by the issue number, not the whole

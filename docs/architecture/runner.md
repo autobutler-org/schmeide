@@ -108,7 +108,10 @@ stateDiagram-v2
    [Credentials](credentials.md#refreshing-a-jobs-token).
 3. **Issue text.** A job with an empty title predates jobs carrying the issue text and fails with a message to
    relabel the issue.
-4. **Trust.** `trust.Check(workDir, origin, confirm)`. See [Trust prompt](#trust-prompt).
+4. **Trust.** `trust.Check(workDir, origin, confirm)`. See [Trust prompt](#trust-prompt). Then
+   `withComments` reads the issue's comments and appends to `job.Body` those whose author association is
+   `OWNER`, `MEMBER`, or `COLLABORATOR`, leaving out every bot's, oldest first and capped at 32 KiB
+   (`commentSection`). Every brief in the attempt quotes that body. A read error fails the attempt.
 5. **Existing pull request.** `IssuePull(issue, "all")` finds the first pull request whose head starts with
    `<issue>_`. When GitHub returns none but the stage record names a PR, the record is used, because GitHub can
    leave a just-opened PR out of its list. When a PR exists:
