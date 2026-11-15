@@ -30,7 +30,7 @@ the detail `round <n> of <max>`.
   Code and Grok both ready, Grok reviews Claude Code's change. With one
   harness, it reviews its own change.
 - The reviewer's brief has the issue's title and body from delivery time
-  (JN-PR-011).
+  (JN-PR-011), followed by the maintainers' issue comments (JN-PR-022).
 - Covered by `TestReviewRunsOnTheOtherReadyHarness` and
   `TestReviewStaysOnWriterWhenNoOtherHarnessIsReady`.
 

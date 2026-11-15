@@ -57,7 +57,9 @@ flowchart LR
   job is redelivered, and the stage record plus the `<issue>_` branch prefix keep the redelivery from opening a
   second pull request.
 - **The job carries the issue text.** The title and body are captured from the webhook that created the job. The
-  runner never re-reads the issue, so an edit after the ready label does not change the brief.
+  runner never re-reads them, so an edit after the ready label does not change the brief. Issue comments are the
+  exception: the runner reads them fresh at the start of each attempt and appends those from people with write
+  access to the body.
 - **The repo config is read before the session.** `.schmeide/config.toml` (gate, timeouts, `[automate]`) is
   loaded from the base branch before the harness runs, so a session cannot weaken its own gate or turn on
   factory merge.

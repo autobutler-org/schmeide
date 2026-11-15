@@ -70,9 +70,15 @@ type Issue struct {
 type Comment struct {
 	Body string `json:"body"`
 	User struct {
+		Login string `json:"login"`
 		// Type is "Bot" for an app's comment.
 		Type string `json:"type"`
 	} `json:"user"`
+	// AuthorAssociation is the author's relation to the repository: OWNER,
+	// MEMBER, and COLLABORATOR can write to it.
+	AuthorAssociation string `json:"author_association"`
+	// CreatedAt is when the comment was posted, in RFC 3339.
+	CreatedAt string `json:"created_at"`
 }
 
 // CheckRun is one check run on a commit.

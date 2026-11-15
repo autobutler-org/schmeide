@@ -61,6 +61,8 @@ const mergeDocs = "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request
 type comment struct {
 	body    string
 	created time.Time
+	// login and association are empty for the app's own comments.
+	login, association string
 }
 
 // Server is the fake. Start one with New.
@@ -237,8 +239,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if c.created.Before(after) {
 					continue
 				}
-				// Every comment here is the app's own, so each is a bot's.
-				found = append(found, map[string]any{"id": i + 1, "body": c.body, "user": map[string]string{"type": "Bot"}})
+				user, association := map[string]string{"login": "schmeide[bot]", "type": "Bot"}, "NONE"
+				if c.login != "" {
+					user, association = map[string]string{"login": c.login, "type": "User"}, c.association
+				}
+				found = append(found, map[string]any{"id": i + 1, "body": c.body, "user": user, "author_association": association, "created_at": c.created.UTC().Format(time.RFC3339)})
 			}
 			writeJSON(w, http.StatusOK, page(r, found))
 		case http.MethodPost:
@@ -450,6 +455,15 @@ func (s *Server) SetComments(issue int, bodies ...string) {
 		cs[i] = comment{body: body, created: now}
 	}
 	s.comments[strconv.Itoa(issue)] = cs
+}
+
+// AddUserComment adds a comment by a person with login, whose relation to
+// the repository is association (OWNER, MEMBER, COLLABORATOR, NONE, ...).
+func (s *Server) AddUserComment(issue int, login, association, body string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := strconv.Itoa(issue)
+	s.comments[key] = append(s.comments[key], comment{body: body, created: time.Now(), login: login, association: association})
 }
 
 // SetChecks sets the check runs every commit has.

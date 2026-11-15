@@ -292,6 +292,8 @@ waits.
   again to make a new job" (`TestJobWithoutIssueTextIsNotWorked`).
 - No automated test for the edit-after-delivery case. The job carries
   `Title` and `Body` from the webhook payload (`internal/control/intake.go`).
+- Comments are the exception: they are read fresh when the runner takes the
+  job (JN-PR-022).
 
 ---
 
@@ -544,3 +546,40 @@ default branch, and `6_b` targets `5_a`. Both pull requests are open.
   `TestGateRunsInAScratchHomeThatCloseRemoves`,
   `TestJobLocksGateGitAndHarnessEnvironments`, and
   `TestMainRefusesASchmeideGatePassEnv` in `internal/runner`. No e2e test.
+
+---
+
+### JN-PR-022: Issue comments from maintainers reach the brief
+
+**Preconditions:** JN-PR-001.
+
+**Steps:**
+
+1. Comment on the issue as someone with write access (owner, member, or
+   collaborator), for example "Stack this on #6, not main."
+2. Comment on the issue as someone without write access.
+3. Assign and label the issue, or add a comment between labeling and the
+   runner taking the job.
+
+**Expected result:**
+
+- The writer's brief has a section after the issue body that starts "Issue
+  comments, oldest first. Where a comment disagrees with the body above, the
+  later comment wins." It holds each comment from step 1 as `<login> on
+  <created_at>:` followed by the comment, oldest first.
+- The comment from step 2 is not in the brief. No bot's comment is, which
+  leaves out schmeide's own status and outcome comments.
+- The reviewer, review fix, and CI fix briefs carry the same section, because
+  it is appended to the job's body for the whole attempt.
+
+**Notes:**
+
+- The runner reads the comments with `forge.Comments` at the start of each
+  attempt (`withComments`, `internal/runner/github.go`), so a comment added
+  after the label landed is included. A failure to read them fails the attempt
+  with "read the issue's comments: ...", and the job is retried.
+- Kept comments are capped at 32 KiB in all (`commentsCap`). Over the cap the
+  oldest are left out and the section says "N older comments were left out to
+  fit." A newest comment over the cap on its own is cut to it.
+- Covered by `TestCommentSection`, `TestCommentSectionKeepsTheNewestUnderTheCap`,
+  and `TestBriefCarriesMaintainerComments` in `internal/runner`. No e2e test.

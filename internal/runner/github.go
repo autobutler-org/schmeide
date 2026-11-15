@@ -197,3 +197,68 @@ func pullNumber(prURL string) (int, error) {
 	}
 	return n, nil
 }
+
+// commentsLead starts the section of issue comments added to a job's issue
+// body.
+const commentsLead = "Issue comments, oldest first."
+
+// commentsCap bounds the comment text added to a job's issue body, so a long
+// thread cannot crowd out the rest of a prompt.
+const commentsCap = 32 << 10
+
+// writeAssociations are the author associations of people who can write to
+// the repository. Only their comments reach a prompt: the repositories are
+// public, and anyone else's comment is untrusted input.
+var writeAssociations = []string{"OWNER", "MEMBER", "COLLABORATOR"}
+
+// withComments returns body followed by the issue's comments from people who
+// can write to the repository, read fresh so a comment added after the ready
+// label landed is included. Every prompt that quotes the issue body then
+// carries them.
+func withComments(ctx context.Context, gh forge.Forge, issue int, body string) (string, error) {
+	comments, err := gh.Comments(ctx, issue, "")
+	if err != nil {
+		return "", fmt.Errorf("read the issue's comments: %w", err)
+	}
+	return body + commentSection(comments), nil
+}
+
+// commentSection renders the comments by people who can write to the
+// repository, leaving out every bot's, oldest first. Over commentsCap the
+// oldest are left out and the section says how many; a newest comment that is
+// over the cap alone is cut to it. No such comment gives an empty section.
+func commentSection(comments []forge.Comment) string {
+	kept := make([]string, 0, len(comments))
+	for _, c := range comments {
+		if c.User.Type == "Bot" || !slices.Contains(writeAssociations, c.AuthorAssociation) {
+			continue
+		}
+		kept = append(kept, fmt.Sprintf("%s on %s:\n%s", c.User.Login, c.CreatedAt, strings.TrimSpace(c.Body)))
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	if last := len(kept) - 1; len(kept[last]) > commentsCap {
+		kept[last] = kept[last][:commentsCap]
+	}
+	left, size := 0, 0
+	for i := len(kept) - 1; i >= 0; i-- {
+		size += len(kept[i])
+		if size > commentsCap {
+			left = i + 1
+			break
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\n\n" + commentsLead + " Where a comment disagrees with the body above, the later comment wins.\n")
+	switch {
+	case left == 1:
+		b.WriteString("1 older comment was left out to fit.\n")
+	case left > 1:
+		fmt.Fprintf(&b, "%d older comments were left out to fit.\n", left)
+	}
+	for _, k := range kept[left:] {
+		b.WriteString("\n---\n" + k + "\n")
+	}
+	return b.String()
+}
